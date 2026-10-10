@@ -863,6 +863,10 @@ pub(crate) fn update_resume(
 }
 
 /// `(done, total)` counts for tasks tagged with `session_id`.
+///
+/// Display only. The statusline data has no error channel, so an unreadable task file is left out
+/// of the counts instead of failing the line. Decisions that depend on the session use
+/// [`try_tasks_in_session`] (#2608).
 #[must_use]
 pub(crate) fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
     let tasks = tasks_in_session(state_dir, session_id);
@@ -919,7 +923,7 @@ pub(crate) fn session_summary(
         .into_iter()
         .find(|s| s.id == session_id)
         .ok_or_else(|| anyhow::anyhow!("no session '{session_id}' found"))?;
-    let tasks = tasks_in_session(state_dir, session_id);
+    let tasks = try_tasks_in_session(state_dir, session_id)?;
     let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
     let total = tasks.len() as u64;
 
@@ -970,23 +974,34 @@ pub(crate) fn missing_context_reminders(
     open_sessions_visible_to(state_dir, project, caller)
         .iter()
         .filter(|session| session.resume.needs_nudge())
-        .filter(|session| {
-            tasks_in_session(state_dir, &session.id)
-                .iter()
-                .any(|task| task.state != TaskState::Done)
-        })
-        .map(|session| {
-            let id = &session.id;
-            format!(
-                "Session '{label}' ({id}) has no resume context. If you recognize it as your \
-                 own, run `llmenv task session edit {id} --context \"...\" --issue N` so a \
-                 fresh agent can pick it up after /clear. If you don't recognize it, it \
-                 belongs to a different session — leave it alone.",
-                label = session.name.as_deref().unwrap_or(id.as_str()),
-            )
+        .filter_map(|session| match try_tasks_in_session(state_dir, &session.id) {
+            Ok(tasks) if tasks.iter().any(|task| task.state != TaskState::Done) => {
+                Some(missing_context_line(session))
+            }
+            Ok(_) => None,
+            // The unfinished check needs the whole session. A partial read cannot clear it, so the
+            // line says the session was not checked (#2608).
+            Err(e) => Some(format!(
+                "Session '{label}' ({id}) was not checked for resume context: the task store cannot \
+                 be read ({e:#}). Fix the task store, then run `llmenv task ls --all` to confirm.",
+                label = session.name.as_deref().unwrap_or(session.id.as_str()),
+                id = session.id,
+            )),
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// The reminder for one open session that has no resume context.
+fn missing_context_line(session: &Session) -> String {
+    let id = &session.id;
+    format!(
+        "Session '{label}' ({id}) has no resume context. If you recognize it as your \
+         own, run `llmenv task session edit {id} --context \"...\" --issue N` so a \
+         fresh agent can pick it up after /clear. If you don't recognize it, it \
+         belongs to a different session — leave it alone.",
+        label = session.name.as_deref().unwrap_or(id.as_str()),
+    )
 }
 
 /// The most characters of one session's resume text that the SessionStart reminder carries.

@@ -1211,7 +1211,10 @@ pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
         ),
         waiting_reminder(&tasks),
         session_finish_reminders(state_dir, None),
-        for_current_project(|project| empty_session_lines(state_dir, project, None).join("\n\n")),
+        for_current_project(|project| match store_for_reminder(state_dir) {
+            Ok(tasks) => empty_session_lines(state_dir, &tasks, project, None).join("\n\n"),
+            Err(warning) => warning,
+        }),
     ])
 }
 
@@ -1275,8 +1278,12 @@ struct IdleSession {
 /// (#2339). A `waiting` task makes a session quiet on purpose, so such a
 /// session is not idle.
 #[must_use]
-fn idle_sessions(state_dir: &Path, project: &str, caller: Option<&str>) -> Vec<IdleSession> {
-    let all_tasks = list_tasks(state_dir);
+fn idle_sessions(
+    state_dir: &Path,
+    all_tasks: &[Task],
+    project: &str,
+    caller: Option<&str>,
+) -> Vec<IdleSession> {
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     session::open_sessions_visible_to(state_dir, project, caller)
         .into_iter()
@@ -1317,13 +1324,28 @@ fn idle_session_reminders(state_dir: &Path, caller: Option<&str>) -> String {
     for_current_project(|project| idle_reminder_lines(state_dir, project, caller))
 }
 
+/// The tasks for a reminder, or the warning that replaces the reminder when the store cannot be
+/// read. A silent skip would tell the agent that nothing is open (#2608).
+fn store_for_reminder(state_dir: &Path) -> Result<Vec<Task>, String> {
+    try_list_tasks(state_dir).map_err(|e| {
+        format!(
+            "The task store cannot be read, so the task reminders were not checked ({e:#}). \
+             Fix the task store, then run `llmenv task ls --all` to confirm."
+        )
+    })
+}
+
 fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
+    let tasks = match store_for_reminder(state_dir) {
+        Ok(tasks) => tasks,
+        Err(warning) => return warning,
+    };
     let open_ids: Vec<String> = session::open_sessions_visible_to(state_dir, project, caller)
         .into_iter()
         .map(|s| s.id)
         .collect();
-    let stalled = relation::stalled_parent_lines(&list_tasks(state_dir), &open_ids);
-    let idle = idle_sessions(state_dir, project, caller)
+    let stalled = relation::stalled_parent_lines(&tasks, &open_ids);
+    let idle = idle_sessions(state_dir, &tasks, project, caller)
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1341,7 +1363,7 @@ fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) ->
             )
         })
         .collect::<Vec<_>>();
-    empty_session_lines(state_dir, project, caller)
+    empty_session_lines(state_dir, &tasks, project, caller)
         .into_iter()
         .chain(stalled)
         .chain(idle)
@@ -1430,8 +1452,12 @@ fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
 
 /// A line for each open session of `project` that holds no task at all (#2456). An empty session
 /// is an error state: the work goes on with nothing recorded.
-fn empty_session_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> Vec<String> {
-    let tasks = list_tasks(state_dir);
+fn empty_session_lines(
+    state_dir: &Path,
+    tasks: &[Task],
+    project: &str,
+    caller: Option<&str>,
+) -> Vec<String> {
     session::open_sessions_visible_to(state_dir, project, caller)
         .into_iter()
         .filter(|s| {
@@ -2979,6 +3005,16 @@ mod tests {
         );
     }
 
+    // #2608: an unreadable store must say so in the reminder, not print that no session is open.
+    #[test]
+    fn unreadable_store_reminder_warns_instead_of_reporting_no_work() {
+        let dir = TempDir::new().expect("test");
+        std::fs::write(dir.path().join("tasks"), "x").expect("test");
+        let reminder = idle_reminder_lines(dir.path(), &current_project(), None);
+        assert!(reminder.contains("task store cannot be read"), "{reminder}");
+        assert!(!reminder.contains("has no tasks"), "{reminder}");
+    }
+
     // #2468: the first idle reminder must already offer `wait`, for a step that needs the user.
     #[test]
     fn first_idle_reminder_offers_start_and_wait() {
@@ -3038,7 +3074,7 @@ mod tests {
         let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
         block_task(dir.path(), &first.slug, &second.slug).expect("test");
 
-        let idle = idle_sessions(dir.path(), &project, None);
+        let idle = idle_sessions(dir.path(), &list_tasks(dir.path()), &project, None);
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].session.id, session_id);
         assert_eq!(idle[0].next.slug, second.slug);
@@ -3295,7 +3331,7 @@ mod tests {
                     expected.insert(sid, open);
                 }
             }
-            let idle = idle_sessions(dir.path(), PROJECT, None);
+            let idle = idle_sessions(dir.path(), &list_tasks(dir.path()), PROJECT, None);
             let got: std::collections::BTreeMap<String, usize> = idle
                 .iter()
                 .map(|i| (i.session.id.clone(), i.open_count))
