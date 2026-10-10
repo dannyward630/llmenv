@@ -100,7 +100,26 @@ pub fn cwd_under_prefix(cwd: &str, prefix: &str) -> bool {
 }
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
+    ensure_utf8_env(&["LLMENV_CONFIG_DIR", "HOME"])?;
     config_dir_with_env(&|name| std::env::var(name).ok())
+}
+
+/// Fails when `name` is set to a value that is not valid UTF-8. The env closures read such a value
+/// as unset, so the default path would be used with no message (#2607).
+fn ensure_utf8(name: &str, value: Option<&std::ffi::OsStr>) -> anyhow::Result<()> {
+    match value.map(std::ffi::OsStr::to_str) {
+        Some(None) => {
+            anyhow::bail!("{name} is not valid UTF-8; set {name} to a UTF-8 value and retry")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// [`ensure_utf8`] for each of `names`, read from the process environment.
+fn ensure_utf8_env(names: &[&str]) -> anyhow::Result<()> {
+    names
+        .iter()
+        .try_for_each(|name| ensure_utf8(name, std::env::var_os(name).as_deref()))
 }
 
 /// [`config_dir`] with an injectable env-var provider so tests can exercise
@@ -128,6 +147,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn state_dir() -> anyhow::Result<PathBuf> {
+    ensure_utf8_env(&["LLMENV_STATE_DIR", "HOME"])?;
     state_dir_with_env(&|name| std::env::var(name).ok())
 }
 
@@ -333,6 +353,25 @@ fn write_owner_only_atomic_in_dir(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_utf8_rejects_a_value_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = std::ffi::OsStr::from_bytes(&[0xff, 0xfe]);
+        let err = ensure_utf8("LLMENV_STATE_DIR", Some(raw)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("LLMENV_STATE_DIR is not valid UTF-8"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ensure_utf8_accepts_unset_and_utf8_values() {
+        assert!(ensure_utf8("HOME", None).is_ok());
+        assert!(ensure_utf8("HOME", Some(std::ffi::OsStr::new("/home/u"))).is_ok());
+    }
 
     #[cfg(unix)]
     #[test]
