@@ -25,6 +25,7 @@ mod relevance;
 pub(crate) mod repeat_detect;
 mod session_ledger;
 mod session_state;
+mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
@@ -676,9 +677,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         .unwrap_or_default();
     let claude_session_id: Option<&str> =
         stdin_json.as_ref().and_then(|v| v["session_id"].as_str());
-    let claude_code_version = std::env::var("CLAUDE_CODE_VERSION")
-        .ok()
-        .unwrap_or_default();
+    let claude_code_version = crate::env_var::utf8_var("CLAUDE_CODE_VERSION")?.unwrap_or_default();
 
     let parsed = match HookEvent::from_str(event) {
         Ok(e) => e,

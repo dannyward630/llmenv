@@ -12,13 +12,14 @@
 //! the project counts as tracked work.
 //! Design: docs/design/issue-2438-task-tracking-nudges.md
 
-use std::iter::Peekable;
 use std::path::{Path, PathBuf};
-use std::str::Chars;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::TaskTracker;
+use crate::hook_run::shell_split::{
+    ends_task_before_commit, nesting_reason, runs_commit_or_pr, shell_segments,
+};
 use crate::task::Tracking;
 
 /// Skills that start a multi-step workflow, when `workflow_skills` is not set.
@@ -67,24 +68,28 @@ fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
     })
 }
 
-/// The state of a session. A missing file is a new session. `None` means the file exists but
-/// cannot be read, and the caller skips the nudge. A corrupt file is reset.
-fn load(path: &Path) -> Option<NudgeState> {
+/// The state of a session. A missing file is a new session. A corrupt file is reset. A file that
+/// exists but cannot be read is an error, and the message names the path.
+fn read_state(path: &Path) -> Result<NudgeState, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(NudgeState::default()),
-        Err(e) => {
-            tracing::error!("task nudge state {} cannot be read: {e}", path.display());
-            return None;
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(NudgeState::default()),
+        Err(e) => return Err(format!("{} cannot be read: {e}", path.display())),
     };
-    Some(serde_json::from_str(&text).unwrap_or_else(|e| {
+    Ok(serde_json::from_str(&text).unwrap_or_else(|e| {
         tracing::error!(
             "task nudge state {} is unreadable, reset: {e}",
             path.display()
         );
         NudgeState::default()
     }))
+}
+
+/// [`read_state`] for the hooks that fail soft: the error is logged, and the caller skips its nudge.
+fn load(path: &Path) -> Option<NudgeState> {
+    read_state(path)
+        .inspect_err(|e| tracing::error!("task nudge state {e}"))
+        .ok()
 }
 
 /// Whether the state was saved. A caller that depends on the state, such as the deny marker,
@@ -302,307 +307,24 @@ pub(crate) fn handle_stop(
     }
 }
 
-/// The deepest substitution nesting that the splitter follows. Deeper input fails closed, so
-/// the hook process stack does not grow with the input (#2544).
-const MAX_SUBSTITUTION_DEPTH: usize = 32;
-
-/// The command nests substitutions deeper than [`MAX_SUBSTITUTION_DEPTH`]. A caller treats the
-/// command as unsafe.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct NestingTooDeep;
-
-/// The reason a deny gives for a command nested past [`MAX_SUBSTITUTION_DEPTH`]. It names the
-/// limit and the fix, because a retry alone does not explain the refusal.
-pub(super) fn nesting_reason() -> String {
+/// The `__DENY__` text for a commit when the nudge state file cannot be read. The gate cannot
+/// tell whether the commit has a task, so it denies every attempt until the file is readable (#2630).
+fn state_unreadable_deny(error: &str) -> String {
     format!(
-        "this command nests substitutions more than {MAX_SUBSTITUTION_DEPTH} levels deep, so \
-         llmenv cannot check it. Split the command into smaller commands and run each one."
+        "__DENY__:llmenv blocked this commit or pull request: the task nudge state cannot be read \
+         ({error}). Fix the file or its permissions, then run the same command again. To turn this \
+         off, set features.task_tracker.enforce_commit to false."
     )
 }
 
-/// Move each live `$(...)`, `<(...)`, `>(...)`, and backtick substitution to the start of the
-/// segment that holds it, as its own `;`-separated part. Bash runs a substitution before the
-/// command that holds it, so the verdict must follow that order (#2544). Single quotes keep
-/// their text literal.
-fn split_substitutions(command: &str) -> Result<String, NestingTooDeep> {
-    split_at_depth(command, 0)
-}
-
-/// [`split_substitutions`] for one nesting level. `depth` counts the substitutions around
-/// `command`.
-fn split_at_depth(command: &str, depth: usize) -> Result<String, NestingTooDeep> {
-    if depth > MAX_SUBSTITUTION_DEPTH {
-        return Err(NestingTooDeep);
-    }
-    let mut out = String::with_capacity(command.len());
-    // The parts of the segment that is being read, and where that segment starts in `out`.
-    let mut hoisted = String::new();
-    let mut segment_start = 0;
-    let mut chars = command.chars().peekable();
-    let (mut single, mut double) = (false, false);
-    while let Some(c) = chars.next() {
-        let top = !single && !double;
-        match c {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            // An escaped character is not a quote, and not a substitution start. This matches
-            // `shell_segments`, so both passes agree on quote state.
-            '\\' if !single => {
-                out.push(c);
-                if let Some(next) = chars.next() {
-                    out.push(next);
-                }
-                continue;
-            }
-            '$' if !single && chars.peek() == Some(&'(') => {
-                chars.next();
-                let inner = split_at_depth(&take_until_close(&mut chars), depth + 1)?;
-                hoisted.push_str(&part(&inner));
-                continue;
-            }
-            '`' if !single => {
-                let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
-                hoisted.push_str(&part(&split_at_depth(&inner, depth + 1)?));
-                continue;
-            }
-            // Process substitution, `<(...)` and `>(...)`. Inside double quotes it is literal.
-            // Bash runs it alongside its command, not before it, so it stays in place (#2544).
-            '<' | '>' if !single && !double && chars.peek() == Some(&'(') => {
-                chars.next();
-                let inner = split_at_depth(&take_until_close(&mut chars), depth + 1)?;
-                out.insert_str(segment_start, &hoisted);
-                hoisted.clear();
-                out.push_str(&part(&inner));
-                segment_start = out.len();
-                continue;
-            }
-            ';' | '|' | '&' | '\n' if top => {
-                out.insert_str(segment_start, &hoisted);
-                hoisted.clear();
-                out.push(c);
-                segment_start = out.len();
-                continue;
-            }
-            _ => {}
-        }
-        out.push(c);
-    }
-    out.insert_str(segment_start, &hoisted);
-    Ok(out)
-}
-
-/// One substitution as a `;`-terminated part. The `;` on each side is a segment boundary for
-/// the splitter. The part sits outside any quote, because it goes at a segment start.
-fn part(inner: &str) -> String {
-    format!(";{inner};")
-}
-
-/// Take the text up to the `)` that closes a `$(` already read, counting nested parentheses.
-/// Quotes and escapes group as they do in the outer splitter, so a `)` inside quotes is text.
-fn take_until_close(chars: &mut Peekable<Chars<'_>>) -> String {
-    let mut depth = 0_usize;
-    let (mut single, mut double) = (false, false);
-    let mut inner = String::new();
-    while let Some(c) = chars.next() {
-        if single {
-            single = c != '\'';
-        } else {
-            match c {
-                '\\' => {
-                    inner.push(c);
-                    if let Some(next) = chars.next() {
-                        inner.push(next);
-                    }
-                    continue;
-                }
-                '\'' if !double => single = true,
-                '"' => double = !double,
-                ')' if !double && depth == 0 => break,
-                ')' if !double => depth = depth.saturating_sub(1),
-                '(' if !double => depth = depth.saturating_add(1),
-                _ => {}
-            }
-        }
-        inner.push(c);
-    }
-    inner
-}
-
-/// Split `command` into segments at the shell operators `;`, `|`, `&`, and a newline, and each
-/// segment into words. Quotes group a word and are dropped, so an operator inside quotes does not
-/// split. Each `$(...)`, `<(...)`, `>(...)`, and backtick substitution is split out first, so its
-/// command is a segment.
-///
-/// # Errors
-/// Returns [`NestingTooDeep`] when the substitutions nest past the depth bound.
-pub(super) fn shell_segments(command: &str) -> Result<Vec<Vec<String>>, NestingTooDeep> {
-    let command = split_substitutions(command)?;
-    let mut segments: Vec<Vec<String>> = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut quote: Option<char> = None;
-    let mut chars = command.chars();
-    let end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
-        if *in_word {
-            words.push(std::mem::take(word));
-            *in_word = false;
-        }
-    };
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some('"'), '\\') => {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                }
-            }
-            (Some(_), c) => word.push(c),
-            (None, '\'' | '"') => {
-                quote = Some(c);
-                in_word = true;
-            }
-            (None, '\\') => {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                    in_word = true;
-                }
-            }
-            (None, ';' | '|' | '&' | '\n') => {
-                end_word(&mut words, &mut word, &mut in_word);
-                if !words.is_empty() {
-                    segments.push(std::mem::take(&mut words));
-                }
-            }
-            (None, c) if c.is_whitespace() => end_word(&mut words, &mut word, &mut in_word),
-            (None, c) => {
-                word.push(c);
-                in_word = true;
-            }
-        }
-    }
-    end_word(&mut words, &mut word, &mut in_word);
-    if !words.is_empty() {
-        segments.push(words);
-    }
-    Ok(segments)
-}
-
-/// The program name of a word: `/usr/bin/git` is `git`.
-pub(super) fn program(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
-}
-
-/// Words that run the next command with another environment or privilege.
-const WRAPPERS: [&str; 7] = ["env", "sudo", "command", "time", "nohup", "exec", "nice"];
-
-/// The words of one segment after its group openers, env assignments, and wrappers. The first word
-/// is the program. The commit matcher and the task-end matcher both read a segment this way.
-pub(super) fn program_words(words: &[String]) -> Vec<&str> {
-    words
-        .iter()
-        .map(|w| w.trim_start_matches(['(', '{']))
-        .filter(|w| !w.is_empty())
-        .skip_while(|w| (w.contains('=') && !w.starts_with('-')) || WRAPPERS.contains(&program(w)))
-        .collect()
-}
-
-/// Whether one segment starts a commit or a pull request.
-fn starts_commit_or_pr(words: &[String]) -> bool {
-    let words = program_words(words);
-    let Some((first, tail)) = words.split_first() else {
-        return false;
-    };
-    match program(first) {
-        "gh" => {
-            let mut iter = tail.iter();
-            let mut subcommands: Vec<&str> = Vec::new();
-            while let Some(word) = iter.next() {
-                match *word {
-                    "-R" | "--repo" => {
-                        iter.next();
-                    }
-                    w if w.starts_with('-') => {}
-                    w => subcommands.push(w),
-                }
-                if subcommands.len() == 2 {
-                    break;
-                }
-            }
-            subcommands == ["pr", "create"]
-        }
-        "git" => {
-            let mut iter = tail.iter();
-            while let Some(word) = iter.next() {
-                match *word {
-                    "-C" | "-c" | "--git-dir" | "--work-tree" => {
-                        iter.next();
-                    }
-                    w if w.starts_with('-') => {}
-                    w => return w == "commit",
-                }
-            }
-            false
-        }
-        "sh" | "bash" | "zsh" => shell_script(tail).is_some_and(runs_commit_or_pr),
-        _ => false,
-    }
-}
-
-/// The script that a shell runs with `-c`. The flag may sit in a cluster, as in `bash -lc`.
-/// An option that takes a value, such as `-o pipefail`, skips its value. A long option such as
-/// `--noclobber` is not a cluster, and a script file has no `-c`.
-pub(super) fn shell_script<'a>(args: &[&'a str]) -> Option<&'a str> {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        let flags = arg.strip_prefix(['-', '+'])?;
-        let short = !flags.starts_with('-');
-        if arg.starts_with('-') && short && flags.contains('c') {
-            return rest.next().copied();
-        }
-        let takes_value =
-            matches!(*arg, "--rcfile" | "--init-file") || (short && flags.ends_with(['o', 'O']));
-        if takes_value {
-            rest.next();
-        }
-    }
-    None
-}
-
-/// Whether the shell command runs `git commit` or `gh pr create` in any of its parts. A command
-/// nested too deeply to split counts as one, so the gate fails closed.
-fn runs_commit_or_pr(command: &str) -> bool {
-    match shell_segments(command) {
-        Ok(segments) => segments.iter().any(|words| starts_commit_or_pr(words)),
-        Err(NestingTooDeep) => true,
-    }
-}
-
-/// Whether `llmenv task done <wip>` or `llmenv task wait <wip>` runs before the first commit or
-/// pull request segment. Another task's end does not end the task `wip`. A command nested too
-/// deeply to split may end the task, so it counts as ending it and the gate denies the commit.
-fn ends_task_before_commit(command: &str, wip: &str) -> bool {
-    let Ok(segments) = shell_segments(command) else {
-        return true;
-    };
-    for words in segments {
-        if starts_commit_or_pr(&words) {
-            return false;
-        }
-        if task_end_target(&words) == Some(wip) {
-            return true;
-        }
-    }
-    false
-}
-
-/// The task that a `llmenv task done` or `llmenv task wait` segment names, or `None`.
-fn task_end_target(words: &[String]) -> Option<&str> {
-    let words = program_words(words);
-    match words.as_slice() {
-        [first, "task", "done" | "wait", target, ..] if program(first) == "llmenv" => Some(*target),
-        _ => None,
-    }
+/// The `__DENY__` text for a commit when the task store cannot be read. The gate cannot tell
+/// whether a task is in progress, so it denies (#2630).
+fn store_unreadable_deny() -> String {
+    "__DENY__:llmenv blocked this commit or pull request: the task store cannot be read, so the \
+     gate cannot tell whether a task is in progress. Fix the task store under the state directory, \
+     then run the same command again. To turn this off, set features.task_tracker.enforce_commit \
+     to false."
+        .to_owned()
 }
 
 /// The `__DENY__` text for the first commit or pull request with no task in progress, or an
@@ -630,8 +352,9 @@ pub(crate) fn handle_pre_tool_use(
         return String::new();
     };
     let tracking = crate::task::tracking(state_dir);
-    let Some(mut state) = load(&path) else {
-        return String::new();
+    let mut state = match read_state(&path) {
+        Ok(state) => state,
+        Err(e) => return state_unreadable_deny(&e),
     };
     // The tracking is read before the command runs, so a task that this command ends still shows
     // as in progress. It does not count for the commit.
@@ -644,8 +367,8 @@ pub(crate) fn handle_pre_tool_use(
     };
     match tracking {
         Tracking::Unknown => {
-            tracing::error!("task commit gate off: the task store cannot be read");
-            String::new()
+            tracing::error!("task commit gate: the task store cannot be read");
+            store_unreadable_deny()
         }
         _ if wip_open => {
             if state.commit_denied {
@@ -688,6 +411,9 @@ pub(crate) fn handle_pre_tool_use(
 #[expect(clippy::unwrap_used, clippy::panic, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::hook_run::shell_split::{
+        MAX_SUBSTITUTION_DEPTH, NestingTooDeep, split_substitutions, take_until_close,
+    };
     use crate::task::session::{StartDecision, StartOutcome, start_session};
     use crate::task::{NewTask, ParentSpec, SessionChoice, add_task_with, done_task, start_task};
     use proptest::prelude::*;
@@ -755,6 +481,20 @@ mod tests {
             ("/usr/bin/git commit -m x", true),
             ("(git commit -m x)", true),
             ("{ git commit; }", true),
+            ("eval \"git commit -m x\"", true),
+            ("eval git commit -m x", true),
+            ("timeout 60 git commit", true),
+            ("timeout -s KILL 60 git commit", true),
+            ("env -i git commit", true),
+            ("env -u HOME git commit", true),
+            ("nice -n 5 git commit", true),
+            ("sudo -u root git commit", true),
+            ("xargs -n 1 git commit", true),
+            ("stdbuf -oL git commit", true),
+            ("setsid git commit", true),
+            ("eval \"echo hi\"", false),
+            ("timeout 60 git status", false),
+            ("env -i git status", false),
             ("bash -c \"git add . && git commit -m x\"", true),
             ("gh -R owner/repo pr create", true),
             ("gh pr create --title \"a && b\"", true),
@@ -1052,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn a_state_file_that_cannot_be_read_skips_the_nudge_and_a_corrupt_one_resets() {
+    fn a_state_file_that_cannot_be_read_denies_a_commit_and_skips_the_nudge() {
         let dir = TempDir::new().unwrap();
         let tracker = TaskTracker {
             nudge_after: Some(1),
@@ -1066,10 +806,10 @@ mod tests {
             handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path()),
             ""
         );
-        assert_eq!(
-            handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
-            ""
-        );
+        let deny = handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path());
+        assert!(deny.starts_with("__DENY__:"), "{deny}");
+        assert!(deny.contains("cannot be read"), "{deny}");
+        assert!(deny.contains(&path.display().to_string()), "{deny}");
         std::fs::remove_dir(&path).unwrap();
         std::fs::write(&path, "not json").unwrap();
         let text = handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
@@ -1077,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_task_store_never_denies_or_nudges() {
+    fn an_unreadable_task_store_denies_a_commit_and_skips_the_nudge() {
         let dir = TempDir::new().unwrap();
         // A file where the task store directory belongs: the store cannot be read.
         std::fs::write(dir.path().join("tasks"), "x").unwrap();
@@ -1086,10 +826,9 @@ mod tests {
             nudge_after: Some(1),
             ..TaskTracker::default()
         };
-        assert_eq!(
-            handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path()),
-            ""
-        );
+        let deny = handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path());
+        assert!(deny.starts_with("__DENY__:"), "{deny}");
+        assert!(deny.contains("task store cannot be read"), "{deny}");
         let edit = serde_json::json!({ "tool_name": "Edit" });
         assert_eq!(
             handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path()),

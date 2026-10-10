@@ -786,6 +786,11 @@ Nothing turns off the third item.
   ends first, and the gate denies the commit.
   A command that nests substitutions more than 32 levels deep is denied on every attempt, with a message that names
   the limit and says to split the command.
+  (changed in v3.13.0) The gate also looks through the wrappers `env`, `sudo`, `doas`, `nice`, `ionice`, `nohup`, `time`,
+  `exec`, `command`, `timeout`, `stdbuf`, `setsid`, `xargs`, `caffeinate`, and `eval`, with their options.
+  So `timeout 60 git commit` and `eval "git commit -m x"` are denied like a plain `git commit`.
+  (changed in v3.13.0) When the nudge state file or the task store cannot be read, the gate denies the commit and
+  names the file and the error. It does not allow the commit on a guess.
 
 Two more reminders do not depend on `nudges`.
 A reminder for a parent task in progress shows how many of its sub-tasks are done, in progress, waiting, and not started.

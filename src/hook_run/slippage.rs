@@ -11,7 +11,7 @@
 //! enforcement.
 
 use crate::config::SlippageControl;
-use crate::hook_run::task_nudge::{
+use crate::hook_run::shell_split::{
     NestingTooDeep, nesting_reason, program, program_words, shell_script, shell_segments,
 };
 
@@ -929,6 +929,20 @@ mod tests {
     fn modifying_detection_fails_closed_on_nesting_past_the_bound() {
         let nested = format!("{}ls{}", "$(".repeat(40), ")".repeat(40));
         assert!(is_modifying(&nested));
+    }
+
+    #[test]
+    fn modifying_detection_sees_writes_behind_eval_and_timeout_wrappers() {
+        for command in [
+            "eval \"rm build\"",
+            "timeout 5 rm build",
+            "timeout -s KILL 5 rm build",
+            "nice -n 5 rm build",
+        ] {
+            assert!(is_modifying(command), "missed a write in {command:?}");
+        }
+        assert!(!is_modifying("eval \"ls build\""));
+        assert!(!is_modifying("timeout 5 ls build"));
     }
 
     #[test]
