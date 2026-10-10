@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- The task commit gate sees a commit behind `eval`, `timeout`, `env`, `nice`, `sudo`, `xargs`, `stdbuf`, `setsid`, and the other wrappers, with their options. `timeout 60 git commit` and `eval "git commit -m x"` are denied like a plain `git commit`. The slippage check sees a write behind `eval` and `timeout` the same way (#2627, #2542) [fix:hook]
+- The task commit gate denies a commit when the task nudge state file cannot be read, or when the task store cannot be read. The deny names the file and the error, instead of allowing the commit (#2630) [fix:hook]
+- Session reminders say that the task store cannot be read, instead of reporting that no session is open. `llmenv task session summary` fails with an error when a task file in the session cannot be read (#2608) [fix:task]
+- A non-UTF-8 `LLMENV_CONFIG_DIR`, `LLMENV_STATE_DIR`, `HOME`, or `XDG_STATE_HOME` fails with an error that names the variable. A non-UTF-8 `CLAUDE_CODE_VERSION` is an error in the hook, and `llmenv doctor` warns about a non-UTF-8 token-efficiency variable, instead of falling back silently (#2607) [fix:cli]
+
 ## [3.12.2] - 2026-10-10
 
 3.12.2 is a bug-fix release for 3.12.1.
