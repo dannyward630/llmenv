@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.12.2] - 2026-10-10
+
 3.12.2 is a bug-fix release for 3.12.1.
 It makes the task commit gate harder to slip past, limits where llmenv connects and writes, and replaces a set of silent failures with errors that name the problem.
 
@@ -1122,7 +1124,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.1...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.2...HEAD
+[3.12.2]: https://github.com/phaedrus1992/llmenv/compare/v3.12.1...v3.12.2
 [3.12.1]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0...v3.12.1
 [3.12.0]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...v3.12.0
 [3.11.2]: https://github.com/phaedrus1992/llmenv/compare/v3.11.1...v3.11.2
