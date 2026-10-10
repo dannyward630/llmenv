@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.12.2] - 2026-10-10
+
 3.12.2 is a bug-fix release for 3.12.1.
 It makes the task commit gate harder to slip past, limits where llmenv connects and writes, and replaces a set of silent failures with errors that name the problem.
 
