@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use llmenv_paths::{state_dir, write_owner_only_atomic};
 
 /// Cap on the correlation map's entry count (#509 item 2). Nothing ever
@@ -55,15 +56,8 @@ pub(crate) fn state_path() -> PathBuf {
 /// over corruption detection (contrast: #522 treats corrupt `installed_plugins.json`
 /// as a hard error to avoid losing version pins).
 fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
-    let s = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        // A missing file is the normal first run, so it is not a warning.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::default()),
-        Err(e) => anyhow::bail!(
-            "cannot read the session map {}: {e}. Fix its permissions, or remove the file to \
-             start over.",
-            path.display()
-        ),
+    let Some(s) = read_map_text(path)? else {
+        return Ok(BTreeMap::default());
     };
     Ok(serde_json::from_str(&s).unwrap_or_else(|e| {
         tracing::warn!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
@@ -71,8 +65,51 @@ fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     }))
 }
 
+/// Read the map text at `path`. `None` means the file is missing.
+fn read_map_text(path: &Path) -> anyhow::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        // A missing file is the normal first run, so it is not a warning.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => anyhow::bail!(
+            "cannot read the session map {}: {e}. Fix its permissions, or remove the file to \
+             start over.",
+            path.display()
+        ),
+    }
+}
+
+/// Load the map before a write. A file that does not parse is moved to
+/// `transcript-sessions.json.corrupt` first. Without the move, the write would
+/// replace the file and erase every other mapping in it (#2658).
+fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    let Some(s) = read_map_text(path)? else {
+        return Ok(BTreeMap::default());
+    };
+    match serde_json::from_str(&s) {
+        Ok(map) => Ok(map),
+        Err(e) => {
+            let aside = path.with_extension("json.corrupt");
+            std::fs::rename(path, &aside).with_context(|| {
+                format!(
+                    "moving the corrupt session map {} aside to {}",
+                    path.display(),
+                    aside.display()
+                )
+            })?;
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                aside = %aside.display(),
+                "corrupt transcript-sessions.json moved aside, starting a new map"
+            );
+            Ok(BTreeMap::default())
+        }
+    }
+}
+
 fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    let mut map = load_at(path)?;
+    let mut map = load_for_write(path)?;
     // Evict before the insert. Evicting after it could drop the new key itself, when that key
     // sorts first, and the lookup for this session would then miss.
     if !map.contains_key(claude_session_id) && map.len() >= MAX_CORRELATION_ENTRIES {
@@ -97,14 +134,15 @@ fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyh
 /// Crate-internal: lets callers that already resolved `state_path()` (e.g. one
 /// hook invocation handling several events) avoid re-resolving it, and lets
 /// tests exercise this without touching the global state-dir env var.
-#[must_use]
-pub(crate) fn lookup_session_at(path: &Path, claude_session_id: &str) -> Option<String> {
-    // A lookup writes nothing, so an unreadable map only costs this session its correlation.
-    let map = load_at(path).unwrap_or_else(|e| {
-        tracing::warn!("{e:#}. This session starts a new transcript.");
-        BTreeMap::default()
-    });
-    map.get(claude_session_id).cloned()
+///
+/// # Errors
+/// The map file exists but cannot be read. A caller MUST NOT start a new
+/// transcript then, because it could not record the link (#2658).
+pub(crate) fn lookup_session_at(
+    path: &Path,
+    claude_session_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(load_at(path)?.get(claude_session_id).cloned())
 }
 
 /// Record the correlation into the map at `path` (read-modify-write, atomic,
@@ -172,8 +210,47 @@ mod tests {
         let result = record_at(&path, "c", "icm-c");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(result.is_err(), "an unreadable map must fail the record");
-        assert_eq!(lookup_session_at(&path, "a").as_deref(), Some("icm-a"));
-        assert_eq!(lookup_session_at(&path, "b").as_deref(), Some("icm-b"));
+        assert_eq!(
+            lookup_session_at(&path, "a").unwrap().as_deref(),
+            Some("icm-a")
+        );
+        assert_eq!(
+            lookup_session_at(&path, "b").unwrap().as_deref(),
+            Some("icm-b")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lookup_on_an_unreadable_map_is_an_error_not_a_miss() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        record_at(&path, "a", "icm-a").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let result = lookup_session_at(&path, "a");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // A miss would start a new transcript that can never be linked (#2658).
+        assert!(
+            result.is_err(),
+            "an unreadable map must not look like a miss"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_map_is_moved_aside_before_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        std::fs::write(&path, "{not valid json").unwrap();
+        record_at(&path, "claude-new", "icm-new").unwrap();
+
+        let aside = dir.path().join("transcript-sessions.json.corrupt");
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "{not valid json");
+        assert_eq!(
+            lookup_session_at(&path, "claude-new").unwrap().as_deref(),
+            Some("icm-new")
+        );
     }
 
     #[test]
@@ -185,7 +262,10 @@ mod tests {
         }
         // "aaa" sorts before every "claude-" key, so pop_first would have dropped it at once.
         record_at(&path, "aaa", "icm-new").unwrap();
-        assert_eq!(lookup_session_at(&path, "aaa").as_deref(), Some("icm-new"));
+        assert_eq!(
+            lookup_session_at(&path, "aaa").unwrap().as_deref(),
+            Some("icm-new")
+        );
         assert_eq!(load_at(&path).unwrap().len(), MAX_CORRELATION_ENTRIES);
     }
 
