@@ -239,7 +239,7 @@ pub(crate) fn try_list_tasks(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
 /// [`try_list_tasks`], but a task file that cannot be read is an error and not a skipped entry.
 /// A decision or a reminder that reads the store uses this, so it never sees a partial view
 /// (#2608).
-pub(crate) fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
+fn list_tasks_strict(state_dir: &Path) -> anyhow::Result<Vec<Task>> {
     read_tasks(state_dir, UnreadablePolicy::Fail)
 }
 
