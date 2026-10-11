@@ -549,6 +549,11 @@ mod tests {
             ("env -i git status", false),
             ("env -S 'git commit -m x'", true),
             ("env -i -S 'git commit'", true),
+            ("FOO=1 env -S 'git commit'", true),
+            ("env -u HOME -S 'git commit'", true),
+            ("env FOO=1 -S 'git commit'", true),
+            ("env --split-string='git commit'", true),
+            ("env '-Sgit commit'", true),
             ("env git commit -S", true),
             ("timeout --signal KILL 60 git commit", true),
             ("timeout --kill-after=5 60 git commit", true),
@@ -815,7 +820,7 @@ mod tests {
         assert_eq!(handle_pre_tool_use(&on, &edit, Some("s1"), dir.path()), "");
         // A payload without a session id cannot be checked, so the commit is denied (#2630).
         let no_session = handle_pre_tool_use(&on, &bash("git commit"), None, dir.path());
-        assert!(no_session.contains("has no session id"), "{no_session}");
+        assert!(no_session.contains("has no session id"));
         assert_eq!(
             handle_pre_tool_use(&on, &bash("git status"), None, dir.path()),
             ""
@@ -875,13 +880,40 @@ mod tests {
             ""
         );
         let deny = handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path());
-        assert!(deny.starts_with("__DENY__:"), "{deny}");
-        assert!(deny.contains("cannot be read"), "{deny}");
-        assert!(deny.contains(&path.display().to_string()), "{deny}");
+        assert!(deny.starts_with("__DENY__:"));
+        assert!(deny.contains("cannot be read"));
+        assert!(deny.contains(&path.display().to_string()));
         std::fs::remove_dir(&path).unwrap();
         std::fs::write(&path, "not json").unwrap();
         let text = handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path());
         assert!(text.contains("1 file edits"), "{text}");
+    }
+
+    #[test]
+    fn unsaved_state_deny_names_the_path_and_denies() {
+        let deny = unsaved_state_deny(Path::new("/state/task_nudge/one.json"));
+        assert!(deny.starts_with("__DENY__:"));
+        assert!(deny.contains("/state/task_nudge/one.json cannot be saved"));
+    }
+
+    #[test]
+    fn state_dir_deny_covers_only_a_commit_with_the_gate_on() {
+        let error = anyhow::anyhow!("HOME is not valid UTF-8");
+        let on = TaskTracker::default();
+        let off = TaskTracker {
+            enforce_commit: false,
+            ..TaskTracker::default()
+        };
+        let deny = state_dir_deny(&on, &bash("git commit -m x"), &error).unwrap();
+        assert!(deny.starts_with("__DENY__:"));
+        assert!(deny.contains("HOME is not valid UTF-8"));
+        assert_eq!(state_dir_deny(&off, &bash("git commit"), &error), None);
+        assert_eq!(state_dir_deny(&on, &bash("git status"), &error), None);
+        let edit =
+            serde_json::json!({ "tool_name": "Edit", "tool_input": { "command": "git commit" } });
+        assert_eq!(state_dir_deny(&on, &edit, &error), None);
+        let no_command = serde_json::json!({ "tool_name": "Bash" });
+        assert_eq!(state_dir_deny(&on, &no_command, &error), None);
     }
 
     #[test]
@@ -895,8 +927,8 @@ mod tests {
             ..TaskTracker::default()
         };
         let deny = handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path());
-        assert!(deny.starts_with("__DENY__:"), "{deny}");
-        assert!(deny.contains("task store cannot be read"), "{deny}");
+        assert!(deny.starts_with("__DENY__:"));
+        assert!(deny.contains("task store cannot be read"));
         let edit = serde_json::json!({ "tool_name": "Edit" });
         assert_eq!(
             handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path()),

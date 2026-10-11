@@ -947,6 +947,9 @@ mod tests {
         }
         assert!(!is_modifying("eval \"ls build\""));
         assert!(!is_modifying("timeout 5 ls build"));
+        assert!(is_modifying("git --no-pager push"));
+        assert!(is_modifying("git -C repo reset --hard"));
+        assert!(!is_modifying("git -C repo status"));
     }
 
     #[test]
