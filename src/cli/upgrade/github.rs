@@ -19,40 +19,62 @@ pub(super) fn fetch_latest(
     base_url: &str,
 ) -> Result<GhRelease> {
     let url = format!("{base_url}/repos/phaedrus1992/llmenv/releases/latest");
-    let text = get_text(client, base_url, &url)?;
+    let not_found = " (no stable release is published yet; try --track beta)";
+    let text = get_text(client, base_url, &url, not_found)?;
     parse_json(&url, &text)
 }
 
 /// Fetch releases and return the first non-draft (beta track).
 pub(super) fn fetch_beta(client: &reqwest::blocking::Client, base_url: &str) -> Result<GhRelease> {
     let url = format!("{base_url}/repos/phaedrus1992/llmenv/releases?per_page=10");
-    let text = get_text(client, base_url, &url)?;
+    let text = get_text(client, base_url, &url, "")?;
     let releases: Vec<GhRelease> = parse_json(&url, &text)?;
     releases
         .into_iter()
         .find(|r| !r.draft)
-        .context("no published releases found")
+        .with_context(|| format!("no published releases found at {url} on the beta track"))
 }
 
-/// GET a GitHub API URL and return its body. A non-success status names the URL. It also
-/// names the override when `base_url` is not the public API, so a wrong base path, a proxy,
-/// and a real missing release do not look the same.
-fn get_text(client: &reqwest::blocking::Client, base_url: &str, url: &str) -> Result<String> {
+/// GET a GitHub API URL and return its body. A non-success status names the URL and quotes the
+/// start of the error body, which GitHub uses to explain a 403 rate limit. `not_found_hint`
+/// is added to a 404. It also names the override when `base_url` is not the public API, so a
+/// wrong base path, a proxy, and a real missing release do not look the same.
+fn get_text(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    url: &str,
+    not_found_hint: &str,
+) -> Result<String> {
     let resp = client
         .get(url)
         .send()
         .with_context(|| format!("failed to query GitHub releases API at {url}"))?;
     let status = resp.status();
     if !status.is_success() {
-        let hint = if base_url == DEFAULT_API_BASE {
-            ""
-        } else {
-            " (check LLMENV_UPGRADE_GITHUB_API, which is set)"
-        };
-        bail!("GitHub API returned {status} for {url}{hint}");
+        let body = resp
+            .text()
+            .unwrap_or_else(|e| format!("(error body unreadable: {e})"));
+        let excerpt: String = body.chars().take(BODY_EXCERPT_CHARS).collect();
+        let hint = failure_hint(status, base_url, not_found_hint);
+        bail!("GitHub API returned {status} for {url}{hint}; body starts with {excerpt:?}");
     }
     resp.text()
         .with_context(|| format!("failed to read the GitHub API response from {url}"))
+}
+
+/// The extra advice for a failed GitHub request, chosen by its status and base URL.
+fn failure_hint(status: reqwest::StatusCode, base_url: &str, not_found_hint: &str) -> String {
+    let mut hint = String::new();
+    if status == reqwest::StatusCode::FORBIDDEN {
+        hint.push_str(" (rate limited or access denied; wait, then retry)");
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        hint.push_str(not_found_hint);
+    }
+    if base_url != DEFAULT_API_BASE {
+        hint.push_str(" (check LLMENV_UPGRADE_GITHUB_API, which is set)");
+    }
+    hint
 }
 
 /// Parse a GitHub response body. On failure the error shows the start of the body.
@@ -80,5 +102,32 @@ mod tests {
             let quoted = format!("{excerpt:?}");
             prop_assert!(msg.contains(&quoted));
         }
+    }
+
+    #[test]
+    fn forbidden_hints_at_rate_limit() {
+        let hint = failure_hint(reqwest::StatusCode::FORBIDDEN, DEFAULT_API_BASE, "");
+        assert!(
+            hint.contains("rate limited"),
+            "403 must explain the limit: {hint}"
+        );
+    }
+
+    #[test]
+    fn not_found_adds_the_given_hint_only_for_404() {
+        let stable = " (try --track beta)";
+        let hint = failure_hint(reqwest::StatusCode::NOT_FOUND, DEFAULT_API_BASE, stable);
+        assert_eq!(hint, stable);
+        let other = failure_hint(reqwest::StatusCode::BAD_GATEWAY, DEFAULT_API_BASE, stable);
+        assert!(
+            other.is_empty(),
+            "a 502 must not suggest a track: {other:?}"
+        );
+    }
+
+    #[test]
+    fn overridden_base_names_the_override_variable() {
+        let hint = failure_hint(reqwest::StatusCode::BAD_GATEWAY, "http://proxy.test", "");
+        assert!(hint.contains("LLMENV_UPGRADE_GITHUB_API"), "{hint}");
     }
 }
