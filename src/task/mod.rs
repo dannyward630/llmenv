@@ -1530,9 +1530,12 @@ fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Ve
             return Ok(Vec::new());
         }
     };
-    let mut tasks = filter_tasks_for_project(state_dir, &project, list_tasks_strict(state_dir)?);
+    // Strict session reads: a corrupt session file must reach the Stop reminder as an error,
+    // not drop its tasks silently (#2628).
+    let project_ids = session::try_session_ids_for_project(state_dir, &project)?;
+    let mut tasks = keep_tasks_in_sessions(list_tasks_strict(state_dir)?, &project_ids);
     if caller.is_some() {
-        let visible = session::session_ids_visible_to(state_dir, &project, caller);
+        let visible = session::try_session_ids_visible_to(state_dir, &project, caller)?;
         tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));
     }
     Ok(tasks)
@@ -1552,6 +1555,14 @@ pub(crate) fn filter_tasks_for_project(
     tasks: Vec<Task>,
 ) -> Vec<Task> {
     let session_ids = session::session_ids_for_project(state_dir, project);
+    keep_tasks_in_sessions(tasks, &session_ids)
+}
+
+/// Keep the tasks whose session is in `session_ids`. A task with no session is dropped.
+fn keep_tasks_in_sessions(
+    tasks: Vec<Task>,
+    session_ids: &std::collections::HashSet<String>,
+) -> Vec<Task> {
     tasks
         .into_iter()
         .filter(|t| {

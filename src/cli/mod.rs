@@ -4168,10 +4168,8 @@ fn run_task_session_command(
             let id = resolve_session_id(state_dir, &project, id)?;
             // Validate the session exists rather than printing "0/0 done" for
             // a typo'd id (session_progress returns (0, 0) for any unknown id).
-            let session = session::try_list_sessions(state_dir)?
-                .into_iter()
-                .find(|s| s.id == id)
-                .ok_or_else(|| anyhow::anyhow!("no session '{id}' found"))?;
+            // A corrupt session file is reported with its path, not as a missing id (#2628).
+            let session = session::load_existing_session(state_dir, &id)?;
             let (done, total) = session::try_session_progress(state_dir, &session.id)?;
             let state = if session.is_open() {
                 "open"
