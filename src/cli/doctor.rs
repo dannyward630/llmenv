@@ -25,18 +25,49 @@ fn effective_token_efficiency_var(
     native_claude_env: Option<&serde_yaml::Value>,
     key: &str,
 ) -> Option<String> {
-    match crate::env_var::utf8_var(key) {
-        Ok(Some(val)) => return Some(val),
-        Ok(None) => {}
-        // The check cannot show a value that is not UTF-8. Say so, and read the native setting.
-        Err(e) => eprintln!("warning: {e:#}"),
+    effective_from_read(crate::env_var::utf8_var(key), native_claude_env, key)
+}
+
+/// The rule behind [`effective_token_efficiency_var`], split out so a test can supply the read.
+/// A value that is not UTF-8 gives no value. It does not fall back to the settings value,
+/// because that value may not be the one the process holds (#2643).
+fn effective_from_read(
+    read: anyhow::Result<Option<String>>,
+    native_claude_env: Option<&serde_yaml::Value>,
+    key: &str,
+) -> Option<String> {
+    match read {
+        Ok(Some(val)) => Some(val),
+        Ok(None) => {
+            let value = native_claude_env?.get(key)?;
+            value
+                .as_str()
+                .map(String::from)
+                .or_else(|| value.as_bool().map(|b| b.to_string()))
+                .or_else(|| value.as_i64().map(|n| n.to_string()))
+        }
+        Err(_) => None,
     }
-    let value = native_claude_env?.get(key)?;
-    value
-        .as_str()
-        .map(String::from)
-        .or_else(|| value.as_bool().map(|b| b.to_string()))
-        .or_else(|| value.as_i64().map(|n| n.to_string()))
+}
+
+/// Token-efficiency variables that the checks read.
+const TOKEN_EFFICIENCY_VARS: &[&str] = &[
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+    "BASH_MAX_OUTPUT_LENGTH",
+    "MAX_MCP_OUTPUT_TOKENS",
+    "ENABLE_PROMPT_CACHING_1H",
+    "CLAUDE_CODE_PROMPT_CACHE_TTL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+];
+
+/// Prints one warning per variable whose value is not UTF-8. The reads in the checks
+/// call [`effective_token_efficiency_var`] many times, so the warning is not printed there.
+fn warn_non_utf8_vars(keys: &[&str]) {
+    for key in keys {
+        if let Err(e) = crate::env_var::utf8_var(key) {
+            eprintln!("warning: {e:#}. The result of the checks that read it is unknown.");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +171,7 @@ fn run_doctor_token_efficiency(
     let info = super::doctor_info(use_color);
     eprintln!();
     eprintln!("Token-efficiency checks:");
+    warn_non_utf8_vars(TOKEN_EFFICIENCY_VARS);
     let get = |key: &str| effective_token_efficiency_var(native_claude_env, key);
 
     print_check(
@@ -1260,7 +1292,7 @@ pub(super) fn run_doctor(
     // owner set — forcing 0700 here would hard-fail on a cache dir shared
     // with a different uid, the same regression #1196 walked back for
     // codebase_memory.index_path (#1198).
-    let cache_dir = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
+    let cache_dir = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir)?);
     if cache_dir.exists() {
         let probe = cache_dir.join(".llmenv-doctor-probe");
         std::fs::write(&probe, b"").context("cache directory not writable")?;
@@ -1458,6 +1490,7 @@ pub(super) fn run_doctor(
     if let Some((manifest, _)) = &doctor_manifest
         && claude_installed
     {
+        warn_non_utf8_vars(&["CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH"]);
         let limit_env = effective_token_efficiency_var(
             native_claude_env,
             "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH",
@@ -1907,6 +1940,46 @@ mod tests {
         NativePermissionRules, PermissionRule, Permissions, PluginCollection,
     };
     use proptest::prelude::*;
+
+    fn native_env(yaml: &str) -> serde_yaml::Value {
+        serde_yaml::from_str(yaml).expect("valid yaml")
+    }
+
+    #[test]
+    fn non_utf8_token_var_gives_no_value_and_no_settings_fallback() {
+        // The settings file sets the key, so a fallback would report a value.
+        let native = native_env("BASH_MAX_OUTPUT_LENGTH: '1000'");
+        let read = Err(anyhow::anyhow!("BASH_MAX_OUTPUT_LENGTH is not valid UTF-8"));
+
+        let got = effective_from_read(read, Some(&native), "BASH_MAX_OUTPUT_LENGTH");
+
+        assert_eq!(
+            got, None,
+            "a non-UTF-8 value must not fall back to settings.json"
+        );
+    }
+
+    #[test]
+    fn unset_token_var_falls_back_to_settings() {
+        let native = native_env("BASH_MAX_OUTPUT_LENGTH: 1000");
+
+        let got = effective_from_read(Ok(None), Some(&native), "BASH_MAX_OUTPUT_LENGTH");
+
+        assert_eq!(got.as_deref(), Some("1000"));
+    }
+
+    #[test]
+    fn set_token_var_wins_over_settings() {
+        let native = native_env("BASH_MAX_OUTPUT_LENGTH: 1000");
+
+        let got = effective_from_read(
+            Ok(Some("2000".to_string())),
+            Some(&native),
+            "BASH_MAX_OUTPUT_LENGTH",
+        );
+
+        assert_eq!(got.as_deref(), Some("2000"));
+    }
     use std::collections::BTreeMap;
 
     // -- bash_output_check / prompt_cache_check (#2145) --
