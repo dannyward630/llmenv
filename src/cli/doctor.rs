@@ -25,8 +25,11 @@ fn effective_token_efficiency_var(
     native_claude_env: Option<&serde_yaml::Value>,
     key: &str,
 ) -> Option<String> {
-    if let Ok(val) = std::env::var(key) {
-        return Some(val);
+    match crate::env_var::utf8_var(key) {
+        Ok(Some(val)) => return Some(val),
+        Ok(None) => {}
+        // The check cannot show a value that is not UTF-8. Say so, and read the native setting.
+        Err(e) => eprintln!("warning: {e:#}"),
     }
     let value = native_claude_env?.get(key)?;
     value
