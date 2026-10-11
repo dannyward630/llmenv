@@ -33,7 +33,7 @@ pub enum ColorMode {
 /// # Returns
 /// true if colors should be emitted, false otherwise.
 pub fn should_use_color(mode: Option<ColorMode>, is_tty: bool) -> bool {
-    should_use_color_with_env(mode, is_tty, &|name| std::env::var(name).ok())
+    should_use_color_with_env(mode, is_tty, &crate::env_var::utf8_var_or_log)
 }
 
 /// Determine whether to emit colors, with injectable env var provider for testing.

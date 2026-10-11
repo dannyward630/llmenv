@@ -56,7 +56,9 @@ fn expand_root(
             // `~user` is not supported.
             return None;
         }
-        out.push_str(&home?.to_string_lossy());
+        // A non-UTF-8 home has no text form. `to_string_lossy` would write U+FFFD into the
+        // path, so the entry is unresolvable instead (#2600).
+        out.push_str(home?.to_str()?);
         after
     } else {
         entry
@@ -107,7 +109,7 @@ fn resolve_allowed_roots_in(
 
 /// [`resolve_allowed_roots_in`] with the environment of this process.
 pub(crate) fn resolve_allowed_roots(cm: &CodebaseMemory, bases: &RootBases) -> Vec<PathBuf> {
-    resolve_allowed_roots_in(cm, bases, &|name| std::env::var(name).ok())
+    resolve_allowed_roots_in(cm, bases, &crate::env_var::utf8_var_or_log)
 }
 
 /// The cache folder codebase-memory-mcp serves: `index_path`, or its own default.
@@ -335,7 +337,7 @@ fn path_outside_roots(repo_path: &Path, roots: &[PathBuf]) -> Option<String> {
 /// a project folder that is too broad to allow. A default root may be absent, but a root the
 /// user wrote is a typo or a missing mount.
 pub(crate) fn root_problems(cm: &CodebaseMemory, bases: &RootBases) -> Vec<String> {
-    root_problems_in(cm, bases, &|name| std::env::var(name).ok())
+    root_problems_in(cm, bases, &crate::env_var::utf8_var_or_log)
 }
 
 fn root_problems_in(
@@ -492,6 +494,16 @@ fn decide(
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_root_with_a_non_utf8_home_is_unresolvable_not_lossy() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let home = std::ffi::OsStr::from_bytes(b"/home/\x80u");
+        let no_env = |_: &str| None;
+        // A U+FFFD path would point at a directory that does not exist (#2600).
+        assert_eq!(expand_root("~/code", Some(Path::new(home)), &no_env), None);
+    }
 
     fn bases() -> RootBases {
         RootBases {

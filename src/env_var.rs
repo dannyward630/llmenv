@@ -17,6 +17,18 @@ pub(crate) fn utf8_var(name: &str) -> anyhow::Result<Option<String>> {
     utf8_value(name, std::env::var(name))
 }
 
+/// [`utf8_var`] for an injectable getter, which cannot return an error.
+///
+/// A non-UTF-8 value is logged at error level, because the default log filter drops warnings.
+/// The variable then reads as unset, and the message names the variable (#2600).
+#[must_use]
+pub(crate) fn utf8_var_or_log(name: &str) -> Option<String> {
+    utf8_var(name).unwrap_or_else(|e| {
+        tracing::error!("{e:#}");
+        None
+    })
+}
+
 /// Maps the result of `std::env::var(name)` to the `utf8_var` result.
 ///
 /// Split out so a test can supply a `NotUnicode` value without `set_var`.
