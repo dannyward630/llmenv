@@ -197,8 +197,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript-sessions.json");
         std::fs::write(&path, "{not valid json").unwrap();
-        let err = lookup_session_at(&path, "claude-1").expect_err("corrupt must not be a miss");
-        assert!(format!("{err:#}").contains(&path.display().to_string()));
+        let result = lookup_session_at(&path, "claude-1");
+        assert!(result.is_err(), "corrupt must not be a miss: {result:?}");
+        let text = format!("{:#}", result.unwrap_err());
+        assert!(text.contains(&path.display().to_string()), "{text}");
     }
 
     proptest! {
