@@ -12,6 +12,8 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// Characters of an unexpected response body to show. Enough to recognize a captive
 /// portal or a proxy page, short enough to keep the error on one screen.
 const BODY_EXCERPT_CHARS: usize = 200;
+/// Bytes read from a failed response. A GitHub JSON error is far smaller than this.
+const ERROR_BODY_READ_CAP: u64 = 4096;
 
 /// Fetch the latest non-prerelease GitHub release.
 pub(super) fn fetch_latest(
@@ -19,7 +21,8 @@ pub(super) fn fetch_latest(
     base_url: &str,
 ) -> Result<GhRelease> {
     let url = format!("{base_url}/repos/phaedrus1992/llmenv/releases/latest");
-    let not_found = " (no stable release is published yet; try --track beta)";
+    let not_found = " (no stable release is published, or the repository was not found; \
+                      --track beta lists pre-releases)";
     let text = get_text(client, base_url, &url, not_found)?;
     parse_json(&url, &text)
 }
@@ -51,15 +54,26 @@ fn get_text(
         .with_context(|| format!("failed to query GitHub releases API at {url}"))?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp
-            .text()
-            .unwrap_or_else(|e| format!("(error body unreadable: {e})"));
-        let excerpt: String = body.chars().take(BODY_EXCERPT_CHARS).collect();
+        let excerpt = read_error_excerpt(resp);
         let hint = failure_hint(status, base_url, not_found_hint);
         bail!("GitHub API returned {status} for {url}{hint}; body starts with {excerpt:?}");
     }
     resp.text()
         .with_context(|| format!("failed to read the GitHub API response from {url}"))
+}
+
+/// The start of a failed response body. At most `ERROR_BODY_READ_CAP` bytes are read, so a
+/// hostile or broken endpoint cannot stream an unbounded error body into memory.
+pub(super) fn read_error_excerpt(resp: reqwest::blocking::Response) -> String {
+    let mut bytes = Vec::new();
+    let mut capped = std::io::Read::take(resp, ERROR_BODY_READ_CAP);
+    match std::io::Read::read_to_end(&mut capped, &mut bytes) {
+        Ok(_) => {
+            let body = String::from_utf8_lossy(&bytes);
+            body.chars().take(BODY_EXCERPT_CHARS).collect()
+        }
+        Err(e) => format!("(error body unreadable: {e})"),
+    }
 }
 
 /// The extra advice for a failed GitHub request, chosen by its status and base URL.
