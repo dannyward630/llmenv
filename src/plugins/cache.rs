@@ -135,7 +135,7 @@ pub fn sync_marketplace_with(
 }
 
 fn sync_path(m: &Marketplace) -> Result<MarketplaceState, SyncError> {
-    let expanded = expand_tilde(&m.source);
+    let expanded = expand_tilde(&m.source)?;
     let path = PathBuf::from(&expanded);
     if !path.exists() {
         return Err(SyncError::PathMissing {

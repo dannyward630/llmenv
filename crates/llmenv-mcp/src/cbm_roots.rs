@@ -33,7 +33,7 @@ impl RootBases {
         Ok(Self {
             project_root: project_root.to_path_buf(),
             config_dir: llmenv_paths::config_dir()?,
-            cache_dir: PathBuf::from(llmenv_paths::expand_tilde(&config.cache.cache_dir)),
+            cache_dir: PathBuf::from(llmenv_paths::expand_tilde(&config.cache.cache_dir)?),
             state_dir: llmenv_paths::state_dir()?,
             home: std::env::var_os("HOME")
                 .filter(|h| !h.is_empty())

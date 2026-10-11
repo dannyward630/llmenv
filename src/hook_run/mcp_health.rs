@@ -328,8 +328,10 @@ pub(crate) fn effect_and_fix(name: &str) -> (&'static str, String) {
                 .to_string(),
         ),
         CODEBASE_MEMORY_MCP_NAME => (
-            "Code graph tools do not work in this session.",
-            "Stop the stuck daemon with `pkill -f cbm-daemon-internal`, then run `/mcp` to reconnect."
+            "Code graph tools did not answer yet in this session.",
+            "Make one `list_projects` call first; the server often answers a few seconds later. \
+             If it still fails, stop the stuck daemon with `pkill -f cbm-daemon-internal`, then \
+             run `/mcp` to reconnect."
                 .to_string(),
         ),
         _ => (
@@ -680,6 +682,23 @@ mcp:
         assert!(
             text.contains("cbm-daemon-internal"),
             "CBM fix missing: {text}"
+        );
+    }
+
+    #[test]
+    fn codebase_memory_down_notice_does_not_claim_tools_are_broken() {
+        // A slow start misses the check too. The notice must not state as fact
+        // that the tools are broken, because the agent then skips them all session (#2639).
+        let (effect, fix) = effect_and_fix(CODEBASE_MEMORY_MCP_NAME);
+        assert!(!effect.contains("do not work"), "{effect}");
+        assert!(effect.contains("did not answer yet"), "{effect}");
+        let probe = fix
+            .find("list_projects")
+            .expect("probe call missing from fix");
+        let kill = fix.find("pkill").expect("kill fix missing from fix");
+        assert!(
+            probe < kill,
+            "the probe call must come before the kill: {fix}"
         );
     }
 

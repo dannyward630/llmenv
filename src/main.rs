@@ -4,17 +4,18 @@ use llmenv::session_log::{FileLogLayer, FileSink, default_file_path};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 /// Resolve the session-log file sink's path: explicit `path:` override
-/// (tilde-expanded) or `<state_dir>/session-log.jsonl`.
-fn session_log_file_path(configured: Option<&str>) -> PathBuf {
-    match configured {
-        Some(raw) => PathBuf::from(llmenv_paths::expand_tilde(raw)),
-        None => default_file_path().unwrap_or_else(|e| {
-            eprintln!(
-                "llmenv: failed to resolve default session log path: {e}; falling back to CWD"
-            );
-            PathBuf::from("session-log.jsonl")
-        }),
-    }
+/// (tilde-expanded) or `<state_dir>/session-log.jsonl`. `None` turns the file sink off: a
+/// relative fallback would write the log into the working directory, which is a repository in a hook.
+fn session_log_file_path(configured: Option<&str>) -> Option<PathBuf> {
+    let resolved = match configured {
+        Some(raw) => llmenv_paths::expand_tilde(raw).map(PathBuf::from),
+        None => default_file_path(),
+    };
+    resolved
+        .inspect_err(|e| {
+            eprintln!("llmenv: failed to resolve the session log path: {e:#}; the file log is off");
+        })
+        .ok()
 }
 
 /// `--version`/`-V` alone (clap's built-in version flag) never touches
@@ -61,10 +62,15 @@ fn main() {
         llmenv::hook_run::set_preloaded_config(config);
     }
 
-    let file_layer = resolved.file.as_ref().is_some_and(|f| f.enabled).then(|| {
-        let path = session_log_file_path(resolved.file_path());
-        FileLogLayer::new(FileSink::new(path)).with_filter(EnvFilter::from_default_env())
-    });
+    let file_layer = resolved
+        .file
+        .as_ref()
+        .is_some_and(|f| f.enabled)
+        .then(|| {
+            let path = session_log_file_path(resolved.file_path())?;
+            Some(FileLogLayer::new(FileSink::new(path)).with_filter(EnvFilter::from_default_env()))
+        })
+        .flatten();
 
     tracing_subscriber::registry()
         .with(
