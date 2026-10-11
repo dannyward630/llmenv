@@ -3633,7 +3633,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 (None, false) => crate::task::Placement::Queue,
             };
             let project = current_project_tag()?;
-            let owner = crate::task::session::EngineIdentity::from_env();
+            let owner = crate::task::session::EngineIdentity::from_env()?;
             let choice = match session.as_deref() {
                 Some(id) => crate::task::SessionChoice::Named(id),
                 None => crate::task::SessionChoice::Resolve(&owner),
@@ -3903,7 +3903,7 @@ fn caller_session_for_task(
     state_dir: &std::path::Path,
 ) -> anyhow::Result<crate::task::ownership::Caller> {
     let project = current_project_tag()?;
-    let owner = crate::task::session::EngineIdentity::from_env();
+    let owner = crate::task::session::EngineIdentity::from_env()?;
     crate::task::ownership::caller_session(state_dir, &project, &owner)
 }
 
@@ -4040,7 +4040,7 @@ fn run_task_session_command(
                 (None, false, false) => StartDecision::Auto,
                 _ => unreachable!("clap's conflicts_with_all enforces at most one"),
             };
-            let owner = session::EngineIdentity::from_env();
+            let owner = session::EngineIdentity::from_env()?;
             let request = session::StartRequest {
                 name: name.as_deref(),
                 description: description.as_deref(),
@@ -4227,7 +4227,7 @@ fn resolve_session_id(
     }
     // Fallible read: an unreadable store must not read as "no open session" (#1112).
     let open = session::try_open_sessions_for_project(state_dir, project)?;
-    match session::pick_open_session(open, &EngineIdentity::from_env()) {
+    match session::pick_open_session(open, &EngineIdentity::from_env()?) {
         Ok(session) => Ok(session.id),
         Err(PickError::NoneOpen) => {
             anyhow::bail!("no open session for this project — pass an id explicitly")
