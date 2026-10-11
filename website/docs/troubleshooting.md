@@ -226,9 +226,9 @@ This covers `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain r
 - A path that starts with `~`, such as `cache.cache_dir`, stops with an error that names `HOME` and the path
   (added in v3.13.0).
   A path with no `~` never reads `HOME`.
-  The session log falls back to the working directory and prints the error.
-- `llmenv doctor` warns once for each non-UTF-8 token-efficiency variable and says that the result of its checks is
-  unknown (changed in v3.13.0; before, it used the value in `settings.json`).
+  The session log file is turned off and the error is printed, instead of writing a log into the working directory.
+- `llmenv doctor` skips a token-efficiency check that reads a non-UTF-8 variable, and says that the result is unknown
+  (changed in v3.13.0; before, it used the value in `settings.json`).
 
 To fix it, export the variable again with a UTF-8 value, or unset it where it is optional.
 
