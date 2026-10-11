@@ -198,6 +198,10 @@ Each refusal names the fix.
 - `git commit` or `gh pr create` is denied once with no task in progress.
   Run the commands in the message, then run the same command again.
   Set `features.task_tracker.enforce_commit: false` to turn the deny off.
+- `git commit` is denied with "cannot be read" in the message (changed in v3.13.0).
+  The message names the file or the task store that cannot be read.
+  Fix that file or its permissions, then run the command again.
+  The deny repeats until the file is readable.
 - An agent follows an instruction that says the task tools are blocked.
   Run `llmenv doctor` and read the `Task tracker instructions:` section.
   It names the bundle file that holds the text.

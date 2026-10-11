@@ -33,6 +33,6 @@ pub mod session {
         list_sessions, open_sessions_for_project, pick_open_session, session_ids_for_project,
         session_progress, session_summary, session_summary_with_agent, start_session,
         start_session_as, touch_last_activity, try_list_sessions, try_open_sessions_for_project,
-        update_resume,
+        try_session_progress, update_resume,
     };
 }
