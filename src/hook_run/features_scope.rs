@@ -37,11 +37,30 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
                 "features not resolved from bundles: {e:#}. Fix the environment, or unset the \
                  variable."
             );
+            // One hook process resolves features once, so the first notice is the only one.
+            UNRESOLVED_NOTICE.set(unresolved_notice(&e)).ok();
             return config;
         }
     };
     let active = crate::scope::evaluate(&config, &env);
     resolve_with(config, config_dir, &active)
+}
+
+/// Set when bundle features were skipped in this hook process. The hook output reads it, so the
+/// agent sees the skip. A log line alone reaches no one, because the engine drops hook stderr.
+static UNRESOLVED_NOTICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The notice for the agent, if bundle features were skipped in this hook process.
+pub(crate) fn take_unresolved_notice() -> Option<&'static str> {
+    UNRESOLVED_NOTICE.get().map(String::as_str)
+}
+
+/// The text that tells the agent which features were skipped, and why.
+fn unresolved_notice(err: &anyhow::Error) -> String {
+    format!(
+        "llmenv: features set by bundles are off for this session because the environment \
+         could not be read: {err:#}. Fix the variable, or unset it, to turn them back on."
+    )
 }
 
 fn resolve_with(mut config: Config, config_dir: &Path, active: &ActiveScopes) -> Config {
@@ -333,5 +352,23 @@ mod tests {
                 proptest::prop_assert_eq!(got.task_tracker.unwrap().enabled, expected);
             }
         }
+    }
+
+    #[test]
+    fn unresolved_notice_names_the_cause_and_the_fix() {
+        let err = anyhow::anyhow!("LLMENV_EXTRA_TAGS is not valid UTF-8");
+        let notice = unresolved_notice(&err);
+        assert!(
+            notice.contains("LLMENV_EXTRA_TAGS is not valid UTF-8"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("Fix the variable"),
+            "must state the fix: {notice}"
+        );
+        assert!(
+            notice.contains("bundles"),
+            "must say which features are off: {notice}"
+        );
     }
 }
