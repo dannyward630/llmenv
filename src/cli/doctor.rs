@@ -50,23 +50,20 @@ fn effective_from_read(
     }
 }
 
-/// Token-efficiency variables that the checks read.
-const TOKEN_EFFICIENCY_VARS: &[&str] = &[
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
-    "BASH_MAX_OUTPUT_LENGTH",
-    "MAX_MCP_OUTPUT_TOKENS",
-    "ENABLE_PROMPT_CACHING_1H",
-    "CLAUDE_CODE_PROMPT_CACHE_TTL",
-    "CLAUDE_CODE_SUBAGENT_MODEL",
-];
+/// The warning for the first of `keys` whose value is not UTF-8, or `None` when all are readable.
+fn non_utf8_message(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let err = crate::env_var::utf8_var(key).err()?;
+        Some(format!("{err:#}. The result of this check is unknown."))
+    })
+}
 
-/// Prints one warning per variable whose value is not UTF-8. The reads in the checks
-/// call [`effective_token_efficiency_var`] many times, so the warning is not printed there.
-fn warn_non_utf8_vars(keys: &[&str]) {
-    for key in keys {
-        if let Err(e) = crate::env_var::utf8_var(key) {
-            eprintln!("warning: {e:#}. The result of the checks that read it is unknown.");
-        }
+/// Runs `check`, unless a variable that it reads is not UTF-8. Then it prints a warning and
+/// skips the check, so the check cannot report a value that the process does not hold (#2643).
+fn unless_non_utf8(keys: &[&str], warn: &str, check: impl FnOnce()) {
+    match non_utf8_message(keys) {
+        Some(message) => eprintln!("{warn} {message}"),
+        None => check(),
     }
 }
 
@@ -171,51 +168,52 @@ fn run_doctor_token_efficiency(
     let info = super::doctor_info(use_color);
     eprintln!();
     eprintln!("Token-efficiency checks:");
-    warn_non_utf8_vars(TOKEN_EFFICIENCY_VARS);
     let get = |key: &str| effective_token_efficiency_var(native_claude_env, key);
 
-    print_check(
-        autocompact::autocompact_check(
+    unless_non_utf8(&["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"], warn, || {
+        let check = autocompact::autocompact_check(
             native_claude_settings,
             get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
-        ),
-        pass,
-        warn,
-        &info,
-    );
+        );
+        print_check(check, pass, warn, &info);
+    });
 
-    let bash_max_chars = native_claude_settings.and_then(|v| v.get("bashOutputMaxChars"));
-    print_check(
-        bash_output_check(bash_max_chars, get("BASH_MAX_OUTPUT_LENGTH")),
-        pass,
-        warn,
-        &info,
-    );
+    unless_non_utf8(&["BASH_MAX_OUTPUT_LENGTH"], warn, || {
+        let bash_max_chars = native_claude_settings.and_then(|v| v.get("bashOutputMaxChars"));
+        let check = bash_output_check(bash_max_chars, get("BASH_MAX_OUTPUT_LENGTH"));
+        print_check(check, pass, warn, &info);
+    });
 
-    match get("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
-        Some(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
-        Some(Err(_)) => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS has invalid (non-numeric) value"),
-        None => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
-    }
-
-    print_check(
-        prompt_cache_check(
-            get("ENABLE_PROMPT_CACHING_1H"),
-            get("CLAUDE_CODE_PROMPT_CACHE_TTL"),
-        ),
-        pass,
-        warn,
-        &info,
-    );
-
-    match get("CLAUDE_CODE_SUBAGENT_MODEL") {
-        Some(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
-        None => {
-            eprintln!(
-                "{info} CLAUDE_CODE_SUBAGENT_MODEL not set (Claude Code picks the model per agent)"
-            )
+    unless_non_utf8(&["MAX_MCP_OUTPUT_TOKENS"], warn, || {
+        match get("MAX_MCP_OUTPUT_TOKENS").map(|v| v.parse::<u64>()) {
+            Some(Ok(n)) => eprintln!("{pass} MAX_MCP_OUTPUT_TOKENS={n}"),
+            Some(Err(_)) => {
+                eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS has invalid (non-numeric) value")
+            }
+            None => eprintln!("{warn} MAX_MCP_OUTPUT_TOKENS not set (recommend 10000)"),
         }
-    }
+    });
+
+    unless_non_utf8(
+        &["ENABLE_PROMPT_CACHING_1H", "CLAUDE_CODE_PROMPT_CACHE_TTL"],
+        warn,
+        || {
+            let check = prompt_cache_check(
+                get("ENABLE_PROMPT_CACHING_1H"),
+                get("CLAUDE_CODE_PROMPT_CACHE_TTL"),
+            );
+            print_check(check, pass, warn, &info);
+        },
+    );
+
+    unless_non_utf8(&["CLAUDE_CODE_SUBAGENT_MODEL"], warn, || {
+        match get("CLAUDE_CODE_SUBAGENT_MODEL") {
+            Some(_) => eprintln!("{info} CLAUDE_CODE_SUBAGENT_MODEL is set"),
+            None => eprintln!(
+                "{info} CLAUDE_CODE_SUBAGENT_MODEL not set (Claude Code picks the model per agent)"
+            ),
+        }
+    });
 
     if cm_enabled {
         eprintln!("{pass} context-mode built-in feature enabled (token-efficiency)");
@@ -1490,12 +1488,18 @@ pub(super) fn run_doctor(
     if let Some((manifest, _)) = &doctor_manifest
         && claude_installed
     {
-        warn_non_utf8_vars(&["CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH"]);
-        let limit_env = effective_token_efficiency_var(
-            native_claude_env,
-            "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH",
-        );
-        mcp_text::run_doctor_mcp_text(use_color, &manifest.mcps, limit_env.as_deref(), probe_mcp);
+        unless_non_utf8(&["CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH"], &warn, || {
+            let limit_env = effective_token_efficiency_var(
+                native_claude_env,
+                "CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH",
+            );
+            mcp_text::run_doctor_mcp_text(
+                use_color,
+                &manifest.mcps,
+                limit_env.as_deref(),
+                probe_mcp,
+            );
+        });
     }
 
     if all {
@@ -1980,6 +1984,40 @@ mod tests {
 
         assert_eq!(got.as_deref(), Some("2000"));
     }
+
+    #[test]
+    fn an_unset_variable_does_not_skip_a_check() {
+        // A name that no environment sets reads as unset, and unset is readable.
+        assert_eq!(non_utf8_message(&["LLMENV_TEST_TOKEN_VAR_NEVER_SET"]), None);
+
+        let mut ran = false;
+        unless_non_utf8(&["LLMENV_TEST_TOKEN_VAR_NEVER_SET"], "WARN", || ran = true);
+        assert!(ran, "a readable variable must run the check");
+    }
+
+    proptest! {
+        #[test]
+        fn a_read_error_never_falls_back_to_settings(file in "[a-z0-9]{1,10}") {
+            let native = native_env(&format!("K: '{file}'"));
+            let got = effective_from_read(Err(anyhow::anyhow!("not utf8")), Some(&native), "K");
+            prop_assert_eq!(got, None);
+        }
+
+        #[test]
+        fn a_set_value_always_wins_over_settings(env in "[a-z0-9]{1,10}", file in "[a-z0-9]{1,10}") {
+            let native = native_env(&format!("K: '{file}'"));
+            let got = effective_from_read(Ok(Some(env.clone())), Some(&native), "K");
+            prop_assert_eq!(got, Some(env));
+        }
+
+        #[test]
+        fn an_unset_value_reads_the_settings_string(file in "[a-z0-9]{1,10}") {
+            let native = native_env(&format!("K: '{file}'"));
+            let got = effective_from_read(Ok(None), Some(&native), "K");
+            prop_assert_eq!(got, Some(file));
+        }
+    }
+
     use std::collections::BTreeMap;
 
     // -- bash_output_check / prompt_cache_check (#2145) --
