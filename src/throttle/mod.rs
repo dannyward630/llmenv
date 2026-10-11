@@ -86,13 +86,14 @@ fn throttle_state_path(state_dir: &Path) -> std::path::PathBuf {
 }
 
 /// Read back the currently stored throttle state (written by
-/// `store_active_throttle` during materialize/export). Returns `None` when
-/// no state file exists (throttling is off) or the file is unreadable/corrupt
-/// — a stale or hand-edited state file must not crash callers like the
-/// statusline data collector.
+/// `store_active_throttle` during materialize/export). Returns `None` only
+/// when no state file exists, which means throttling is off. A file that
+/// exists but cannot be read or parsed is an error, so the caller can show it
+/// instead of reporting throttling as off.
 ///
 /// # Errors
-/// Returns an error only if the state directory itself cannot be resolved.
+/// Returns an error if the state directory cannot be resolved, or if the
+/// state file exists and is unreadable or corrupt.
 pub(crate) fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
     let state_dir = crate::paths::state_dir()?;
     read_active_throttle_with_state_dir(&state_dir)
@@ -102,16 +103,15 @@ pub(crate) fn read_active_throttle() -> anyhow::Result<Option<Throttle>> {
 /// temp directory instead of the real state dir, without env var mutation.
 fn read_active_throttle_with_state_dir(state_dir: &Path) -> anyhow::Result<Option<Throttle>> {
     let path = throttle_state_path(state_dir);
-    match std::fs::read(&path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
-            .inspect_err(|e| tracing::warn!("ignoring corrupt throttle state: {e}"))
-            .ok()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            tracing::warn!("could not read throttle state at {}: {e}", path.display());
-            Ok(None)
+            return Err(e).with_context(|| format!("reading throttle state: {}", path.display()));
         }
-    }
+    };
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing throttle state: {}", path.display()))
 }
 
 /// Resolve the single active throttle entry by tag intersection.
@@ -448,6 +448,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = read_active_throttle_with_state_dir(tmp.path()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_active_throttle_errors_on_corrupt_state_file_with_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = throttle_state_path(tmp.path());
+        std::fs::write(&path, b"{ not json").unwrap();
+
+        // Corrupt state is an error, not "throttling off". Otherwise the
+        // statusline would report no throttle for a file that exists.
+        let err = read_active_throttle_with_state_dir(tmp.path()).unwrap_err();
+        assert!(format!("{err:#}").contains(&path.display().to_string()));
     }
 
     #[test]

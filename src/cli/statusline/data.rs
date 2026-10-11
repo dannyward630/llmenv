@@ -17,6 +17,10 @@ pub struct StatusData {
     pub mcps: Option<CountData>,
     pub icm: Option<IcmData>,
     pub throttle: Option<ThrottleData>,
+    /// Set when the stored throttle state exists but cannot be read. The
+    /// widget shows this instead of reporting throttling as off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle_error: Option<String>,
     pub config_stale: Option<bool>,
     pub cache: Option<CacheData>,
     pub session_log: Option<u64>,
@@ -159,6 +163,7 @@ mod tests {
                 mcps: None,
                 icm: None,
                 throttle: None,
+                throttle_error: None,
                 config_stale,
                 cache: None,
                 session_log,

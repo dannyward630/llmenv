@@ -135,6 +135,14 @@ fn render_config_stale(
 }
 
 fn render_throttle(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
+    // An unreadable state file is not "throttling off". Show it so the user sees it.
+    if data.throttle_error.is_some() {
+        let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{raw}");
+        return format
+            .replace("{raw}", "throttle unreadable")
+            .replace("{cooldown_secs}", "")
+            .replace("{reason}", "unreadable");
+    }
     let Some(throttle) = &data.throttle else {
         return String::new();
     };
@@ -299,6 +307,16 @@ mod tests {
         };
         let out = render_llmenv_widget("throttle", &data, None, &icons(), false).unwrap();
         assert_eq!(out, "icm: 45s");
+    }
+
+    #[test]
+    fn renders_throttle_error_instead_of_off() {
+        let data = StatusData {
+            throttle_error: Some("parsing throttle state: /x/throttle.json".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("throttle", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "throttle unreadable");
     }
 
     #[test]
@@ -634,6 +652,7 @@ mod tests {
                 backend: "icm".to_string(),
                 cooldown_secs: 45,
             }),
+            throttle_error: None,
             session_log: Some(8),
             tasks: Some(TasksData {
                 session: Some(SessionProgress { done: 2, total: 5 }),
