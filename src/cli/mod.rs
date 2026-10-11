@@ -3532,7 +3532,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                      — pass --all to deliberately list every session's tasks"
                 );
             }
-            let mut tasks = crate::task::list_tasks(&state_dir);
+            let mut tasks = crate::task::try_list_tasks(&state_dir)?;
             if current_project {
                 let project = current_project_tag()?;
                 tasks = crate::task::filter_tasks_for_project(&state_dir, &project, tasks);
@@ -3780,7 +3780,7 @@ fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow
     if open_sessions.is_empty() {
         anyhow::bail!("no open session for this project");
     }
-    let all_tasks = crate::task::list_tasks(state_dir);
+    let all_tasks = crate::task::try_list_tasks(state_dir)?;
     let multi = open_sessions.len() > 1;
     for (i, session) in open_sessions.iter().enumerate() {
         if multi {
@@ -3953,11 +3953,11 @@ fn run_task_session_command(
             let id = resolve_session_id(state_dir, &project, id)?;
             // Validate the session exists rather than printing "0/0 done" for
             // a typo'd id (session_progress returns (0, 0) for any unknown id).
-            let session = session::list_sessions(state_dir)
+            let session = session::try_list_sessions(state_dir)?
                 .into_iter()
                 .find(|s| s.id == id)
                 .ok_or_else(|| anyhow::anyhow!("no session '{id}' found"))?;
-            let (done, total) = session::session_progress(state_dir, &session.id);
+            let (done, total) = session::try_session_progress(state_dir, &session.id)?;
             let state = if session.is_open() {
                 "open"
             } else if session.finished_at.is_some() {

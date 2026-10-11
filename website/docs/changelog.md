@@ -112,6 +112,13 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- The task commit gate sees a commit behind `eval`, `env -S`, `sh -c`, `bash -c`, `timeout`, `env`, `nice`, `sudo`, `xargs`, `stdbuf`, `setsid`, `flock`, and the other wrappers, with their options and long options. `timeout --signal KILL 60 git commit` and `env -S 'git commit'` are denied like a plain `git commit`. Nested `eval` and `sh -c` count toward the substitution depth limit, so a long chain fails closed instead of growing the hook stack. The slippage check sees writes behind the same wrappers (#2627, #2542) [fix:hook]
+- The task commit gate denies a commit that it cannot check. That covers a state directory that cannot be resolved, a payload with no session id, a nudge state file that cannot be read or saved, and a task store that cannot be read. The deny names the cause and the fix, instead of allowing the commit (#2630) [fix:hook]
+- Session reminders say that the task store cannot be read, instead of reporting that no session is open or that a session has no tasks. `llmenv task session summary`, `llmenv task session show`, `llmenv task ls --all`, and `llmenv task show current` fail with an error when a task file cannot be read (#2608) [fix:task]
+- A non-UTF-8 `LLMENV_CONFIG_DIR`, `LLMENV_STATE_DIR`, or `HOME` that the resolved path reads fails with an error that names the variable. A non-UTF-8 `CLAUDE_CODE_VERSION` is logged and ignored in the hook, so the hook does not stop. `llmenv doctor` warns about a non-UTF-8 token-efficiency variable (#2607) [fix:cli]
+
 ## [3.12.2] - 2026-10-10
 
 3.12.2 is a bug-fix release for 3.12.1.

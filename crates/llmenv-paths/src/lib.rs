@@ -208,7 +208,38 @@ pub fn cwd_under_prefix(cwd: &str, prefix: &str) -> bool {
 }
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
+    ensure_utf8_override("LLMENV_CONFIG_DIR")?;
     config_dir_with_env(&|name| std::env::var(name).ok())
+}
+
+/// Fails when `name` is set to a value that is not valid UTF-8. The env closures read such a value
+/// as unset, so the default path would be used with no message (#2607).
+fn ensure_utf8(name: &str, value: Option<&std::ffi::OsStr>) -> anyhow::Result<()> {
+    match value.map(std::ffi::OsStr::to_str) {
+        Some(None) => {
+            anyhow::bail!("{name} is not valid UTF-8; set {name} to a UTF-8 value and retry")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Checks the override `name`, and `HOME` when the resolved path reads it (#2607).
+fn ensure_utf8_override(name: &str) -> anyhow::Result<()> {
+    let value = std::env::var_os(name);
+    ensure_utf8(name, value.as_deref())?;
+    if home_is_read(value.as_deref()) {
+        ensure_utf8("HOME", std::env::var_os("HOME").as_deref())?;
+    }
+    Ok(())
+}
+
+/// Whether the resolved path reads `HOME`: when the override is unset or empty, or when it is a
+/// `~` path that is expanded. An absolute override never reads it.
+fn home_is_read(override_value: Option<&std::ffi::OsStr>) -> bool {
+    match override_value.filter(|v| !v.is_empty()) {
+        None => true,
+        Some(value) => value.to_str().is_some_and(|s| s.starts_with('~')),
+    }
 }
 
 /// [`config_dir`] with an injectable env-var provider so tests can exercise
@@ -236,6 +267,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn state_dir() -> anyhow::Result<PathBuf> {
+    ensure_utf8_override("LLMENV_STATE_DIR")?;
     state_dir_with_env(&|name| std::env::var(name).ok())
 }
 
@@ -841,6 +873,34 @@ mod tests {
             !binary_on_path("sh\techo"),
             "name with tab must be rejected without spawning which"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_utf8_rejects_a_value_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = std::ffi::OsStr::from_bytes(&[0xff, 0xfe]);
+        let err = ensure_utf8("LLMENV_STATE_DIR", Some(raw)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("LLMENV_STATE_DIR is not valid UTF-8"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn home_is_read_only_when_the_override_does_not_resolve_the_path() {
+        use std::ffi::OsStr;
+        assert!(home_is_read(None));
+        assert!(home_is_read(Some(OsStr::new(""))));
+        assert!(home_is_read(Some(OsStr::new("~/llmenv"))));
+        assert!(!home_is_read(Some(OsStr::new("/srv/llmenv"))));
+    }
+
+    #[test]
+    fn ensure_utf8_accepts_unset_and_utf8_values() {
+        assert!(ensure_utf8("HOME", None).is_ok());
+        assert!(ensure_utf8("HOME", Some(std::ffi::OsStr::new("/home/u"))).is_ok());
     }
 
     #[cfg(unix)]
