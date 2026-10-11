@@ -357,6 +357,15 @@ mod tests {
     }
 
     #[test]
+    fn a_config_path_with_no_parent_sets_the_notice_for_the_agent() {
+        // `Path::new("")` has no parent, so bundle features are skipped.
+        resolve(config_with_bundles(&["a"], "rust"), Path::new(""));
+        // The slot is set once per process, so only the shared text is asserted.
+        let notice = take_unresolved_notice().expect("the skip must reach the agent");
+        assert!(notice.contains("Fix the cause"), "{notice}");
+    }
+
+    #[test]
     fn unresolved_notice_names_the_cause_and_the_fix() {
         let err = anyhow::anyhow!("LLMENV_EXTRA_TAGS is not valid UTF-8");
         let notice = unresolved_notice(&err);
