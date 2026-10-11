@@ -126,6 +126,10 @@ pub fn materialize_with_mode(
                 tracing::error!("cannot remove staging dir {}: {rm}", staging.display());
             }
             if dest.exists() {
+                tracing::warn!(
+                    "rename into {} failed, so the copy already there is used: {e}",
+                    dest.display()
+                );
                 Ok(Rendered { path: dest, hash })
             } else {
                 Err(e.into())
