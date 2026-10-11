@@ -468,17 +468,21 @@ pub(crate) fn run(engine: &str, args: Vec<String>, narrow: LaunchScope) -> anyho
             }
             if adapter.name() == "claude-code" {
                 match crate::config::Config::load(&config_path) {
-                    Ok(config) => {
-                        let cache_dir = std::path::PathBuf::from(crate::paths::expand_tilde(
-                            &config.cache.cache_dir,
-                        ));
-                        let adapter_root = cache_dir.join(adapter.name());
-                        tokio::spawn(credential_watch::watch(
-                            adapter_root,
-                            Arc::clone(notices),
-                            credential_watch::EXPIRY_CHECK_INTERVAL,
-                        ));
-                    }
+                    Ok(config) => match crate::paths::expand_tilde(&config.cache.cache_dir) {
+                        Ok(dir) => {
+                            let adapter_root = std::path::PathBuf::from(dir).join(adapter.name());
+                            tokio::spawn(credential_watch::watch(
+                                adapter_root,
+                                Arc::clone(notices),
+                                credential_watch::EXPIRY_CHECK_INTERVAL,
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "launch: could not expand the cache dir, credential-expiry watch disabled: {e:#}"
+                            );
+                        }
+                    },
                     Err(e) => {
                         tracing::debug!(
                             "launch: could not load config, credential-expiry watch disabled: {e:#}"
