@@ -775,6 +775,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                 }
             } else {
                 let text = append_pending_notice(text, launch_client::check_pending_notice());
+                let text = match features_scope::take_unresolved_notice() {
+                    Some(notice) => format!("{notice}\n\n{text}"),
+                    None => text,
+                };
                 let out = adapter.emit_hook_context(hook_event_name, &text);
                 if !out.is_empty()
                     && let Err(e) = writeln!(std::io::stdout(), "{out}")

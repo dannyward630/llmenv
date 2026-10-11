@@ -24,10 +24,12 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
         return config;
     }
     let Some(config_dir) = config_path.parent() else {
-        tracing::warn!(
-            "features not resolved from bundles: config path {} has no parent directory",
+        let err = anyhow::anyhow!(
+            "config path {} has no parent directory",
             config_path.display()
         );
+        tracing::warn!("features not resolved from bundles: {err:#}");
+        UNRESOLVED_NOTICE.set(unresolved_notice(&err)).ok();
         return config;
     };
     let env = match crate::scope::matcher::Env::detect_for_config(&config) {
@@ -37,11 +39,30 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
                 "features not resolved from bundles: {e:#}. Fix the environment, or unset the \
                  variable."
             );
+            // One hook process resolves features once, so the first notice is the only one.
+            UNRESOLVED_NOTICE.set(unresolved_notice(&e)).ok();
             return config;
         }
     };
     let active = crate::scope::evaluate(&config, &env);
     resolve_with(config, config_dir, &active)
+}
+
+/// Set when bundle features were skipped in this hook process. The hook output reads it, so the
+/// agent sees the skip. A log line alone reaches no one, because the engine drops hook stderr.
+static UNRESOLVED_NOTICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The notice for the agent, if bundle features were skipped in this hook process.
+pub(crate) fn take_unresolved_notice() -> Option<&'static str> {
+    UNRESOLVED_NOTICE.get().map(String::as_str)
+}
+
+/// The text that tells the agent which features were skipped, and why.
+fn unresolved_notice(err: &dyn std::fmt::Display) -> String {
+    format!(
+        "llmenv: features set by bundles are off for this session: {err:#}. Fix the cause, \
+         then start a new session."
+    )
 }
 
 fn resolve_with(mut config: Config, config_dir: &Path, active: &ActiveScopes) -> Config {
@@ -333,5 +354,35 @@ mod tests {
                 proptest::prop_assert_eq!(got.task_tracker.unwrap().enabled, expected);
             }
         }
+    }
+
+    #[test]
+    fn a_config_path_with_no_parent_sets_the_notice_for_the_agent() {
+        // `Path::new("")` has no parent, so bundle features are skipped.
+        resolve(config_with_bundles(&["a"], "rust"), Path::new(""));
+        // The slot is set once per process, so only the shared text is asserted.
+        let notice = take_unresolved_notice();
+        assert!(
+            notice.is_some_and(|n| n.contains("Fix the cause")),
+            "the skip must reach the agent: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn unresolved_notice_names_the_cause_and_the_fix() {
+        let err = anyhow::anyhow!("LLMENV_EXTRA_TAGS is not valid UTF-8");
+        let notice = unresolved_notice(&err);
+        assert!(
+            notice.contains("LLMENV_EXTRA_TAGS is not valid UTF-8"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("Fix the cause"),
+            "must state the fix: {notice}"
+        );
+        assert!(
+            notice.contains("bundles"),
+            "must say which features are off: {notice}"
+        );
     }
 }
