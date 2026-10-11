@@ -2975,7 +2975,11 @@ fn direct_index_stdout(
 fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     // A failed removal shows below: `create_new` then fails on what is still there.
-    let _ = std::fs::remove_file(path);
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("could not remove result file {} ({e})", path.display());
+    }
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

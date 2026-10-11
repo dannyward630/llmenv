@@ -56,7 +56,12 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
             .map(|mut it| it.next().is_none())
             .unwrap_or(false)
     {
-        let _ = std::fs::remove_dir(parent);
+        // A non-empty parent is the normal case and is kept quietly. Any other failure is logged.
+        if let Err(e) = std::fs::remove_dir(parent)
+            && e.kind() != std::io::ErrorKind::DirectoryNotEmpty
+        {
+            tracing::error!("cannot remove session log dir {}: {e}", parent.display());
+        }
     }
 }
 

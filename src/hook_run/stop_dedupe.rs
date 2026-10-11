@@ -83,7 +83,8 @@ fn load_last(path: &Path) -> Option<LastReminder> {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::warn!("cannot read stop_dedupe state {}: {e}", path.display());
+            // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
+            tracing::error!("cannot read stop_dedupe state {}: {e}", path.display());
             return None;
         }
     };

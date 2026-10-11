@@ -161,7 +161,12 @@ pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
             && path.extension().and_then(|e| e.to_str()) == Some("lock")
             && !path.with_extension("json").exists()
         {
-            let _ignored = std::fs::remove_file(&path);
+            // Logged at error: the default log filter is ERROR, so a warn would be invisible (#2657).
+            if let Err(e) = std::fs::remove_file(&path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::error!("cannot remove stale lock {}: {e}", path.display());
+            }
         }
     }
 }
