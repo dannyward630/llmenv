@@ -44,6 +44,8 @@ pub(crate) fn state_path() -> PathBuf {
 /// first-run case and returns an empty map silently. A file that exists but
 /// fails to parse (truncated by a crash, hand-edited, corrupted) is handled
 /// fail-soft: the map degrades to empty and a `warn!` message is logged.
+/// A file that exists but cannot be read is an error. A caller that then
+/// wrote the empty map back would erase every stored mapping.
 ///
 /// **Deliberate deviation from hard-error convention:** Unlike persistent
 /// config (plugins, `.claude.json`), session correlation state is ephemeral
@@ -52,20 +54,30 @@ pub(crate) fn state_path() -> PathBuf {
 /// file; fail-soft is correct here. The tradeoff prioritizes availability
 /// over corruption detection (contrast: #522 treats corrupt `installed_plugins.json`
 /// as a hard error to avoid losing version pins).
-fn load_at(path: &Path) -> BTreeMap<String, String> {
-    let Ok(s) = std::fs::read_to_string(path).inspect_err(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "failed to read transcript-sessions.json, resetting");
-    }) else {
-        return BTreeMap::default();
+fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    let s = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // A missing file is the normal first run, so it is not a warning.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::default()),
+        Err(e) => anyhow::bail!(
+            "cannot read the session map {}: {e}. Fix its permissions, or remove the file to \
+             start over.",
+            path.display()
+        ),
     };
-    serde_json::from_str(&s).unwrap_or_else(|e| {
+    Ok(serde_json::from_str(&s).unwrap_or_else(|e| {
         tracing::warn!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
         BTreeMap::default()
-    })
+    }))
 }
 
 fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    let mut map = load_at(path);
+    let mut map = load_at(path)?;
+    // Evict before the insert. Evicting after it could drop the new key itself, when that key
+    // sorts first, and the lookup for this session would then miss.
+    if !map.contains_key(claude_session_id) && map.len() >= MAX_CORRELATION_ENTRIES {
+        map.pop_first();
+    }
     map.insert(claude_session_id.to_string(), icm_session_id.to_string());
     // ponytail: eviction order is BTreeMap key order (the random session-id
     // string), not recency — this format carries no timestamp to sort by.
@@ -87,7 +99,12 @@ fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyh
 /// tests exercise this without touching the global state-dir env var.
 #[must_use]
 pub(crate) fn lookup_session_at(path: &Path, claude_session_id: &str) -> Option<String> {
-    load_at(path).get(claude_session_id).cloned()
+    // A lookup writes nothing, so an unreadable map only costs this session its correlation.
+    let map = load_at(path).unwrap_or_else(|e| {
+        tracing::warn!("{e:#}. This session starts a new transcript.");
+        BTreeMap::default()
+    });
+    map.get(claude_session_id).cloned()
 }
 
 /// Record the correlation into the map at `path` (read-modify-write, atomic,
@@ -112,10 +129,10 @@ mod tests {
     fn record_then_lookup_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript-sessions.json");
-        assert!(load_at(&path).is_empty());
+        assert!(load_at(&path).unwrap().is_empty());
         record_at(&path, "claude-1", "icm-aaa").unwrap();
         record_at(&path, "claude-2", "icm-bbb").unwrap();
-        let map = load_at(&path);
+        let map = load_at(&path).unwrap();
         assert_eq!(map.get("claude-1").map(String::as_str), Some("icm-aaa"));
         assert_eq!(map.get("claude-2").map(String::as_str), Some("icm-bbb"));
         assert_eq!(map.get("missing"), None);
@@ -128,7 +145,7 @@ mod tests {
         for i in 0..MAX_CORRELATION_ENTRIES + 10 {
             record_at(&path, &format!("claude-{i:05}"), "icm-x").unwrap();
         }
-        let map = load_at(&path);
+        let map = load_at(&path).unwrap();
         assert_eq!(map.len(), MAX_CORRELATION_ENTRIES);
     }
 
@@ -137,11 +154,57 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript-sessions.json");
         std::fs::write(&path, "{not valid json").unwrap();
-        assert!(load_at(&path).is_empty());
+        assert!(load_at(&path).unwrap().is_empty());
+    }
+
+    /// Write-only mode makes the read fail while a write still succeeds. Before the fix the record
+    /// wrote back an empty map and erased both stored mappings (#2612).
+    #[cfg(unix)]
+    #[test]
+    fn a_read_error_does_not_erase_the_stored_map() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        record_at(&path, "a", "icm-a").unwrap();
+        record_at(&path, "b", "icm-b").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let result = record_at(&path, "c", "icm-c");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(result.is_err(), "an unreadable map must fail the record");
+        assert_eq!(lookup_session_at(&path, "a").as_deref(), Some("icm-a"));
+        assert_eq!(lookup_session_at(&path, "b").as_deref(), Some("icm-b"));
+    }
+
+    #[test]
+    fn a_new_key_that_sorts_first_survives_a_full_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        for i in 0..MAX_CORRELATION_ENTRIES {
+            record_at(&path, &format!("claude-{i:05}"), "icm-old").unwrap();
+        }
+        // "aaa" sorts before every "claude-" key, so pop_first would have dropped it at once.
+        record_at(&path, "aaa", "icm-new").unwrap();
+        assert_eq!(lookup_session_at(&path, "aaa").as_deref(), Some("icm-new"));
+        assert_eq!(load_at(&path).unwrap().len(), MAX_CORRELATION_ENTRIES);
     }
 
     use proptest::prelude::*;
     proptest! {
+        #[test]
+        fn record_then_load_returns_every_pair_recorded(
+            pairs in prop::collection::vec(("\\PC{1,16}", "\\PC{0,16}"), 0..8),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transcript-sessions.json");
+            let mut expected = BTreeMap::new();
+            for (claude, icm) in &pairs {
+                record_at(&path, claude, icm).unwrap();
+                expected.insert(claude.clone(), icm.clone());
+            }
+            prop_assert_eq!(load_at(&path).unwrap(), expected);
+        }
+
         #[test]
         fn state_file_is_owner_only(id in "[a-z0-9-]{1,16}") {
             let dir = tempfile::tempdir().unwrap();
