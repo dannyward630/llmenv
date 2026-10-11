@@ -307,6 +307,44 @@ pub(crate) fn handle_stop(
     }
 }
 
+/// The `__DENY__` text for a commit when the gate cannot check it. The gate denies rather than
+/// passing a commit it could not check (#2630).
+fn gate_unavailable_deny(reason: &str) -> String {
+    format!(
+        "__DENY__:llmenv blocked this commit or pull request: the task commit gate cannot check \
+         it, because {reason}. Fix that, then run the same command again. To turn this off, set \
+         features.task_tracker.enforce_commit to false."
+    )
+}
+
+/// The `__DENY__` text for a commit when the deny marker cannot be saved to `path`.
+fn unsaved_state_deny(path: &Path) -> String {
+    gate_unavailable_deny(&format!(
+        "the task nudge state {} cannot be saved",
+        path.display()
+    ))
+}
+
+/// The deny for a commit when the llmenv state directory cannot be resolved, for the dispatcher.
+/// The commit gate reads its state there, so the commit is denied (#2630). `None` for any other
+/// call.
+pub(crate) fn state_dir_deny(
+    tracker: &TaskTracker,
+    payload: &serde_json::Value,
+    error: &anyhow::Error,
+) -> Option<String> {
+    let command = payload["tool_input"]["command"].as_str()?;
+    if !tracker.enforce_commit
+        || payload["tool_name"].as_str() != Some("Bash")
+        || !runs_commit_or_pr(command)
+    {
+        return None;
+    }
+    Some(gate_unavailable_deny(&format!(
+        "the llmenv state directory cannot be resolved ({error:#})"
+    )))
+}
+
 /// The `__DENY__` text for a commit when the nudge state file cannot be read. The gate cannot
 /// tell whether the commit has a task, so it denies every attempt until the file is readable (#2630).
 fn state_unreadable_deny(error: &str) -> String {
@@ -345,11 +383,12 @@ pub(crate) fn handle_pre_tool_use(
         return String::new();
     }
     let Some(id) = session_id else {
-        return String::new();
+        return gate_unavailable_deny("the hook payload has no session id");
     };
     let Some(path) = state_path(state_dir, id) else {
-        tracing::error!("task commit gate off: the session id is not a plain name");
-        return String::new();
+        return gate_unavailable_deny(&format!(
+            "the session id {id:?} is not a plain name, so its state file cannot be placed"
+        ));
     };
     let tracking = crate::task::tracking(state_dir);
     let mut state = match read_state(&path) {
@@ -371,13 +410,12 @@ pub(crate) fn handle_pre_tool_use(
             store_unreadable_deny()
         }
         _ if wip_open => {
+            // A marker that stays set would let a later commit with no task pass unchecked, so a
+            // failed clear denies this commit too (#2630).
             if state.commit_denied {
                 state.commit_denied = false;
                 if !save(&path, &state) {
-                    tracing::error!(
-                        "task commit gate: cannot clear the deny marker, so the next commit \
-                         passes without a task check"
-                    );
+                    return unsaved_state_deny(&path);
                 }
             }
             String::new()
@@ -387,9 +425,10 @@ pub(crate) fn handle_pre_tool_use(
         _ if state.commit_denied && !nested => String::new(),
         tracking => {
             state.commit_denied = true;
-            // Without the marker the retry would be denied again, so a failed save allows.
+            // Without the marker the retry would be denied again, so the deny cannot be recorded
+            // and the commit is denied as well (#2630).
             if !save(&path, &state) {
-                return String::new();
+                return unsaved_state_deny(&path);
             }
             if nested {
                 return format!(
@@ -453,6 +492,19 @@ mod tests {
     }
 
     #[test]
+    fn nested_shells_and_evals_fail_closed_past_the_depth_bound() {
+        let depth = MAX_SUBSTITUTION_DEPTH + 8;
+        let eval_chain = format!("{}git commit -m x", "eval ".repeat(depth));
+        assert!(runs_commit_or_pr(&eval_chain));
+        assert!(!runs_commit_or_pr(&format!("{}echo hi", "eval ".repeat(2))));
+        assert!(runs_commit_or_pr("sh -c 'sh -c \"git commit -m x\"'"));
+        assert!(runs_commit_or_pr("bash -lc \"eval 'git commit'\""));
+        // The splitter stops at the bound, so a long chain returns instead of growing the stack.
+        let long_chain = format!("{}git commit", "eval ".repeat(20_000));
+        assert!(runs_commit_or_pr(&long_chain));
+    }
+
+    #[test]
     fn commit_and_pull_request_commands_are_found_in_any_part_of_a_command() {
         for (command, expected) in [
             ("git commit -m x", true),
@@ -495,6 +547,19 @@ mod tests {
             ("eval \"echo hi\"", false),
             ("timeout 60 git status", false),
             ("env -i git status", false),
+            ("env -S 'git commit -m x'", true),
+            ("env -i -S 'git commit'", true),
+            ("env git commit -S", true),
+            ("timeout --signal KILL 60 git commit", true),
+            ("timeout --kill-after=5 60 git commit", true),
+            ("timeout -ks 5 60 git commit", true),
+            ("gtimeout 60 git commit", true),
+            ("gnice -n 5 git commit", true),
+            ("sudo -r role git commit", true),
+            ("sudo -t sudoers git commit", true),
+            ("flock /tmp/lock git commit", true),
+            ("flock -w 5 /tmp/lock git commit", true),
+            ("git -C repo status", false),
             ("bash -c \"git add . && git commit -m x\"", true),
             ("gh -R owner/repo pr create", true),
             ("gh pr create --title \"a && b\"", true),
@@ -748,8 +813,11 @@ mod tests {
         let edit =
             serde_json::json!({ "tool_name": "Edit", "tool_input": { "command": "git commit" } });
         assert_eq!(handle_pre_tool_use(&on, &edit, Some("s1"), dir.path()), "");
+        // A payload without a session id cannot be checked, so the commit is denied (#2630).
+        let no_session = handle_pre_tool_use(&on, &bash("git commit"), None, dir.path());
+        assert!(no_session.contains("has no session id"), "{no_session}");
         assert_eq!(
-            handle_pre_tool_use(&on, &bash("git commit"), None, dir.path()),
+            handle_pre_tool_use(&on, &bash("git status"), None, dir.path()),
             ""
         );
     }
