@@ -25,6 +25,7 @@ mod relevance;
 pub(crate) mod repeat_detect;
 mod session_ledger;
 mod session_state;
+mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
@@ -676,9 +677,15 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         .unwrap_or_default();
     let claude_session_id: Option<&str> =
         stdin_json.as_ref().and_then(|v| v["session_id"].as_str());
-    let claude_code_version = std::env::var("CLAUDE_CODE_VERSION")
-        .ok()
-        .unwrap_or_default();
+    // The version is informational. Failing the hook here would exit 1, which lets the tool call
+    // run unchecked, so a value that is not UTF-8 is logged and read as unset.
+    let claude_code_version = match crate::env_var::utf8_var("CLAUDE_CODE_VERSION") {
+        Ok(version) => version.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!("{e:#}");
+            String::new()
+        }
+    };
 
     let parsed = match HookEvent::from_str(event) {
         Ok(e) => e,
@@ -912,6 +919,18 @@ fn resolve_pre_tool_decision(
                 "failed to resolve state_dir; read_once/repeat_detect skipped for this call \
                  and the task-tool redirect degraded to a deny"
             );
+            // The commit gate reads its state from the same directory, so it denies rather than
+            // passing a commit it cannot check (#2630).
+            if task_tracker_enabled
+                && let Some(tracker) = config
+                    .features
+                    .as_ref()
+                    .and_then(|f| f.task_tracker.as_ref())
+                && let Some(deny) =
+                    crate::hook_run::task_nudge::state_dir_deny(tracker, stdin_payload, &e)
+            {
+                return Some(deny);
+            }
             task_tracker_enabled
                 .then(|| crate::hook_run::task_tools::deny_tracker_unavailable(stdin_payload, &e))
                 .flatten()

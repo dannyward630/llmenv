@@ -463,7 +463,7 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn is_active(&self) -> bool {
-        std::env::var("OPENCODE_CONFIG_DIR").is_ok() || binary_on_path("opencode")
+        std::env::var_os("OPENCODE_CONFIG_DIR").is_some() || binary_on_path("opencode")
     }
 
     fn binary_name(&self) -> &'static str {

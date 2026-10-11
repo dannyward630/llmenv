@@ -538,6 +538,9 @@ fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
 /// pidfile to a relative path in the caller's CWD would silently scatter state
 /// across whatever directories `llmenv` happens to be invoked from.
 pub(crate) fn default_pid_path() -> anyhow::Result<PathBuf> {
+    // A non-UTF-8 value reads as unset in the closure, which would move the pidfile with no message.
+    crate::env_var::utf8_var("XDG_STATE_HOME")?;
+    crate::env_var::utf8_var("HOME")?;
     pid_path_from_env(|k| std::env::var(k).ok())
 }
 
