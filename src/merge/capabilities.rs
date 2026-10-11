@@ -31,6 +31,21 @@ pub struct CapabilityContributor {
     pub capabilities: Capabilities,
 }
 
+/// Expand a leading `~` in a `codebase_memory` `index_path` once, at merge time.
+///
+/// A raw `~` reaches the indexer and the server as a relative directory name,
+/// so every consumer needs the expanded form (#2651).
+fn expand_codebase_memory(cm: &CodebaseMemory) -> anyhow::Result<CodebaseMemory> {
+    let mut out = cm.clone();
+    if let Some(raw) = &cm.index_path {
+        let expanded = llmenv_paths::expand_tilde(raw).map_err(|err| {
+            anyhow::anyhow!("features.codebase_memory index_path '{raw}' cannot be expanded: {err}")
+        })?;
+        out.index_path = Some(expanded);
+    }
+    Ok(out)
+}
+
 /// Merge capability fragments from all contributors by value shape.
 ///
 /// Contributors may be supplied in any order — precedence is read from the
@@ -137,7 +152,9 @@ pub fn merge_capabilities(contributors: &[CapabilityContributor]) -> anyhow::Res
         if let Some(features) = &c.capabilities.features {
             memory.extend(features.memory.iter().cloned());
             throttle.extend(features.throttle.iter().cloned());
-            codebase_memory.extend(features.codebase_memory.iter().cloned());
+            for cm in &features.codebase_memory {
+                codebase_memory.push(expand_codebase_memory(cm)?);
+            }
         }
     }
     dedup(&mut memory);
@@ -2024,6 +2041,32 @@ mod tests {
         .unwrap();
         let features = out.features.as_ref().expect("features must be present");
         assert_eq!(features.memory.len(), 2, "both entries must survive");
+    }
+
+    #[test]
+    fn codebase_memory_index_path_expands_tilde() {
+        let caps = Capabilities {
+            features: Some(Features {
+                codebase_memory: vec![CodebaseMemory {
+                    when: vec!["proj".into()],
+                    index_path: Some("~/cache/cbm".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let out = merge_capabilities(&[contributor("a", 1, caps)]).unwrap();
+        let features = out.features.expect("features must be present");
+        let path = features.codebase_memory[0]
+            .index_path
+            .clone()
+            .expect("index_path must survive the merge");
+        assert!(!path.starts_with('~'), "tilde must be expanded: {path}");
+        assert!(
+            path.ends_with("/cache/cbm"),
+            "path suffix must be kept: {path}"
+        );
     }
 
     #[test]
