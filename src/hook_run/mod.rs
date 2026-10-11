@@ -779,8 +779,15 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         }
         Err(e) => {
             eprintln!("llmenv: memory {event} skipped: {e}");
+            // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
             if let Some(notice) = notice {
-                eprintln!("{notice}");
+                let out = adapter.emit_hook_context(hook_event_name, notice);
+                if !out.is_empty()
+                    && let Err(e) = writeln!(std::io::stdout(), "{out}")
+                    && e.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("llmenv: failed to write hook output: {e}");
+                }
             }
         }
     }
