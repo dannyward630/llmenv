@@ -1,3 +1,4 @@
+#![expect(clippy::expect_used, reason = "test scaffolding")]
 use llmenv::paths::expand_tilde;
 use proptest::prelude::*;
 use std::path::Path;
@@ -8,8 +9,8 @@ use std::path::Path;
 fn prop_expand_tilde_idempotent_on_expanded() {
     proptest!(|(subpath in "[a-z0-9/_-]{0,50}")| {
         let tilde_path = format!("~/{}", subpath);
-        let expanded_once = expand_tilde(&tilde_path);
-        let expanded_twice = expand_tilde(&expanded_once);
+        let expanded_once = expand_tilde(&tilde_path).expect("HOME is UTF-8 in tests");
+        let expanded_twice = expand_tilde(&expanded_once).expect("HOME is UTF-8 in tests");
         prop_assert_eq!(expanded_once, expanded_twice);
     });
 }
@@ -17,7 +18,7 @@ fn prop_expand_tilde_idempotent_on_expanded() {
 #[test]
 fn prop_expand_tilde_non_tilde_unchanged() {
     proptest!(|(path in "[a-z0-9/_.-]{1,50}")| {
-        let result = expand_tilde(&path);
+        let result = expand_tilde(&path).expect("HOME is UTF-8 in tests");
         prop_assert_eq!(result, path);
     });
 }
@@ -25,7 +26,7 @@ fn prop_expand_tilde_non_tilde_unchanged() {
 #[test]
 fn expand_tilde_bare_tilde() {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
-    let result = expand_tilde("~");
+    let result = expand_tilde("~").expect("HOME is UTF-8 in tests");
     assert_eq!(result, home);
 }
 

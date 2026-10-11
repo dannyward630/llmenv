@@ -7,7 +7,13 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 /// (tilde-expanded) or `<state_dir>/session-log.jsonl`.
 fn session_log_file_path(configured: Option<&str>) -> PathBuf {
     match configured {
-        Some(raw) => PathBuf::from(llmenv_paths::expand_tilde(raw)),
+        Some(raw) => match llmenv_paths::expand_tilde(raw) {
+            Ok(expanded) => PathBuf::from(expanded),
+            Err(e) => {
+                eprintln!("llmenv: failed to resolve session log path: {e:#}; falling back to CWD");
+                PathBuf::from("session-log.jsonl")
+            }
+        },
         None => default_file_path().unwrap_or_else(|e| {
             eprintln!(
                 "llmenv: failed to resolve default session log path: {e}; falling back to CWD"

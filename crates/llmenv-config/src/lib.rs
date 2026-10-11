@@ -78,7 +78,7 @@ impl Config {
         // by a lossy round trip. A non-tilde path is untouched either way.
         let path: std::borrow::Cow<'_, Path> = match path.strip_prefix("~") {
             Ok(rest) => {
-                let home = llmenv_paths::expand_tilde("~");
+                let home = llmenv_paths::expand_tilde("~")?;
                 std::borrow::Cow::Owned(std::path::PathBuf::from(home).join(rest))
             }
             Err(_) => std::borrow::Cow::Borrowed(path),

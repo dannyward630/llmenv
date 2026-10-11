@@ -2562,8 +2562,15 @@ fn resolve_bundle_memory_host(
         })
         .ok()
         .and_then(|key| {
-            let cache_root =
-                std::path::PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
+            let cache_dir = match crate::paths::expand_tilde(&config.cache.cache_dir) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    // A miss falls through to a rebuild, which reports the same error.
+                    tracing::warn!("merge cache lookup skipped: {e:#}");
+                    return None;
+                }
+            };
+            let cache_root = std::path::PathBuf::from(cache_dir);
             crate::materialize::merge_cache::read_if_matching(&cache_root, &key)
         });
     if let Some(hit) = disk_hit {

@@ -1,29 +1,46 @@
 //! XDG paths and path helpers.
 
+use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 /// Expand a leading `~` or `~/` to `$HOME`. Other input is returned unchanged.
 /// Returns the input unchanged when `HOME` is unset or empty.
-#[must_use]
-pub fn expand_tilde(p: &str) -> String {
-    expand_tilde_with_env(p, &|name| std::env::var(name).ok())
+///
+/// # Errors
+/// Returns an error that names `HOME` when the input starts with `~` and `HOME` is set to a
+/// value that is not valid UTF-8. Such a path cannot be expanded, and it must not be used as is.
+pub fn expand_tilde(p: &str) -> anyhow::Result<String> {
+    expand_tilde_with_env(p, &|name| std::env::var(name))
 }
 
 /// [`expand_tilde`] with an injectable env-var provider so tests can exercise
-/// the set-but-empty `HOME` case without mutating real process env vars.
-fn expand_tilde_with_env(p: &str, get_env: &impl Fn(&str) -> Option<String>) -> String {
-    // A set-but-empty HOME has the same failure mode as HOME being unset — an
-    // empty home would silently anchor "~/rest" at the filesystem root
-    // ("/rest") instead of leaving the input unchanged (#1179).
-    let Some(home) = get_env("HOME").filter(|h| !h.is_empty()) else {
-        return p.to_string();
-    };
-    if let Some(rest) = p.strip_prefix("~/") {
-        format!("{home}/{rest}")
-    } else if p == "~" {
-        home
+/// the set-but-empty and non-UTF-8 `HOME` cases without mutating real process env vars.
+fn expand_tilde_with_env(
+    p: &str,
+    get_env: &impl Fn(&str) -> Result<String, VarError>,
+) -> anyhow::Result<String> {
+    let rest = if p == "~" {
+        ""
+    } else if let Some(rest) = p.strip_prefix("~/") {
+        rest
     } else {
-        p.to_string()
+        return Ok(p.to_string());
+    };
+    // HOME is read only for a `~` input, so an absolute or relative path never fails on it.
+    let home = match get_env("HOME") {
+        // A set-but-empty HOME has the same failure mode as HOME being unset — an
+        // empty home would silently anchor "~/rest" at the filesystem root
+        // ("/rest") instead of leaving the input unchanged (#1179).
+        Ok(home) if !home.is_empty() => home,
+        Ok(_) | Err(VarError::NotPresent) => return Ok(p.to_string()),
+        Err(VarError::NotUnicode(_)) => anyhow::bail!(
+            "cannot expand {p:?}: HOME is not valid UTF-8. Set HOME to a UTF-8 path and retry"
+        ),
+    };
+    if p == "~" {
+        Ok(home)
+    } else {
+        Ok(format!("{home}/{rest}"))
     }
 }
 
@@ -134,6 +151,15 @@ fn home_is_read(override_value: Option<&std::ffi::OsStr>) -> bool {
     }
 }
 
+/// Adapts an Option-based env provider to the Result-based one that
+/// [`expand_tilde_with_env`] takes. A non-UTF-8 `HOME` never reaches this adapter in
+/// production, because [`ensure_utf8_override`] rejects it first.
+fn present_only(
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> impl Fn(&str) -> Result<String, VarError> + '_ {
+    move |name| get_env(name).ok_or(VarError::NotPresent)
+}
+
 /// [`config_dir`] with an injectable env-var provider so tests can exercise
 /// the set-but-empty override case without mutating real process env vars.
 fn config_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
@@ -142,7 +168,10 @@ fn config_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Res
     if let Some(dir) = get_env("LLMENV_CONFIG_DIR").filter(|d| !d.is_empty()) {
         // Same bug class as #1910: a tilde-prefixed override is a directory
         // path, not a literal string, and must be expanded like any other.
-        Ok(PathBuf::from(expand_tilde_with_env(&dir, get_env)))
+        Ok(PathBuf::from(expand_tilde_with_env(
+            &dir,
+            &present_only(get_env),
+        )?))
     } else {
         // A set-but-empty `HOME` has the identical failure mode as the override
         // above (a relative `PathBuf::from("")`-derived path) — treat it as
@@ -171,7 +200,10 @@ fn state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Resu
     if let Some(dir) = get_env("LLMENV_STATE_DIR").filter(|d| !d.is_empty()) {
         // Same bug class as #1910: a tilde-prefixed override is a directory
         // path, not a literal string, and must be expanded like any other.
-        Ok(PathBuf::from(expand_tilde_with_env(&dir, get_env)))
+        Ok(PathBuf::from(expand_tilde_with_env(
+            &dir,
+            &present_only(get_env),
+        )?))
     } else {
         // Same reasoning as `config_dir_with_env`: a set-but-empty `HOME` must
         // also be treated as unset, not just the override.
@@ -887,29 +919,68 @@ mod tests {
     #[test]
     fn tilde_passthrough_for_absolute_and_relative() {
         // Tests the non-HOME-dependent branches.
-        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
-        assert_eq!(expand_tilde("rel/path"), "rel/path");
-        assert_eq!(expand_tilde(""), "");
+        assert_eq!(
+            expand_tilde("/abs/path").expect("no HOME read"),
+            "/abs/path"
+        );
+        assert_eq!(expand_tilde("rel/path").expect("no HOME read"), "rel/path");
+        assert_eq!(expand_tilde("").expect("no HOME read"), "");
     }
 
     #[test]
     fn expand_tilde_with_env_empty_home_behaves_like_unset() {
-        let unset = |_: &str| None;
+        let unset = |_: &str| Err(VarError::NotPresent);
         let empty = |name: &str| match name {
-            "HOME" => Some(String::new()),
-            _ => None,
+            "HOME" => Ok(String::new()),
+            _ => Err(VarError::NotPresent),
         };
         assert_eq!(
-            expand_tilde_with_env("~/foo", &unset),
-            expand_tilde_with_env("~/foo", &empty)
+            expand_tilde_with_env("~/foo", &unset).expect("unset HOME is not an error"),
+            expand_tilde_with_env("~/foo", &empty).expect("empty HOME is not an error")
         );
-        assert_eq!(expand_tilde_with_env("~/foo", &empty), "~/foo");
+        assert_eq!(
+            expand_tilde_with_env("~/foo", &empty).expect("empty HOME is not an error"),
+            "~/foo"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_tilde_non_utf8_home_is_an_error_that_names_home() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let raw = std::ffi::OsString::from_vec(vec![0x2f, 0x80]);
+        let bad_home = |_: &str| Err(VarError::NotUnicode(raw.clone()));
+
+        for input in ["~", "~/cache"] {
+            let err = expand_tilde_with_env(input, &bad_home)
+                .expect_err("a non-UTF-8 HOME must not expand silently");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("HOME"), "{msg}");
+            assert!(msg.contains(input), "error must name the input: {msg}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_tilde_non_utf8_home_leaves_other_paths_alone() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let raw = std::ffi::OsString::from_vec(vec![0x80]);
+        let bad_home = |_: &str| Err(VarError::NotUnicode(raw.clone()));
+
+        assert_eq!(
+            expand_tilde_with_env("/abs/path", &bad_home).expect("absolute paths skip HOME"),
+            "/abs/path"
+        );
+        assert_eq!(
+            expand_tilde_with_env("rel/path", &bad_home).expect("relative paths skip HOME"),
+            "rel/path"
+        );
     }
 
     #[test]
     fn expand_tilde_bare_tilde_equals_home() {
         let home = std::env::var("HOME").expect("HOME must be set; expand_tilde relies on it");
-        let result = expand_tilde("~");
+        let result = expand_tilde("~").expect("HOME is UTF-8 in the test environment");
         assert_eq!(result, home);
         assert!(!result.ends_with('/'));
     }
@@ -946,7 +1017,7 @@ mod tests {
 
         #[test]
         fn expand_tilde_passthrough_non_tilde(s in "[^~].*") {
-            prop_assert_eq!(expand_tilde(&s), s);
+            prop_assert_eq!(expand_tilde(&s).expect("non-tilde input never reads HOME"), s);
         }
 
         #[test]
@@ -960,7 +1031,7 @@ mod tests {
             prop_assume!(home_result.is_ok());
             let home = home_result.unwrap();
             let input = format!("~/{rest}");
-            let result = expand_tilde(&input);
+            let result = expand_tilde(&input).expect("HOME is UTF-8 in the test environment");
             prop_assert!(result.starts_with(&home),
                 "expected {result} to start with home={home}");
             prop_assert!(result.ends_with(&rest) || rest.is_empty(),
