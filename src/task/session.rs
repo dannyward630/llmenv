@@ -864,9 +864,9 @@ pub(crate) fn update_resume(
 
 /// `(done, total)` counts for tasks tagged with `session_id`.
 ///
-/// Display only. The statusline data has no error channel, so an unreadable task file is left out
-/// of the counts instead of failing the line. Decisions that depend on the session use
-/// [`try_tasks_in_session`] (#2608).
+/// Counts that a display or a decision reads from a store already checked by the caller. The
+/// statusline data has no error channel, so it reads this lenient count and an unreadable task
+/// file is left out. Callers that need a count they can trust use [`try_session_progress`] (#2608).
 #[must_use]
 pub(crate) fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
     let tasks = tasks_in_session(state_dir, session_id);
@@ -911,6 +911,19 @@ pub struct SessionSummary {
     pub(crate) agent: Option<crate::hook_run::agent_config::AgentConfig>,
 }
 
+/// [`session_progress`], but a task file that cannot be read is an error.
+///
+/// # Errors
+/// Returns an error when the tasks of the session cannot be read.
+pub(crate) fn try_session_progress(
+    state_dir: &Path,
+    session_id: &str,
+) -> anyhow::Result<(u64, u64)> {
+    let tasks = try_tasks_in_session(state_dir, session_id)?;
+    let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
+    Ok((done, tasks.len() as u64))
+}
+
 /// Build a [`SessionSummary`] for `session_id`.
 ///
 /// # Errors
@@ -919,7 +932,7 @@ pub(crate) fn session_summary(
     state_dir: &Path,
     session_id: &str,
 ) -> anyhow::Result<SessionSummary> {
-    let session = list_sessions(state_dir)
+    let session = try_list_sessions(state_dir)?
         .into_iter()
         .find(|s| s.id == session_id)
         .ok_or_else(|| anyhow::anyhow!("no session '{session_id}' found"))?;
