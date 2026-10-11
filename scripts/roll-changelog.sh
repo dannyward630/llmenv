@@ -26,6 +26,13 @@ set -euo pipefail
 
 VERSION="${1:?usage: roll-changelog.sh <version>}"
 
+# cargo-release sets DRY_RUN=true for hooks during a dry run. A dry run must
+# not edit the changelog (#2637).
+if [[ "${DRY_RUN:-}" == "true" ]]; then
+  echo "roll-changelog: dry run, no changes" >&2
+  exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -49,7 +56,7 @@ echo "roll-changelog: using $CHANGELOG" >&2
 DATE="$(date +%Y-%m-%d)"
 REPO="https://github.com/phaedrus1992/llmenv"
 
-python3 - "$CHANGELOG" "$VERSION" "$DATE" "$REPO" << 'PYEOF'
+python3 - "$CHANGELOG" "$VERSION" "$DATE" "$REPO" <<'PYEOF'
 import sys, re
 
 changelog_path, version, date, repo = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
