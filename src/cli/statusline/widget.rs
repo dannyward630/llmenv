@@ -1189,7 +1189,13 @@ fn format_delta(delta: f64) -> String {
 /// (`$CLAUDE_CONFIG_DIR/statusline-state`). `None` when the engine didn't
 /// export `CLAUDE_CONFIG_DIR`, which disables delta tracking.
 fn usage_state_dir() -> Option<PathBuf> {
-    usage_state_dir_with_env(&|name| std::env::var(name).ok())
+    // A value that is not UTF-8 turns tracking off, so the log says why (#2607).
+    usage_state_dir_with_env(&|name| {
+        crate::env_var::utf8_var(name)
+            .inspect_err(|e| tracing::warn!("usage state dir: {e:#}"))
+            .ok()
+            .flatten()
+    })
 }
 
 /// [`usage_state_dir`] with an injectable env-var provider so tests can

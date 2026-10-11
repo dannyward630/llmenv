@@ -100,7 +100,7 @@ pub fn cwd_under_prefix(cwd: &str, prefix: &str) -> bool {
 }
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
-    ensure_utf8_env(&["LLMENV_CONFIG_DIR", "HOME"])?;
+    ensure_utf8_override("LLMENV_CONFIG_DIR")?;
     config_dir_with_env(&|name| std::env::var(name).ok())
 }
 
@@ -115,11 +115,23 @@ fn ensure_utf8(name: &str, value: Option<&std::ffi::OsStr>) -> anyhow::Result<()
     }
 }
 
-/// [`ensure_utf8`] for each of `names`, read from the process environment.
-fn ensure_utf8_env(names: &[&str]) -> anyhow::Result<()> {
-    names
-        .iter()
-        .try_for_each(|name| ensure_utf8(name, std::env::var_os(name).as_deref()))
+/// Checks the override `name`, and `HOME` when the resolved path reads it (#2607).
+fn ensure_utf8_override(name: &str) -> anyhow::Result<()> {
+    let value = std::env::var_os(name);
+    ensure_utf8(name, value.as_deref())?;
+    if home_is_read(value.as_deref()) {
+        ensure_utf8("HOME", std::env::var_os("HOME").as_deref())?;
+    }
+    Ok(())
+}
+
+/// Whether the resolved path reads `HOME`: when the override is unset or empty, or when it is a
+/// `~` path that is expanded. An absolute override never reads it.
+fn home_is_read(override_value: Option<&std::ffi::OsStr>) -> bool {
+    match override_value.filter(|v| !v.is_empty()) {
+        None => true,
+        Some(value) => value.to_str().is_some_and(|s| s.starts_with('~')),
+    }
 }
 
 /// [`config_dir`] with an injectable env-var provider so tests can exercise
@@ -147,7 +159,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn state_dir() -> anyhow::Result<PathBuf> {
-    ensure_utf8_env(&["LLMENV_STATE_DIR", "HOME"])?;
+    ensure_utf8_override("LLMENV_STATE_DIR")?;
     state_dir_with_env(&|name| std::env::var(name).ok())
 }
 
@@ -365,6 +377,15 @@ mod tests {
                 .contains("LLMENV_STATE_DIR is not valid UTF-8"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn home_is_read_only_when_the_override_does_not_resolve_the_path() {
+        use std::ffi::OsStr;
+        assert!(home_is_read(None));
+        assert!(home_is_read(Some(OsStr::new(""))));
+        assert!(home_is_read(Some(OsStr::new("~/llmenv"))));
+        assert!(!home_is_read(Some(OsStr::new("/srv/llmenv"))));
     }
 
     #[test]
