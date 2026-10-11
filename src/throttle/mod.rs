@@ -450,6 +450,21 @@ mod tests {
         assert!(result.is_none());
     }
 
+    proptest::proptest! {
+        /// Content that does not parse as a throttle is an error that names the file, for any
+        /// such content, and never a silent "throttling off" (#2609).
+        #[test]
+        fn any_non_throttle_state_is_an_error_naming_the_file(junk in "#[ -~]{1,64}") {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = throttle_state_path(tmp.path());
+            std::fs::write(&path, &junk).unwrap();
+            let err = read_active_throttle_with_state_dir(tmp.path())
+                .expect_err("junk content must not read as no throttle");
+            let text = format!("{:#}", err);
+            proptest::prop_assert!(text.contains(&path.display().to_string()));
+        }
+    }
+
     #[test]
     fn read_active_throttle_errors_on_corrupt_state_file_with_path() {
         let tmp = tempfile::tempdir().unwrap();

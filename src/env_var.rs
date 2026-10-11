@@ -46,6 +46,7 @@ fn utf8_value(name: &str, read: Result<String, VarError>) -> anyhow::Result<Opti
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{utf8_value, utf8_var};
+    use proptest::strategy::Strategy as _;
     use std::env::VarError;
 
     #[test]
@@ -59,6 +60,24 @@ mod tests {
     fn present_value_reads_as_some() {
         let got = utf8_value("X", Ok("/home/me".to_string())).expect("present");
         assert_eq!(got, Some("/home/me".to_string()));
+    }
+
+    proptest::proptest! {
+        /// Any raw value that is not UTF-8 is an error that names the variable, for any bytes.
+        /// The variable must never read as unset (#2600).
+        #[cfg(unix)]
+        #[test]
+        fn any_non_utf8_value_is_an_error_naming_the_variable(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..64)
+                .prop_filter("must be invalid UTF-8", |b| std::str::from_utf8(b).is_err()),
+        ) {
+            use std::os::unix::ffi::OsStringExt as _;
+            let raw = std::ffi::OsString::from_vec(bytes);
+            let err = utf8_value("EDITOR", Err(VarError::NotUnicode(raw)))
+                .expect_err("non-UTF-8 must not read as unset");
+            let msg = format!("{:#}", err);
+            proptest::prop_assert!(msg.contains("EDITOR"));
+        }
     }
 
     #[cfg(unix)]

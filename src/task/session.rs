@@ -1754,6 +1754,21 @@ mod tests {
         assert_eq!(try_list_sessions(dir.path()).unwrap(), Vec::new());
     }
 
+    proptest::proptest! {
+        /// Any session file that is not a session is an error naming the file. A lenient read
+        /// would drop it, and its tasks with it (#2628).
+        #[test]
+        fn list_sessions_strict_errors_on_any_non_session_file(junk in "#[ -~]{1,64}") {
+            let dir = TempDir::new().expect("test");
+            std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+            let bad = session_path(dir.path(), "bad-session");
+            std::fs::write(&bad, &junk).expect("test");
+            let err = list_sessions_strict(dir.path()).expect_err("non-session file must fail");
+            let text = format!("{:#}", err);
+            proptest::prop_assert!(text.contains(&bad.display().to_string()));
+        }
+    }
+
     #[test]
     fn list_sessions_strict_names_a_corrupt_session_file() {
         let dir = TempDir::new().expect("test");
