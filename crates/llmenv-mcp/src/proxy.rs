@@ -468,6 +468,18 @@ fn wait_for_bind(bind: &str, child: &mut Child, budget_ms: u64) -> anyhow::Resul
     }
 }
 
+/// Delete a stale pidfile. A failed delete is logged with its path, not dropped.
+fn clear_pidfile(pid_path: &Path, reason: &str) {
+    match std::fs::remove_file(pid_path) {
+        Ok(()) => tracing::debug!("cleared proxy pidfile {}: {reason}", pid_path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::error!(
+            "cannot remove proxy pidfile {}: {e} ({reason})",
+            pid_path.display()
+        ),
+    }
+}
+
 /// Clears a pidfile that names a process which is not running.
 ///
 /// Called once the port has proved a proxy is up. A pidfile naming a dead or
@@ -488,16 +500,11 @@ fn reconcile_pidfile(pid_path: &Path) {
         // valid pid.
         Ok(Some(pid)) => {
             if is_alive(pid) == Some(false) {
-                tracing::debug!("clearing proxy pidfile: pid {pid} is not running");
-                let _ = std::fs::remove_file(pid_path);
+                clear_pidfile(pid_path, &format!("pid {pid} is not running"));
             }
         }
         Err(PidfileError::Unparseable(e)) => {
-            tracing::debug!(
-                "clearing unparseable proxy pidfile {}: {e}",
-                pid_path.display()
-            );
-            let _ = std::fs::remove_file(pid_path);
+            clear_pidfile(pid_path, &format!("unparseable: {e}"));
         }
         // An I/O error is not evidence the contents are wrong, and deleting would
         // fail for the same reason. Say so instead — `eprintln!` because the

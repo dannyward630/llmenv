@@ -1644,6 +1644,37 @@ pub struct CodebaseMemory {
     pub allowed_roots: Vec<String>,
 }
 
+impl CodebaseMemory {
+    /// Expand a leading `~` in `index_path` in place. Every reader of the path gets the
+    /// expanded form, so a raw `~` never reaches the indexer as a relative directory name (#2651).
+    ///
+    /// # Errors
+    /// `HOME` is not set, so the `~` cannot be expanded. Set `HOME`, or give an absolute path.
+    pub fn expand_index_path(&mut self) -> anyhow::Result<()> {
+        let Some(raw) = self.index_path.as_deref() else {
+            return Ok(());
+        };
+        let expanded = llmenv_paths::expand_tilde(raw).map_err(|err| {
+            anyhow::anyhow!("features.codebase_memory index_path '{raw}' cannot be expanded: {err}")
+        })?;
+        reject_unexpanded_tilde(raw, &expanded)?;
+        self.index_path = Some(expanded);
+        Ok(())
+    }
+}
+
+/// `expand_tilde` returns `~` and `~/x` unchanged when HOME is unset or empty. A path like
+/// `~user/x` is also returned unchanged, but it is not a HOME path, so it passes.
+fn reject_unexpanded_tilde(raw: &str, expanded: &str) -> anyhow::Result<()> {
+    if expanded == raw && (raw == "~" || raw.starts_with("~/")) {
+        anyhow::bail!(
+            "features.codebase_memory index_path '{raw}' starts with ~ but HOME is not set. \
+             Set HOME, or give index_path as an absolute directory."
+        );
+    }
+    Ok(())
+}
+
 fn default_throttle_cache_ttl() -> u64 {
     30
 }
@@ -2088,6 +2119,22 @@ pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
 pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn an_unchanged_home_path_is_rejected_as_an_unset_home() {
+        for raw in ["~", "~/cache/cbm"] {
+            let err = reject_unexpanded_tilde(raw, raw).unwrap_err().to_string();
+            assert!(err.contains("HOME is not set"), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_expanded_or_non_home_path_passes_the_tilde_check() {
+        assert!(reject_unexpanded_tilde("~/cache/cbm", "/home/u/cache/cbm").is_ok());
+        assert!(reject_unexpanded_tilde("/abs/path", "/abs/path").is_ok());
+        // `~user/x` is not a HOME path, so expand_tilde leaves it as is without an error.
+        assert!(reject_unexpanded_tilde("~user/x", "~user/x").is_ok());
+    }
 
     #[test]
     fn memory_adaptive_recall_defaults_to_true_and_accepts_false() {

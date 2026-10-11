@@ -90,8 +90,14 @@ impl Config {
         let path = path.as_ref();
         let s = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
-        let cfg: Self = serde_yaml::from_str(&s)
+        let mut cfg: Self = serde_yaml::from_str(&s)
             .with_context(|| format!("failed to parse config file: {}", path.display()))?;
+        if let Some(features) = cfg.features.as_mut() {
+            for cm in &mut features.codebase_memory {
+                cm.expand_index_path()
+                    .with_context(|| format!("config file: {}", path.display()))?;
+            }
+        }
         cfg.validate()
             .with_context(|| format!("config validation failed: {}", path.display()))?;
         Ok(cfg)
@@ -246,6 +252,31 @@ mod tests {
         let dir_name = dir.path().file_name().unwrap().to_str().unwrap();
         let tilde_path = format!("~/{dir_name}/config.yaml");
         assert!(Config::load(Path::new(&tilde_path)).is_ok());
+    }
+
+    #[test]
+    fn load_expands_tilde_in_root_codebase_memory_index_path() {
+        // #2651: a root-level entry is not merged, so `load` must expand it itself.
+        let home = std::env::var("HOME").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(".llmenv-config-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let p = dir.path().join("config.yaml");
+        let yaml =
+            "features:\n  codebase_memory:\n    - when: [proj]\n      index_path: ~/cache/cbm\n";
+        std::fs::write(&p, yaml).unwrap();
+        let cfg = Config::load(&p).unwrap();
+        let cm = &cfg.features.unwrap().codebase_memory[0];
+        let index_path = cm.index_path.as_deref().unwrap();
+        assert!(
+            !index_path.starts_with('~'),
+            "tilde must be expanded: {index_path}"
+        );
+        assert!(
+            index_path.ends_with("/cache/cbm"),
+            "suffix kept: {index_path}"
+        );
     }
 
     // macOS (APFS/HFS+) rejects invalid-UTF-8 filenames at the syscall level, so this

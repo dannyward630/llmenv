@@ -160,11 +160,13 @@ fn download_binary(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<
         .send()
         .context("failed to download binary")?;
     let status = resp.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "download failed with HTTP {status} from {url}. Check the network or proxy, then run \
-         llmenv upgrade again."
-    );
+    if !status.is_success() {
+        let excerpt = github::read_error_excerpt(resp);
+        anyhow::bail!(
+            "download failed with HTTP {status} from {url}; body starts with {excerpt:?}. Check \
+             the network or proxy, then run llmenv upgrade again."
+        );
+    }
     Ok(resp.bytes().context("failed to read binary")?.to_vec())
 }
 
