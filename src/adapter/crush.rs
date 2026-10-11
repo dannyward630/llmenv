@@ -65,7 +65,8 @@ impl AgentAdapter for CrushAdapter {
     }
 
     fn is_active(&self) -> bool {
-        std::env::var("CRUSH_GLOBAL_CONFIG").is_ok()
+        // Presence, not a readable value: a value that is not UTF-8 still marks the adapter active.
+        std::env::var_os("CRUSH_GLOBAL_CONFIG").is_some()
     }
 
     fn binary_name(&self) -> &'static str {

@@ -11,7 +11,7 @@
 //! current call's `tool_input.command`, no per-session tracking needed.
 
 use crate::config::CdGuard;
-use crate::hook_run::task_nudge::{NestingTooDeep, program_words, shell_segments};
+use crate::hook_run::shell_split::{NestingTooDeep, program_words, shell_segments};
 
 const ADVISORY: &str = "note: this command changes the working directory with `cd` — \
 Claude Code resets the cwd after every Bash call, so a following command that assumes \

@@ -862,6 +862,10 @@ pub fn update_resume(
 }
 
 /// `(done, total)` counts for tasks tagged with `session_id`.
+///
+/// Counts that a display or a decision reads from a store already checked by the caller. The
+/// statusline data has no error channel, so it reads this lenient count and an unreadable task
+/// file is left out. Callers that need a count they can trust use [`try_session_progress`] (#2608).
 #[must_use]
 pub fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
     let tasks = tasks_in_session(state_dir, session_id);
@@ -907,6 +911,16 @@ pub struct SessionSummary {
     pub agent: Option<serde_json::Value>,
 }
 
+/// [`session_progress`], but a task file that cannot be read is an error.
+///
+/// # Errors
+/// Returns an error when the tasks of the session cannot be read.
+pub fn try_session_progress(state_dir: &Path, session_id: &str) -> anyhow::Result<(u64, u64)> {
+    let tasks = try_tasks_in_session(state_dir, session_id)?;
+    let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
+    Ok((done, tasks.len() as u64))
+}
+
 /// Build a [`SessionSummary`] for `session_id`, with no agent block.
 ///
 /// # Errors
@@ -926,11 +940,11 @@ pub fn session_summary_with_agent(
     session_id: &str,
     load_agent: impl Fn(&Path, &str) -> Option<serde_json::Value>,
 ) -> anyhow::Result<SessionSummary> {
-    let session = list_sessions(state_dir)
+    let session = try_list_sessions(state_dir)?
         .into_iter()
         .find(|s| s.id == session_id)
         .ok_or_else(|| anyhow::anyhow!("no session '{session_id}' found"))?;
-    let tasks = tasks_in_session(state_dir, session_id);
+    let tasks = try_tasks_in_session(state_dir, session_id)?;
     let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
     let total = tasks.len() as u64;
 
@@ -981,23 +995,35 @@ pub(crate) fn missing_context_reminders(
     open_sessions_visible_to(state_dir, project, caller)
         .iter()
         .filter(|session| session.resume.needs_nudge())
-        .filter(|session| {
-            tasks_in_session(state_dir, &session.id)
-                .iter()
-                .any(|task| task.state != TaskState::Done)
-        })
-        .map(|session| {
-            let id = &session.id;
-            format!(
-                "Session '{label}' ({id}) has no resume context. If you recognize it as your \
-                 own, run `llmenv task session edit {id} --context \"...\" --issue N` so a \
-                 fresh agent can pick it up after /clear. If you don't recognize it, it \
-                 belongs to a different session — leave it alone.",
-                label = session.name.as_deref().unwrap_or(id.as_str()),
-            )
+        .filter_map(|session| match try_tasks_in_session(state_dir, &session.id) {
+            Ok(tasks) if tasks.iter().any(|task| task.state != TaskState::Done) => {
+                Some(missing_context_line(session))
+            }
+            Ok(_) => None,
+            // The unfinished check needs the whole session. A partial read cannot clear it, so the
+            // line says the session was not checked (#2608).
+            Err(e) => Some(format!(
+                "Session '{label}' ({id}) was not checked for resume context: the task store cannot \
+                 be read ({err:#}). Fix the task store, then run `llmenv task ls --all` to confirm.",
+                label = session.name.as_deref().unwrap_or(session.id.as_str()),
+                id = session.id,
+                err = e,
+            )),
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// The reminder for one open session that has no resume context.
+fn missing_context_line(session: &Session) -> String {
+    let id = &session.id;
+    format!(
+        "Session '{label}' ({id}) has no resume context. If you recognize it as your \
+         own, run `llmenv task session edit {id} --context \"...\" --issue N` so a \
+         fresh agent can pick it up after /clear. If you don't recognize it, it \
+         belongs to a different session — leave it alone.",
+        label = session.name.as_deref().unwrap_or(id.as_str()),
+    )
 }
 
 /// The most characters of one session's resume text that the SessionStart reminder carries.
