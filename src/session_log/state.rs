@@ -43,26 +43,23 @@ pub(crate) fn state_path() -> PathBuf {
 
 /// Load the correlation map at `path`. A missing file is the normal
 /// first-run case and returns an empty map silently. A file that exists but
-/// fails to parse (truncated by a crash, hand-edited, corrupted) is handled
-/// fail-soft: the map degrades to empty and a `warn!` message is logged.
-/// A file that exists but cannot be read is an error. A caller that then
-/// wrote the empty map back would erase every stored mapping.
-///
-/// **Deliberate deviation from hard-error convention:** Unlike persistent
-/// config (plugins, `.claude.json`), session correlation state is ephemeral
-/// and low-stakes — loss of correlation just means new session IDs next
-/// launch. Session logging must never block a session over a corrupt state
-/// file; fail-soft is correct here. The tradeoff prioritizes availability
-/// over corruption detection (contrast: #522 treats corrupt `installed_plugins.json`
-/// as a hard error to avoid losing version pins).
+/// fails to parse (truncated by a crash, hand-edited, corrupted) is an error.
+/// A lookup must not treat it as a miss (#2658). A file that exists but
+/// cannot be read is an error too. Writes use [`load_for_write`], which moves a corrupt
+/// file aside instead of failing.
 fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     let Some(s) = read_map_text(path)? else {
         return Ok(BTreeMap::default());
     };
-    Ok(serde_json::from_str(&s).unwrap_or_else(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
-        BTreeMap::default()
-    }))
+    // A corrupt map is an error here, not a miss. A miss would end a session's
+    // lifecycle link silently (#2658). The next write moves the file aside.
+    serde_json::from_str(&s).with_context(|| {
+        format!(
+            "the session map {} is corrupt. The next write moves it aside to {}.corrupt",
+            path.display(),
+            path.display()
+        )
+    })
 }
 
 /// Read the map text at `path`. `None` means the file is missing.
@@ -89,7 +86,14 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     match serde_json::from_str(&s) {
         Ok(map) => Ok(map),
         Err(e) => {
-            let aside = path.with_extension("json.corrupt");
+            // A second corruption must not overwrite the first aside copy (#2658 review).
+            let mut aside = path.with_extension("json.corrupt");
+            if aside.exists() {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos());
+                aside = path.with_extension(format!("json.corrupt.{nanos}"));
+            }
             std::fs::rename(path, &aside).with_context(|| {
                 format!(
                     "moving the corrupt session map {} aside to {}",
@@ -97,7 +101,8 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
                     aside.display()
                 )
             })?;
-            tracing::warn!(
+            // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
+            tracing::error!(
                 error = %e,
                 path = %path.display(),
                 aside = %aside.display(),
@@ -188,11 +193,28 @@ mod tests {
     }
 
     #[test]
-    fn load_at_degrades_to_empty_on_corrupt_json_instead_of_panicking() {
+    fn load_at_errors_on_corrupt_json_instead_of_reading_as_a_miss() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript-sessions.json");
         std::fs::write(&path, "{not valid json").unwrap();
-        assert!(load_at(&path).unwrap().is_empty());
+        let err = lookup_session_at(&path, "claude-1").expect_err("corrupt must not be a miss");
+        assert!(format!("{err:#}").contains(&path.display().to_string()));
+    }
+
+    proptest! {
+        /// Any content that is not a JSON map is kept byte for byte in the aside file,
+        /// and the write that moved it still records its pair (#2658).
+        #[test]
+        fn a_corrupt_map_is_kept_byte_for_byte_in_the_aside_file(junk in "#[ -~]{1,64}") {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transcript-sessions.json");
+            std::fs::write(&path, &junk).unwrap();
+            record_at(&path, "claude-new", "icm-new").unwrap();
+            let aside = dir.path().join("transcript-sessions.json.corrupt");
+            prop_assert_eq!(std::fs::read_to_string(&aside).unwrap(), junk);
+            let found = lookup_session_at(&path, "claude-new").unwrap();
+            prop_assert_eq!(found.as_deref(), Some("icm-new"));
+        }
     }
 
     /// Write-only mode makes the read fail while a write still succeeds. Before the fix the record
