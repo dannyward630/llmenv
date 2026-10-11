@@ -213,7 +213,7 @@ See [`task`](commands.md#task) for the rules.
 
 (added in v3.12.2)
 
-llmenv reads `HOME`, `USER`, `CLAUDE_CONFIG_DIR`, `LLMENV_EXTRA_TAGS`, and `CLAUDE_CODE_SESSION_ID`.
+llmenv reads `HOME`, `USER`, `CLAUDE_CONFIG_DIR`, `LLMENV_EXTRA_TAGS`, `CLAUDE_CODE_SESSION_ID`, and `CLAUDE_PID`.
 A value that is not UTF-8 is no longer treated as unset.
 A command that reads `HOME`, `USER`, or `CLAUDE_CONFIG_DIR` stops with an error that names the variable.
 An example is `HOME is not valid UTF-8; set HOME to a UTF-8 value and retry`.
@@ -221,7 +221,14 @@ This covers `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain r
 
 - The config guard prints its error and does not run.
 - For `LLMENV_EXTRA_TAGS`, a command stops, and a hook logs the error and skips the bundle features.
-- For `CLAUDE_CODE_SESSION_ID`, llmenv logs a warning, and session ownership falls back as if no session existed.
+- For `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`, a `llmenv task` command stops with an error that names the variable
+  (changed in v3.13.0; before, llmenv logged a warning and treated the variable as unset).
+- A path that starts with `~`, such as `cache.cache_dir`, stops with an error that names `HOME` and the path
+  (added in v3.13.0).
+  A path with no `~` never reads `HOME`.
+  The session log file is turned off and the error is printed, instead of writing a log into the working directory.
+- `llmenv doctor` skips a token-efficiency check that reads a non-UTF-8 variable, and says that the result is unknown
+  (changed in v3.13.0; before, it used the value in `settings.json`).
 
 To fix it, export the variable again with a UTF-8 value, or unset it where it is optional.
 
@@ -253,7 +260,9 @@ See [`memory`](commands.md#memory).
   next to the pidfile: `llmenv: started mcp-proxy pid=... source=export|session-start|restart`
   with the pid, session, and process group of the spawner. After an unexplained shutdown, compare
   the time of `Shutting down` with the last such line. For a stuck
-  `codebase-memory-mcp` daemon, run `pkill -f cbm-daemon-internal`, then `/mcp` to reconnect.
+  `codebase-memory-mcp` daemon, make one `list_projects` call first (changed in v3.13.0): the
+  server is often only slow to start, and the notice says it did not answer yet. If the call
+  fails, run `pkill -f cbm-daemon-internal`, then `/mcp` to reconnect.
   See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
 - **Old ICM server** (added in v3.12.0) — on the host that serves memory, `llmenv doctor`
   reports the `icm` version under `ICM server:`. It warns below 0.10.60, where recall filters by

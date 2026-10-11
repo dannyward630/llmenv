@@ -1417,7 +1417,7 @@ fn run_export(
     // Merge + materialize the agent config directory for each installed adapter
     // and collect env vars. PATH-gating skips adapters whose binary is absent so
     // a machine without a given tool sees zero behavior change. (#502)
-    let cache_dir_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
+    let cache_dir_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
 
     // Build the merged manifest once before the adapter loop — the manifest
     // is adapter-independent, so re-building it per adapter is wasted work (#708).
@@ -1660,7 +1660,7 @@ fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok());
+    let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok())?;
 
     let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
     print!("{output}");
@@ -1673,15 +1673,15 @@ fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
 fn statusline_data_path_with_env(
     config: &Config,
     get_env: &impl Fn(&str) -> Option<String>,
-) -> PathBuf {
+) -> anyhow::Result<PathBuf> {
     // A set-but-empty `CLAUDE_CONFIG_DIR=` must fall back to the configured
     // cache dir like an unset one, not resolve relative to cwd (#1111 sibling —
     // same bug as `statusline::widget::usage_state_dir`).
-    get_env("CLAUDE_CONFIG_DIR")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)))
-        .join("llmenv-status.json")
+    let dir = match get_env("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?),
+    };
+    Ok(dir.join("llmenv-status.json"))
 }
 
 fn run_regenerate() -> anyhow::Result<()> {
@@ -2438,7 +2438,7 @@ fn build_manifest(
         }
     }
 
-    let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
+    let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
 
     // #920: persist the bundle-only memory/host slice so `hook_run::memory_url`
     // can reuse it instead of redoing this merge on every hook-run invocation.
@@ -2715,10 +2715,11 @@ fn run_config_context() {
         Ok(d) => d.join("bundles"),
         Err(e) => {
             eprintln!("llmenv config-context: failed to resolve config dir: {e}");
-            config_path
-                .parent()
-                .map(|p| p.join("bundles"))
-                .unwrap_or_else(|| PathBuf::from(paths::expand_tilde("~/.config/llmenv/bundles")))
+            emit(
+                "llmenv config-context: could not resolve config dir. \
+                 Run `llmenv doctor` to diagnose.",
+            );
+            return;
         }
     };
 
@@ -2803,6 +2804,18 @@ fn config_dir_from_var(
 ///
 /// Reads the Claude Code hook payload from stdin. If the target path is inside the
 /// llmenv cache directory, prints a redirection hint. Always exits 0 (fail-soft).
+/// The default cache root, `~/.cache/llmenv`. On failure it prints that the guard is skipped and
+/// returns `None`. Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
+fn config_guard_default_cache() -> Option<PathBuf> {
+    match paths::expand_tilde("~/.cache/llmenv") {
+        Ok(dir) => Some(PathBuf::from(dir)),
+        Err(e) => {
+            println!("\u{26a0} llmenv config-guard skipped: {e:#}");
+            None
+        }
+    }
+}
+
 fn run_config_guard() {
     use std::io::Read;
 
@@ -2820,9 +2833,14 @@ fn run_config_guard() {
     //   Loose   → <root>/claude-code/<shape>            (2 levels below root)
     //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
     // Walking up to find "claude-code" and taking its parent is invariant to depth.
-    let default_cache = PathBuf::from(paths::expand_tilde("~/.cache/llmenv"));
     let cache_root = match config_dir_from_var(std::env::var("CLAUDE_CONFIG_DIR")) {
-        Ok(None) => default_cache, // expected when not running inside a hook
+        Ok(None) => {
+            // Expected when not running inside a hook.
+            let Some(default_cache) = config_guard_default_cache() else {
+                return;
+            };
+            default_cache
+        }
         Err(msg) => {
             // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
             println!("\u{26a0} llmenv config-guard: {msg}");
@@ -2842,6 +2860,9 @@ fn run_config_guard() {
                         "llmenv config-guard: could not locate cache root from \
                          CLAUDE_CONFIG_DIR={dir}; falling back to default"
                     );
+                    let Some(default_cache) = config_guard_default_cache() else {
+                        return;
+                    };
                     default_cache
                 }
             }
@@ -2852,11 +2873,18 @@ fn run_config_guard() {
         return;
     };
 
-    let expanded = paths::expand_tilde(&path_str);
+    let expanded = match paths::expand_tilde(&path_str) {
+        Ok(path) => path,
+        Err(e) => {
+            // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
+            println!("\u{26a0} llmenv config-guard skipped: {e:#}");
+            return;
+        }
+    };
     if is_within_cache(&cache_root, &expanded) {
         let config_path = paths::config_path()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| paths::expand_tilde("~/.config/llmenv/config.yaml"));
+            .unwrap_or_else(|_| "~/.config/llmenv/config.yaml".to_string());
         println!(
             "\u{26a0} llmenv: {path_str} is inside the managed cache and will be overwritten \
              on the next config regeneration.\n\
@@ -3175,7 +3203,7 @@ fn run_init(path: Option<std::path::PathBuf>, repo: Option<String>) -> anyhow::R
             let path_str = p
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("init path is not valid UTF-8: {}", p.display()))?;
-            PathBuf::from(paths::expand_tilde(path_str))
+            PathBuf::from(paths::expand_tilde(path_str)?)
         }
         None => paths::config_dir()?,
     };
@@ -3344,7 +3372,7 @@ This directory contains your llmenv configuration.
     // Intentionally Claude Code-only: Crush has no auth/settings concept yet.
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
-        let adapter_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir))
+        let adapter_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?)
             .join(ClaudeCodeAdapter.name());
         run_init_auth_prompt(&adapter_root)?;
         run_init_settings_prompt(&config_path)?;
@@ -3378,7 +3406,7 @@ fn run_init_auth_prompt(adapter_root: &Path) -> anyhow::Result<()> {
         }
         Some(1) => {
             let default_claude =
-                PathBuf::from(paths::expand_tilde("~/.claude")).join(".claude.json");
+                PathBuf::from(paths::expand_tilde("~/.claude")?).join(".claude.json");
             if default_claude.exists() {
                 import_auth_from_file(&default_claude, adapter_root)?;
             } else {
@@ -3403,7 +3431,7 @@ fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
     use crate::adapter::claude_code::LLMENV_OWNED_SETTINGS_KEYS;
     use dialoguer::MultiSelect;
 
-    let global_settings = PathBuf::from(paths::expand_tilde("~/.claude")).join("settings.json");
+    let global_settings = PathBuf::from(paths::expand_tilde("~/.claude")?).join("settings.json");
     // #918: NotFound → no settings to import (silent); a permission error
     // surfaces a warning instead of an exists() stat masking it as absent.
     let bytes = match std::fs::read(&global_settings) {
@@ -3633,7 +3661,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 (None, false) => crate::task::Placement::Queue,
             };
             let project = current_project_tag()?;
-            let owner = crate::task::session::EngineIdentity::from_env();
+            let owner = crate::task::session::EngineIdentity::from_env()?;
             let choice = match session.as_deref() {
                 Some(id) => crate::task::SessionChoice::Named(id),
                 None => crate::task::SessionChoice::Resolve(&owner),
@@ -3903,7 +3931,7 @@ fn caller_session_for_task(
     state_dir: &std::path::Path,
 ) -> anyhow::Result<crate::task::ownership::Caller> {
     let project = current_project_tag()?;
-    let owner = crate::task::session::EngineIdentity::from_env();
+    let owner = crate::task::session::EngineIdentity::from_env()?;
     crate::task::ownership::caller_session(state_dir, &project, &owner)
 }
 
@@ -4040,7 +4068,7 @@ fn run_task_session_command(
                 (None, false, false) => StartDecision::Auto,
                 _ => unreachable!("clap's conflicts_with_all enforces at most one"),
             };
-            let owner = session::EngineIdentity::from_env();
+            let owner = session::EngineIdentity::from_env()?;
             let request = session::StartRequest {
                 name: name.as_deref(),
                 description: description.as_deref(),
@@ -4227,7 +4255,7 @@ fn resolve_session_id(
     }
     // Fallible read: an unreadable store must not read as "no open session" (#1112).
     let open = session::try_open_sessions_for_project(state_dir, project)?;
-    match session::pick_open_session(open, &EngineIdentity::from_env()) {
+    match session::pick_open_session(open, &EngineIdentity::from_env()?) {
         Ok(session) => Ok(session.id),
         Err(PickError::NoneOpen) => {
             anyhow::bail!("no open session for this project — pass an id explicitly")
@@ -4251,7 +4279,7 @@ fn run_login(global: bool) -> anyhow::Result<()> {
     // persists tokens under $CRUSH_GLOBAL_DATA — already llmenv's durable state
     // dir — so its auth survives a hash change with no help from us (#544).
     let adapter_root =
-        PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)).join(ClaudeCodeAdapter.name());
+        PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?).join(ClaudeCodeAdapter.name());
 
     if global {
         eprintln!("Capturing global auth (will be inherited by all new folders)...");
@@ -4759,7 +4787,7 @@ fn annotate(active: bool, orphan: bool, use_color: bool) -> String {
 fn run_plugin_sync() -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
+    let cache_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
 
     if config.marketplace.is_empty() && !config.context_mode_enabled() {
         eprintln!("No marketplaces configured.");
@@ -5175,10 +5203,10 @@ fn run_completions_install(
             let d = d
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("--dir is not valid UTF-8"))?;
-            PathBuf::from(paths::expand_tilde(d))
+            PathBuf::from(paths::expand_tilde(d)?)
         }
         None => {
-            let home_str = paths::expand_tilde("~");
+            let home_str = paths::expand_tilde("~")?;
             if home_str == "~" {
                 anyhow::bail!("cannot determine home directory: $HOME is unset or empty");
             }
@@ -5242,7 +5270,7 @@ fn run_prune(
 
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
-    let cache_dir = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir));
+    let cache_dir = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
 
     // --plugin-cache: remove shared plugin cache dirs. Independent of other flags.
     let mut plugin_removed: Vec<std::path::PathBuf> = Vec::new();
@@ -5738,7 +5766,8 @@ mod tests {
         let env = |name: &str| -> Option<String> {
             (name == "CLAUDE_CONFIG_DIR").then(|| "/session/adapter-root".to_string())
         };
-        let path = statusline_data_path_with_env(&config, &env);
+        let path = statusline_data_path_with_env(&config, &env)
+            .expect("statusline path resolves in tests");
         assert_eq!(
             path,
             std::path::PathBuf::from("/session/adapter-root/llmenv-status.json")
@@ -5750,7 +5779,8 @@ mod tests {
         let mut config = Config::default();
         config.cache.cache_dir = "/configured/cache".to_string();
         let no_env = |_name: &str| -> Option<String> { None };
-        let path = statusline_data_path_with_env(&config, &no_env);
+        let path = statusline_data_path_with_env(&config, &no_env)
+            .expect("statusline path resolves in tests");
         assert_eq!(
             path,
             std::path::PathBuf::from("/configured/cache/llmenv-status.json")
@@ -5763,7 +5793,8 @@ mod tests {
         config.cache.cache_dir = "/configured/cache".to_string();
         let empty_env =
             |name: &str| -> Option<String> { (name == "CLAUDE_CONFIG_DIR").then(String::new) };
-        let path = statusline_data_path_with_env(&config, &empty_env);
+        let path = statusline_data_path_with_env(&config, &empty_env)
+            .expect("statusline path resolves in tests");
         assert_eq!(
             path,
             std::path::PathBuf::from("/configured/cache/llmenv-status.json"),
@@ -6627,7 +6658,7 @@ mod tests {
         let home = std::env::var("HOME")
             .context("HOME env var not set")
             .unwrap();
-        let result = PathBuf::from(paths::expand_tilde("~/test"));
+        let result = PathBuf::from(paths::expand_tilde("~/test").expect("HOME is UTF-8 in tests"));
         assert_eq!(result, PathBuf::from(format!("{}/test", home)));
     }
 
@@ -6636,13 +6667,14 @@ mod tests {
         let home = std::env::var("HOME")
             .context("HOME env var not set")
             .unwrap();
-        let result = PathBuf::from(paths::expand_tilde("~"));
+        let result = PathBuf::from(paths::expand_tilde("~").expect("HOME is UTF-8 in tests"));
         assert_eq!(result, PathBuf::from(&home));
     }
 
     #[test]
     fn expand_tilde_no_tilde() {
-        let result = PathBuf::from(paths::expand_tilde("/absolute/path"));
+        let result =
+            PathBuf::from(paths::expand_tilde("/absolute/path").expect("HOME is UTF-8 in tests"));
         assert_eq!(result, PathBuf::from("/absolute/path"));
     }
 

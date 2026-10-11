@@ -593,7 +593,7 @@ pub(super) fn run_setup(
             let path_str = p
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("setup path is not valid UTF-8: {}", p.display()))?;
-            PathBuf::from(paths::expand_tilde(path_str))
+            PathBuf::from(paths::expand_tilde(path_str)?)
         }
         None => paths::config_dir()?,
     };
