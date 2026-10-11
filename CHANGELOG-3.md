@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The task commit gate denies a commit that it cannot check. That covers a state directory that cannot be resolved, a payload with no session id, a nudge state file that cannot be read or saved, and a task store that cannot be read. The deny names the cause and the fix, instead of allowing the commit (#2630) [fix:hook]
 - Session reminders say that the task store cannot be read, instead of reporting that no session is open or that a session has no tasks. `llmenv task session summary`, `llmenv task session show`, `llmenv task ls --all`, and `llmenv task show current` fail with an error when a task file cannot be read (#2608) [fix:task]
 - A non-UTF-8 `LLMENV_CONFIG_DIR`, `LLMENV_STATE_DIR`, or `HOME` that the resolved path reads fails with an error that names the variable. A non-UTF-8 `CLAUDE_CODE_VERSION` is logged and ignored in the hook, so the hook does not stop. `llmenv doctor` warns about a non-UTF-8 token-efficiency variable (#2607) [fix:cli]
+- A non-UTF-8 `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID` stops a `llmenv task` command with an error that names the variable. Before, it was logged and read as unset. See [troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#an-error-says-an-environment-variable-is-not-valid-utf-8) (#2644) [fix:task]
+- A `cargo release` dry run no longer rolls the changelog. `scripts/roll-changelog.sh` exits without changes when `DRY_RUN` is true (#2637) [fix:release]
+- The codebase-memory health notice says the server did not answer yet, and asks for one `list_projects` call before the kill step. Before, it said the graph tools do not work, and the agent skipped them for the session (#2639) [fix:hook]
+- `llmenv doctor` warns once for a non-UTF-8 token-efficiency variable and says its result is unknown. Before, it could report Pass from the value in `settings.json` (#2643) [fix:doctor]
+- A path that starts with `~` stops with an error that names `HOME` when `HOME` is not UTF-8. Before, the path stayed unexpanded with no message (#2645) [fix:paths]
 
 ## [3.12.2] - 2026-10-10
 
