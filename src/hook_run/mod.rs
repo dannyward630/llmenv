@@ -2565,8 +2565,9 @@ fn resolve_bundle_memory_host(
             let cache_dir = match crate::paths::expand_tilde(&config.cache.cache_dir) {
                 Ok(dir) => dir,
                 Err(e) => {
-                    // A miss falls through to a rebuild, which reports the same error.
-                    tracing::warn!("merge cache lookup skipped: {e:#}");
+                    // `error!`, not `warn!`: the default filter hides `warn!` (#1139). A skipped
+                    // lookup is a cache miss, and the merge runs without the cache.
+                    tracing::error!("merge cache lookup skipped: {e:#}");
                     return None;
                 }
             };
