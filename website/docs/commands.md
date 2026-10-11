@@ -787,8 +787,12 @@ Nothing turns off the third item.
   A command that nests substitutions more than 32 levels deep is denied on every attempt, with a message that names
   the limit and says to split the command.
   (changed in v3.13.0) The gate also looks through the wrappers `env`, `sudo`, `doas`, `nice`, `ionice`, `nohup`, `time`,
-  `exec`, `command`, `timeout`, `stdbuf`, `setsid`, `xargs`, `caffeinate`, and `eval`, with their options.
-  So `timeout 60 git commit` and `eval "git commit -m x"` are denied like a plain `git commit`.
+  `exec`, `command`, `timeout`, `stdbuf`, `setsid`, `xargs`, `caffeinate`, and `flock`, with their options, including
+  their long options and the GNU `g` names such as `gtimeout`.
+  The text of `eval`, `env -S`, and a `sh -c`, `bash -c`, or `zsh -c` script is read as a command too.
+  So `timeout --signal KILL 60 git commit`, `eval "git commit -m x"`, and `env -S 'git commit'` are denied like a plain
+  `git commit`.
+  Nesting of `eval` and `sh -c` counts toward the same 32-level limit as substitutions.
   (changed in v3.13.0) When the nudge state file or the task store cannot be read, the gate denies the commit and
   names the file and the error. It does not allow the commit on a guess.
 
