@@ -171,7 +171,7 @@ fn nested_command(words: &[String]) -> Option<String> {
     let words = program_words(words);
     let (first, tail) = words.split_first()?;
     match program(first) {
-        "eval" if !tail.is_empty() => Some(tail.join(" ")),
+        "eval" => Some(tail.join(" ")),
         "sh" | "bash" | "zsh" => shell_script(tail).map(str::to_owned),
         _ => None,
     }
@@ -368,37 +368,40 @@ pub(super) fn program_words(words: &[String]) -> Vec<&str> {
         .map(|w| w.trim_start_matches(['(', '{']))
         .filter(|w| !w.is_empty())
         .collect();
-    let start = program_start(&words);
-    words.get(start..).unwrap_or_default().to_vec()
+    skip_wrappers(&words).to_vec()
 }
 
-/// The index of the program word: the first word that is not an env assignment, or a wrapper
-/// with the words it takes.
-fn program_start(words: &[&str]) -> usize {
-    let mut index = 0;
-    while let Some(word) = words.get(index) {
+/// `rest` without its leading env assignments, and wrappers with the words they take. The first
+/// word that is left is the program.
+fn skip_wrappers<'a, 'b>(mut rest: &'b [&'a str]) -> &'b [&'a str] {
+    while let Some((word, tail)) = rest.split_first() {
         if word.contains('=') && !word.starts_with('-') {
-            index += 1;
+            rest = tail;
         } else if let Some((_, value_opts, operands)) =
             WRAPPERS.iter().find(|(name, _, _)| *name == program(word))
         {
-            let rest = words.get(index + 1..).unwrap_or_default();
-            index += 1 + wrapper_args(value_opts, *operands, rest);
+            rest = tail
+                .get(wrapper_args(value_opts, *operands, tail)..)
+                .unwrap_or_default();
         } else {
             break;
         }
     }
-    index
+    rest
 }
 
 /// The number of words that a wrapper takes after its name: options, the value of a value
 /// option, env assignments, and operands. The count stops at the first word that is none of these.
 fn wrapper_args(value_opts: &[&str], operands: usize, words: &[&str]) -> usize {
+    let mut iter = words.iter();
     let mut used = 0;
     let mut operands = operands;
-    while let Some(word) = words.get(used) {
+    while let Some(word) = iter.next() {
         if word.starts_with('-') {
-            used += 1 + usize::from(takes_value(word, value_opts));
+            used += 1;
+            if takes_value(word, value_opts) && iter.next().is_some() {
+                used += 1;
+            }
         } else if word.contains('=') || operands > 0 {
             operands = operands.saturating_sub(1);
             used += 1;
@@ -406,7 +409,7 @@ fn wrapper_args(value_opts: &[&str], operands: usize, words: &[&str]) -> usize {
             break;
         }
     }
-    used.min(words.len())
+    used
 }
 
 /// Whether an option word takes the next word as its value. A short cluster such as `-ks` takes
@@ -417,7 +420,7 @@ fn takes_value(word: &str, value_opts: &[&str]) -> bool {
         return true;
     }
     match word.strip_prefix('-') {
-        Some(cluster) if !cluster.starts_with('-') && cluster.len() > 1 => cluster
+        Some(cluster) if !cluster.starts_with('-') => cluster
             .chars()
             .last()
             .is_some_and(|last| value_opts.contains(&format!("-{last}").as_str())),
@@ -519,5 +522,26 @@ fn task_end_target(words: &[String]) -> Option<&str> {
     match words.as_slice() {
         [first, "task", "done" | "wait", target, ..] if program(first) == "llmenv" => Some(*target),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn takes_value_reads_exact_options_and_short_clusters() {
+        let opts = TIMEOUT_OPTS;
+        assert!(takes_value("-s", opts));
+        assert!(takes_value("--signal", opts));
+        // A cluster that ends in a value option takes the next word.
+        assert!(takes_value("-ks", opts));
+        // An attached value takes none.
+        assert!(!takes_value("-sKILL", opts));
+        assert!(!takes_value("--signal=KILL", opts));
+        // A long option is never a cluster, even when its last letter is a value option.
+        assert!(!takes_value("--x-s", opts));
+        assert!(!takes_value("-x", opts));
+        assert!(!takes_value("-", opts));
     }
 }
