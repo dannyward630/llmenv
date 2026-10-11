@@ -12,7 +12,7 @@
 
 use crate::config::SlippageControl;
 use crate::hook_run::shell_split::{
-    NestingTooDeep, nesting_reason, program, program_words, shell_script, shell_segments,
+    NestingTooDeep, nesting_reason, program, program_words, shell_segments,
 };
 
 /// The self-critique checklist appended at `Stop` (#317).
@@ -320,31 +320,35 @@ fn is_modifying(command: &str) -> bool {
     }
 }
 
-/// Whether one segment runs a modifying command. A shell with `-c` runs a script that is read
-/// the same way. A wrapper such as `env` or `nohup` does not hide the command.
+/// Whether one segment runs a modifying command. A wrapper such as `env`, `sudo`, or `nohup` does
+/// not hide the command, and the commands that a shell runs are their own segments.
 fn is_modifying_segment(words: &[String]) -> bool {
     let words = program_words(words);
-    if let Some((first, tail)) = words.split_first()
-        && matches!(program(first), "sh" | "bash" | "zsh")
-        && shell_script(tail).is_some_and(is_modifying)
-    {
-        return true;
-    }
-    let mut words = words.into_iter();
-    let head = words.next().unwrap_or_default();
-    let head = head.rsplit('/').next().unwrap_or(head);
-    if head == "sudo" {
-        return words
-            .next()
-            .is_some_and(|next| MODIFYING_COMMANDS.contains(&next));
-    }
+    let Some((head, tail)) = words.split_first() else {
+        return false;
+    };
+    let head = program(head);
     if head == "git" {
         // Only the ones that leave the machine or rewrite history.
-        return words
-            .next()
+        return git_subcommand(tail)
             .is_some_and(|sub| matches!(sub, "push" | "reset" | "rebase" | "clean"));
     }
     MODIFYING_COMMANDS.contains(&head)
+}
+
+/// The subcommand of a `git` segment, after its global options such as `-C dir` and `-c key=val`.
+fn git_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut iter = args.iter();
+    while let Some(word) = iter.next() {
+        match *word {
+            "-C" | "-c" | "--git-dir" | "--work-tree" => {
+                iter.next();
+            }
+            w if w.starts_with('-') => {}
+            w => return Some(w),
+        }
+    }
+    None
 }
 
 /// The transcript-scan layers (#317, phase 3). Both default off.

@@ -1,18 +1,19 @@
 //! Shell command splitting for the task commit gate and the slippage check.
 //!
 //! The gate and the checks see a command as segments of words. A substitution is split out
-//! first, so its command is a segment too. Split from `task_nudge` so the hook state code
-//! stays separate from the parsing (#2627, #2542).
+//! first, so its command is a segment too. A command that a shell or `eval` runs is split again
+//! and added as segments, so the checks never recurse on their own. Split from `task_nudge` so
+//! the hook state code stays separate from the parsing (#2627, #2542).
 
 use std::iter::Peekable;
 use std::str::Chars;
 
-/// The deepest substitution nesting that the splitter follows. Deeper input fails closed, so
-/// the hook process stack does not grow with the input (#2544).
+/// The deepest nesting that the splitter follows. The budget counts substitutions, `eval`
+/// arguments, and `sh -c` scripts together. Deeper input fails closed, so the hook process stack
+/// does not grow with the input (#2544).
 pub(super) const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
-/// The command nests substitutions deeper than [`MAX_SUBSTITUTION_DEPTH`]. A caller treats the
-/// command as unsafe.
+/// The command nests deeper than [`MAX_SUBSTITUTION_DEPTH`]. A caller treats the command as unsafe.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct NestingTooDeep;
 
@@ -29,12 +30,12 @@ pub(super) fn nesting_reason() -> String {
 /// segment that holds it, as its own `;`-separated part. Bash runs a substitution before the
 /// command that holds it, so the verdict must follow that order (#2544). Single quotes keep
 /// their text literal.
+#[cfg(test)]
 pub(super) fn split_substitutions(command: &str) -> Result<String, NestingTooDeep> {
     split_at_depth(command, 0)
 }
 
-/// [`split_substitutions`] for one nesting level. `depth` counts the substitutions around
-/// `command`.
+/// [`split_substitutions`] for one nesting level. `depth` counts the nesting around `command`.
 fn split_at_depth(command: &str, depth: usize) -> Result<String, NestingTooDeep> {
     if depth > MAX_SUBSTITUTION_DEPTH {
         return Err(NestingTooDeep);
@@ -138,83 +139,118 @@ pub(super) fn take_until_close(chars: &mut Peekable<Chars<'_>>) -> String {
 /// split. Each `$(...)`, `<(...)`, `>(...)`, and backtick substitution is split out first, so its
 /// command is a segment.
 ///
-/// The arguments of an `eval` segment are split again, because `eval` runs them as a shell command.
-/// Each inner command is added before the segment that holds it.
+/// A command that another shell runs is split too, and its segments come before the segment
+/// that runs it. These are `eval` arguments and the script of `sh -c`, `bash -c`, and `zsh -c`.
 ///
 /// # Errors
-/// Returns [`NestingTooDeep`] when the substitutions nest past the depth bound.
+/// Returns [`NestingTooDeep`] when the nesting goes past the depth bound.
 pub(super) fn shell_segments(command: &str) -> Result<Vec<Vec<String>>, NestingTooDeep> {
+    segments_at(command, 0)
+}
+
+/// [`shell_segments`] for one level of nesting. `depth` counts every level around `command`, so
+/// substitutions and nested commands share one budget.
+fn segments_at(command: &str, depth: usize) -> Result<Vec<Vec<String>>, NestingTooDeep> {
+    let command = split_at_depth(command, depth)?;
     let mut segments = Vec::new();
-    for words in split_words(command)? {
-        if let Some(inner) = eval_command(&words) {
-            segments.extend(shell_segments(&inner)?);
+    for words in split_words(&command) {
+        if let Some(inner) = nested_command(&words) {
+            segments.extend(segments_at(&inner, depth + 1)?);
         }
         segments.push(words);
     }
     Ok(segments)
 }
 
-/// The command that an `eval` segment runs: its arguments joined by spaces, or `None`.
-/// The inner command is always shorter than the outer one, so the recursion ends.
-fn eval_command(words: &[String]) -> Option<String> {
-    match program_words(words).split_first() {
-        Some((first, tail)) if program(first) == "eval" && !tail.is_empty() => Some(tail.join(" ")),
+/// The command that a segment hands to another shell: the arguments of `eval`, or the script of
+/// `sh -c` and its kin. `None` when the segment runs no nested command.
+fn nested_command(words: &[String]) -> Option<String> {
+    if let Some(script) = env_split_string(words) {
+        return Some(script);
+    }
+    let words = program_words(words);
+    let (first, tail) = words.split_first()?;
+    match program(first) {
+        "eval" if !tail.is_empty() => Some(tail.join(" ")),
+        "sh" | "bash" | "zsh" => shell_script(tail).map(str::to_owned),
         _ => None,
     }
 }
 
-/// Split `command` into segments of words, without the `eval` expansion of [`shell_segments`].
-fn split_words(command: &str) -> Result<Vec<Vec<String>>, NestingTooDeep> {
-    let command = split_substitutions(command)?;
+/// The command string of `env -S` (`--split-string`), which `env` splits into words and runs. The
+/// scan reads only the words that `env` takes before its command, so a `-S` in a command's own
+/// arguments, such as `git commit -S`, is not read as one.
+fn env_split_string(words: &[String]) -> Option<String> {
+    let mut rest = words
+        .iter()
+        .map(|w| w.trim_start_matches(['(', '{']))
+        .skip_while(|w| w.contains('=') && !w.starts_with('-'));
+    if program(rest.next()?) != "env" {
+        return None;
+    }
+    while let Some(word) = rest.next() {
+        match word {
+            "-S" | "--split-string" => return rest.next().map(str::to_owned),
+            "-u" | "--unset" | "-C" | "--chdir" => {
+                rest.next();
+            }
+            _ => {
+                if let Some(value) = word
+                    .strip_prefix("-S")
+                    .or_else(|| word.strip_prefix("--split-string="))
+                {
+                    return Some(value.to_owned());
+                }
+                if !word.starts_with('-') && !word.contains('=') {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Split `command` into segments of words. The command must already have its substitutions split
+/// out, so this pass only groups quotes, escapes, and operators.
+fn split_words(command: &str) -> Vec<Vec<String>> {
     let mut segments: Vec<Vec<String>> = Vec::new();
     let mut words: Vec<String> = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
+    let mut word: Option<String> = None;
     let mut quote: Option<char> = None;
     let mut chars = command.chars();
-    let end_word = |words: &mut Vec<String>, word: &mut String, in_word: &mut bool| {
-        if *in_word {
-            words.push(std::mem::take(word));
-            *in_word = false;
-        }
-    };
     while let Some(c) = chars.next() {
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
             (Some('"'), '\\') => {
                 if let Some(next) = chars.next() {
-                    word.push(next);
+                    word.get_or_insert_default().push(next);
                 }
             }
-            (Some(_), c) => word.push(c),
+            (Some(_), c) => word.get_or_insert_default().push(c),
             (None, '\'' | '"') => {
                 quote = Some(c);
-                in_word = true;
+                word.get_or_insert_default();
             }
             (None, '\\') => {
                 if let Some(next) = chars.next() {
-                    word.push(next);
-                    in_word = true;
+                    word.get_or_insert_default().push(next);
                 }
             }
             (None, ';' | '|' | '&' | '\n') => {
-                end_word(&mut words, &mut word, &mut in_word);
+                words.extend(word.take());
                 if !words.is_empty() {
                     segments.push(std::mem::take(&mut words));
                 }
             }
-            (None, c) if c.is_whitespace() => end_word(&mut words, &mut word, &mut in_word),
-            (None, c) => {
-                word.push(c);
-                in_word = true;
-            }
+            (None, c) if c.is_whitespace() => words.extend(word.take()),
+            (None, c) => word.get_or_insert_default().push(c),
         }
     }
-    end_word(&mut words, &mut word, &mut in_word);
+    words.extend(word.take());
     if !words.is_empty() {
         segments.push(words);
     }
-    Ok(segments)
+    segments
 }
 
 /// The program name of a word: `/usr/bin/git` is `git`.
@@ -222,88 +258,105 @@ pub(super) fn program(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// A wrapper runs the command that follows its options. `value_opts` take a separate value word,
-/// such as `-u root`. `operands` counts the plain words before the command, such as the duration
-/// of `timeout`.
-struct Wrapper {
-    name: &'static str,
-    value_opts: &'static [&'static str],
-    operands: usize,
-}
+/// A wrapper runs the command that follows its options. Its entry is the name, the options that
+/// take a separate value word (`-u root`, `--user root`), and the count of plain operands before
+/// the command, such as the duration of `timeout`. An option missing from its entry hides the
+/// command word, so each entry lists every value option of the tool.
+type Wrapper = (&'static str, &'static [&'static str], usize);
+
+const TIMEOUT_OPTS: &[&str] = &["-s", "--signal", "-k", "--kill-after"];
+const STDBUF_OPTS: &[&str] = &["-i", "--input", "-o", "--output", "-e", "--error"];
 
 /// The wrappers that run a command with another environment, privilege, limit, or runner. Each
 /// one is skipped with its options, so the word after them is the program (#2542).
-const WRAPPERS: [Wrapper; 14] = [
-    Wrapper {
-        name: "env",
-        value_opts: &["-u", "-C", "-S"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "sudo",
-        value_opts: &["-u", "-g", "-C", "-p", "-U"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "doas",
-        value_opts: &["-u", "-C"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "nice",
-        value_opts: &["-n"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "ionice",
-        value_opts: &["-c", "-n", "-p", "-P", "-u"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "nohup",
-        value_opts: &[],
-        operands: 0,
-    },
-    Wrapper {
-        name: "time",
-        value_opts: &["-f", "-o"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "exec",
-        value_opts: &["-a"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "command",
-        value_opts: &[],
-        operands: 0,
-    },
-    Wrapper {
-        name: "timeout",
-        value_opts: &["-s", "-k"],
-        operands: 1,
-    },
-    Wrapper {
-        name: "stdbuf",
-        value_opts: &["-i", "-o", "-e"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "setsid",
-        value_opts: &[],
-        operands: 0,
-    },
-    Wrapper {
-        name: "xargs",
-        value_opts: &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"],
-        operands: 0,
-    },
-    Wrapper {
-        name: "caffeinate",
-        value_opts: &["-t", "-w"],
-        operands: 0,
-    },
+const WRAPPERS: [Wrapper; 19] = [
+    (
+        "env",
+        &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
+        0,
+    ),
+    (
+        "sudo",
+        &[
+            "-u",
+            "--user",
+            "-g",
+            "--group",
+            "-C",
+            "--close-from",
+            "-p",
+            "--prompt",
+            "-U",
+            "--other-user",
+            "-r",
+            "--role",
+            "-t",
+            "--type",
+            "-D",
+            "--chdir",
+            "-R",
+            "--chroot",
+            "-T",
+            "--command-timeout",
+        ],
+        0,
+    ),
+    ("doas", &["-u", "-C"], 0),
+    ("nice", &["-n", "--adjustment"], 0),
+    ("gnice", &["-n", "--adjustment"], 0),
+    (
+        "ionice",
+        &[
+            "-c",
+            "--class",
+            "-n",
+            "--classdata",
+            "-p",
+            "--pid",
+            "-P",
+            "--pgid",
+            "-u",
+            "--uid",
+        ],
+        0,
+    ),
+    ("nohup", &[], 0),
+    ("gnohup", &[], 0),
+    ("time", &["-f", "--format", "-o", "--output"], 0),
+    ("exec", &["-a"], 0),
+    ("command", &[], 0),
+    ("timeout", TIMEOUT_OPTS, 1),
+    ("gtimeout", TIMEOUT_OPTS, 1),
+    ("stdbuf", STDBUF_OPTS, 0),
+    ("gstdbuf", STDBUF_OPTS, 0),
+    ("setsid", &[], 0),
+    (
+        "xargs",
+        &[
+            "-a",
+            "--arg-file",
+            "-d",
+            "--delimiter",
+            "-E",
+            "-I",
+            "--replace",
+            "-L",
+            "--max-lines",
+            "-n",
+            "--max-args",
+            "-P",
+            "--max-procs",
+            "-s",
+            "--max-chars",
+        ],
+        0,
+    ),
+    ("caffeinate", &["-t", "-w"], 0),
+    (
+        "flock",
+        &["-w", "--timeout", "-E", "--conflict-exit-code"],
+        1,
+    ),
 ];
 
 /// The words of one segment after its group openers, env assignments, and wrappers with their
@@ -326,8 +379,11 @@ fn program_start(words: &[&str]) -> usize {
     while let Some(word) = words.get(index) {
         if word.contains('=') && !word.starts_with('-') {
             index += 1;
-        } else if let Some(wrapper) = WRAPPERS.iter().find(|w| w.name == program(word)) {
-            index += 1 + wrapper_args(wrapper, words.get(index + 1..).unwrap_or_default());
+        } else if let Some((_, value_opts, operands)) =
+            WRAPPERS.iter().find(|(name, _, _)| *name == program(word))
+        {
+            let rest = words.get(index + 1..).unwrap_or_default();
+            index += 1 + wrapper_args(value_opts, *operands, rest);
         } else {
             break;
         }
@@ -337,12 +393,12 @@ fn program_start(words: &[&str]) -> usize {
 
 /// The number of words that a wrapper takes after its name: options, the value of a value
 /// option, env assignments, and operands. The count stops at the first word that is none of these.
-fn wrapper_args(wrapper: &Wrapper, words: &[&str]) -> usize {
+fn wrapper_args(value_opts: &[&str], operands: usize, words: &[&str]) -> usize {
     let mut used = 0;
-    let mut operands = wrapper.operands;
+    let mut operands = operands;
     while let Some(word) = words.get(used) {
         if word.starts_with('-') {
-            used += 1 + usize::from(wrapper.value_opts.contains(word));
+            used += 1 + usize::from(takes_value(word, value_opts));
         } else if word.contains('=') || operands > 0 {
             operands = operands.saturating_sub(1);
             used += 1;
@@ -351,6 +407,22 @@ fn wrapper_args(wrapper: &Wrapper, words: &[&str]) -> usize {
         }
     }
     used.min(words.len())
+}
+
+/// Whether an option word takes the next word as its value. A short cluster such as `-ks` takes
+/// one when its last letter is a value option, as `getopt` reads it. An attached value such as
+/// `-sKILL` or `--signal=KILL` does not.
+fn takes_value(word: &str, value_opts: &[&str]) -> bool {
+    if value_opts.contains(&word) {
+        return true;
+    }
+    match word.strip_prefix('-') {
+        Some(cluster) if !cluster.starts_with('-') && cluster.len() > 1 => cluster
+            .chars()
+            .last()
+            .is_some_and(|last| value_opts.contains(&format!("-{last}").as_str())),
+        _ => false,
+    }
 }
 
 /// Whether one segment starts a commit or a pull request.
@@ -390,7 +462,6 @@ fn starts_commit_or_pr(words: &[String]) -> bool {
             }
             false
         }
-        "sh" | "bash" | "zsh" => shell_script(tail).is_some_and(runs_commit_or_pr),
         _ => false,
     }
 }
@@ -398,7 +469,7 @@ fn starts_commit_or_pr(words: &[String]) -> bool {
 /// The script that a shell runs with `-c`. The flag may sit in a cluster, as in `bash -lc`.
 /// An option that takes a value, such as `-o pipefail`, skips its value. A long option such as
 /// `--noclobber` is not a cluster, and a script file has no `-c`.
-pub(super) fn shell_script<'a>(args: &[&'a str]) -> Option<&'a str> {
+fn shell_script<'a>(args: &[&'a str]) -> Option<&'a str> {
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let flags = arg.strip_prefix(['-', '+'])?;
