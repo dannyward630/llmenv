@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv task session show` and `llmenv task session summary` name a corrupt session file with its path. Before, they reported no session was found. The Stop reminder names an unreadable session file instead of silently dropping its tasks (#2628) [fix:task]
 - A failed removal of a temp, probe, result, or stale lock file is logged with its path. Read failures in the slippage and stop-dedupe state log at error level, which the default log filter shows. A file at a content-hash folder path is no longer reused as a cached folder (#2657) [fix:hook]
 - A non-UTF-8 `EDITOR`, `VISUAL`, `SHELL`, `BASH_COMPLETION_USER_DIR`, or `ZSH_CUSTOM` fails with an error that names the variable. The statusline, color, icon, and MCP root reads log a non-UTF-8 value and then treat it as unset. Before, they used the default with no message. A non-UTF-8 `HOME` no longer puts U+FFFD into an MCP root path (#2600) [fix:env]
+- The Stop reminder says that the project cannot be resolved, instead of showing no wip tasks. A session map that cannot be read is an error, not an empty map, so a lookup no longer misses a session silently (#2658, #2628) [fix:task]
 
 ## [3.12.2] - 2026-10-10
 
