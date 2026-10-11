@@ -2715,10 +2715,11 @@ fn run_config_context() {
         Ok(d) => d.join("bundles"),
         Err(e) => {
             eprintln!("llmenv config-context: failed to resolve config dir: {e}");
-            config_path
-                .parent()
-                .map(|p| p.join("bundles"))
-                .unwrap_or_else(|| PathBuf::from("~/.config/llmenv/bundles"))
+            emit(
+                "llmenv config-context: could not resolve config dir. \
+                 Run `llmenv doctor` to diagnose.",
+            );
+            return;
         }
     };
 
@@ -2803,6 +2804,18 @@ fn config_dir_from_var(
 ///
 /// Reads the Claude Code hook payload from stdin. If the target path is inside the
 /// llmenv cache directory, prints a redirection hint. Always exits 0 (fail-soft).
+/// The default cache root, `~/.cache/llmenv`. On failure it prints that the guard is skipped and
+/// returns `None`. Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
+fn config_guard_default_cache() -> Option<PathBuf> {
+    match paths::expand_tilde("~/.cache/llmenv") {
+        Ok(dir) => Some(PathBuf::from(dir)),
+        Err(e) => {
+            println!("\u{26a0} llmenv config-guard skipped: {e:#}");
+            None
+        }
+    }
+}
+
 fn run_config_guard() {
     use std::io::Read;
 
@@ -2820,16 +2833,14 @@ fn run_config_guard() {
     //   Loose   → <root>/claude-code/<shape>            (2 levels below root)
     //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
     // Walking up to find "claude-code" and taking its parent is invariant to depth.
-    let default_cache = match paths::expand_tilde("~/.cache/llmenv") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(e) => {
-            // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
-            println!("\u{26a0} llmenv config-guard: {e:#}");
-            return;
-        }
-    };
     let cache_root = match config_dir_from_var(std::env::var("CLAUDE_CONFIG_DIR")) {
-        Ok(None) => default_cache, // expected when not running inside a hook
+        Ok(None) => {
+            // Expected when not running inside a hook.
+            let Some(default_cache) = config_guard_default_cache() else {
+                return;
+            };
+            default_cache
+        }
         Err(msg) => {
             // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
             println!("\u{26a0} llmenv config-guard: {msg}");
@@ -2849,6 +2860,9 @@ fn run_config_guard() {
                         "llmenv config-guard: could not locate cache root from \
                          CLAUDE_CONFIG_DIR={dir}; falling back to default"
                     );
+                    let Some(default_cache) = config_guard_default_cache() else {
+                        return;
+                    };
                     default_cache
                 }
             }
@@ -2862,7 +2876,8 @@ fn run_config_guard() {
     let expanded = match paths::expand_tilde(&path_str) {
         Ok(path) => path,
         Err(e) => {
-            println!("\u{26a0} llmenv config-guard: {e:#}");
+            // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
+            println!("\u{26a0} llmenv config-guard skipped: {e:#}");
             return;
         }
     };
