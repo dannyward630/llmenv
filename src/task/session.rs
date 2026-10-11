@@ -389,7 +389,7 @@ pub(crate) fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>
 ///
 /// # Errors
 /// Returns an error if the store cannot be read or any session file is corrupt.
-pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
+fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
     let dir = sessions_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
