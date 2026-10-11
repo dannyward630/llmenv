@@ -23,7 +23,7 @@ use super::{task_path, try_list_tasks};
 /// prefix matches more than one task (the error lists every candidate slug), or if the session
 /// or task store cannot be read.
 pub fn resolve_identifier(state_dir: &Path, input: &str) -> anyhow::Result<String> {
-    resolve_identifier_for(state_dir, input, &EngineIdentity::from_env())
+    resolve_identifier_for(state_dir, input, &EngineIdentity::from_env()?)
 }
 
 /// [`resolve_identifier`] for an explicit caller identity.
