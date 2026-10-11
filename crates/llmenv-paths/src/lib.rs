@@ -19,12 +19,10 @@ fn expand_tilde_with_env(
     p: &str,
     get_env: &impl Fn(&str) -> Result<String, VarError>,
 ) -> anyhow::Result<String> {
-    let rest = if p == "~" {
-        ""
-    } else if let Some(rest) = p.strip_prefix("~/") {
-        rest
-    } else {
-        return Ok(p.to_string());
+    // `rest` is empty for `~` and starts with `/` for `~/x`. `~user` is not a home reference.
+    let rest = match p.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+        _ => return Ok(p.to_string()),
     };
     // HOME is read only for a `~` input, so an absolute or relative path never fails on it.
     let home = match get_env("HOME") {
@@ -37,11 +35,7 @@ fn expand_tilde_with_env(
             "cannot expand {p:?}: HOME is not valid UTF-8. Set HOME to a UTF-8 path and retry"
         ),
     };
-    if p == "~" {
-        Ok(home)
-    } else {
-        Ok(format!("{home}/{rest}"))
-    }
+    Ok(format!("{home}{rest}"))
 }
 
 /// `read_dir` that treats a missing directory as "nothing to iterate":
@@ -1023,6 +1017,35 @@ mod tests {
         #[test]
         fn expand_tilde_never_panics(s in ".*") {
             let _ = expand_tilde(&s);
+        }
+
+        #[test]
+        fn expand_tilde_with_env_follows_home(
+            rest in "[a-z0-9/_.-]{0,20}",
+            home in "[a-z0-9/_.-]{0,20}",
+        ) {
+            let input = format!("~/{rest}");
+            let read = |_: &str| Ok(home.clone());
+            let got = expand_tilde_with_env(&input, &read).expect("a UTF-8 HOME never errors");
+            if home.is_empty() {
+                prop_assert_eq!(got, input);
+            } else {
+                prop_assert_eq!(got, format!("{home}/{rest}"));
+            }
+        }
+
+        #[test]
+        fn expand_tilde_with_env_unset_home_leaves_input(s in ".*") {
+            let unset = |_: &str| Err(VarError::NotPresent);
+            let got = expand_tilde_with_env(&s, &unset).expect("an unset HOME is not an error");
+            prop_assert_eq!(got, s);
+        }
+
+        #[test]
+        fn expand_tilde_with_env_errors_only_for_a_tilde_input(s in ".*") {
+            let bad = |_: &str| Err(VarError::NotUnicode(std::ffi::OsString::from("x")));
+            let reads_home = s == "~" || s.starts_with("~/");
+            prop_assert_eq!(expand_tilde_with_env(&s, &bad).is_err(), reads_home);
         }
 
         #[test]
