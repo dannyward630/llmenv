@@ -37,12 +37,7 @@ pub struct CapabilityContributor {
 /// so every consumer needs the expanded form (#2651).
 fn expand_codebase_memory(cm: &CodebaseMemory) -> anyhow::Result<CodebaseMemory> {
     let mut out = cm.clone();
-    if let Some(raw) = &cm.index_path {
-        let expanded = llmenv_paths::expand_tilde(raw).map_err(|err| {
-            anyhow::anyhow!("features.codebase_memory index_path '{raw}' cannot be expanded: {err}")
-        })?;
-        out.index_path = Some(expanded);
-    }
+    out.expand_index_path()?;
     Ok(out)
 }
 

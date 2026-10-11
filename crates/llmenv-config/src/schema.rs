@@ -1502,6 +1502,31 @@ pub struct CodebaseMemory {
     pub allowed_roots: Vec<String>,
 }
 
+impl CodebaseMemory {
+    /// Expand a leading `~` in `index_path` in place. Every reader of the path gets the
+    /// expanded form, so a raw `~` never reaches the indexer as a relative directory name (#2651).
+    ///
+    /// # Errors
+    /// `HOME` is not set, so the `~` cannot be expanded. Set `HOME`, or give an absolute path.
+    pub fn expand_index_path(&mut self) -> anyhow::Result<()> {
+        let Some(raw) = self.index_path.as_deref() else {
+            return Ok(());
+        };
+        let expanded = llmenv_paths::expand_tilde(raw).map_err(|err| {
+            anyhow::anyhow!("features.codebase_memory index_path '{raw}' cannot be expanded: {err}")
+        })?;
+        // `expand_tilde` returns `~/x` unchanged when HOME is unset or empty.
+        if expanded == raw && (raw == "~" || raw.starts_with("~/")) {
+            anyhow::bail!(
+                "features.codebase_memory index_path '{raw}' starts with ~ but HOME is not set. \
+                 Set HOME, or give index_path as an absolute directory."
+            );
+        }
+        self.index_path = Some(expanded);
+        Ok(())
+    }
+}
+
 fn default_throttle_cache_ttl() -> u64 {
     30
 }
