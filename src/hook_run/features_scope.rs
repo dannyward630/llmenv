@@ -24,10 +24,12 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
         return config;
     }
     let Some(config_dir) = config_path.parent() else {
-        tracing::warn!(
-            "features not resolved from bundles: config path {} has no parent directory",
+        let err = anyhow::anyhow!(
+            "config path {} has no parent directory",
             config_path.display()
         );
+        tracing::warn!("features not resolved from bundles: {err:#}");
+        UNRESOLVED_NOTICE.set(unresolved_notice(&err)).ok();
         return config;
     };
     let env = match crate::scope::matcher::Env::detect_for_config(&config) {
@@ -58,8 +60,8 @@ pub(crate) fn take_unresolved_notice() -> Option<&'static str> {
 /// The text that tells the agent which features were skipped, and why.
 fn unresolved_notice(err: &anyhow::Error) -> String {
     format!(
-        "llmenv: features set by bundles are off for this session because the environment \
-         could not be read: {err:#}. Fix the variable, or unset it, to turn them back on."
+        "llmenv: features set by bundles are off for this session: {err:#}. Fix the cause, \
+         then start a new session."
     )
 }
 
@@ -363,7 +365,7 @@ mod tests {
             "{notice}"
         );
         assert!(
-            notice.contains("Fix the variable"),
+            notice.contains("Fix the cause"),
             "must state the fix: {notice}"
         );
         assert!(
