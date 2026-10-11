@@ -129,7 +129,7 @@ pub(crate) fn build_manifest(
         }
     }
 
-    let cache_root = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir));
+    let cache_root = PathBuf::from(crate::paths::expand_tilde(&config.cache.cache_dir)?);
 
     // #920: persist the bundle-only memory/host slice so `hook_run::memory_url`
     // can reuse it instead of redoing this merge on every hook-run invocation.

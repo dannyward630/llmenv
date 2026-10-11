@@ -190,7 +190,7 @@ struct UmansPriority {
 
 impl ThrottleBackend for UmansBackend {
     fn fetch_usage(&self) -> anyhow::Result<UsageSnapshot> {
-        let config_path = crate::paths::expand_tilde("~/.umans/config.json");
+        let config_path = crate::paths::expand_tilde("~/.umans/config.json")?;
         let raw = std::fs::read_to_string(&config_path)
             .with_context(|| format!("reading umans config: {config_path}"))?;
         let umans_cfg: UmansConfig = serde_json::from_str(&raw).context("parsing umans config")?;
