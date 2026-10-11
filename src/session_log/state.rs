@@ -73,6 +73,11 @@ fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
 
 fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
     let mut map = load_at(path)?;
+    // Evict before the insert. Evicting after it could drop the new key itself, when that key
+    // sorts first, and the lookup for this session would then miss.
+    if !map.contains_key(claude_session_id) && map.len() >= MAX_CORRELATION_ENTRIES {
+        map.pop_first();
+    }
     map.insert(claude_session_id.to_string(), icm_session_id.to_string());
     // ponytail: eviction order is BTreeMap key order (the random session-id
     // string), not recency — this format carries no timestamp to sort by.
@@ -171,8 +176,35 @@ mod tests {
         assert_eq!(lookup_session_at(&path, "b").as_deref(), Some("icm-b"));
     }
 
+    #[test]
+    fn a_new_key_that_sorts_first_survives_a_full_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        for i in 0..MAX_CORRELATION_ENTRIES {
+            record_at(&path, &format!("claude-{i:05}"), "icm-old").unwrap();
+        }
+        // "aaa" sorts before every "claude-" key, so pop_first would have dropped it at once.
+        record_at(&path, "aaa", "icm-new").unwrap();
+        assert_eq!(lookup_session_at(&path, "aaa").as_deref(), Some("icm-new"));
+        assert_eq!(load_at(&path).unwrap().len(), MAX_CORRELATION_ENTRIES);
+    }
+
     use proptest::prelude::*;
     proptest! {
+        #[test]
+        fn record_then_load_returns_every_pair_recorded(
+            pairs in prop::collection::vec(("\\PC{1,16}", "\\PC{0,16}"), 0..8),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transcript-sessions.json");
+            let mut expected = BTreeMap::new();
+            for (claude, icm) in &pairs {
+                record_at(&path, claude, icm).unwrap();
+                expected.insert(claude.clone(), icm.clone());
+            }
+            prop_assert_eq!(load_at(&path).unwrap(), expected);
+        }
+
         #[test]
         fn state_file_is_owner_only(id in "[a-z0-9-]{1,16}") {
             let dir = tempfile::tempdir().unwrap();
