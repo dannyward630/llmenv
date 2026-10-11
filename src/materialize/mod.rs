@@ -121,11 +121,13 @@ pub fn materialize_with_mode(
             // Another concurrent writer raced us to the same hash. Their dir
             // is byte-identical (same hash ⇒ same contents), so accept it
             // and drop our staging.
+            if let Err(rm) = std::fs::remove_dir_all(&staging) {
+                // A failed cleanup must not hide the rename error below it.
+                tracing::error!("cannot remove staging dir {}: {rm}", staging.display());
+            }
             if dest.exists() {
-                let _ = std::fs::remove_dir_all(&staging);
                 Ok(Rendered { path: dest, hash })
             } else {
-                let _ = std::fs::remove_dir_all(&staging);
                 Err(e.into())
             }
         }
