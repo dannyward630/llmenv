@@ -361,8 +361,11 @@ mod tests {
         // `Path::new("")` has no parent, so bundle features are skipped.
         resolve(config_with_bundles(&["a"], "rust"), Path::new(""));
         // The slot is set once per process, so only the shared text is asserted.
-        let notice = take_unresolved_notice().expect("the skip must reach the agent");
-        assert!(notice.contains("Fix the cause"), "{notice}");
+        let notice = take_unresolved_notice();
+        assert!(
+            notice.is_some_and(|n| n.contains("Fix the cause")),
+            "the skip must reach the agent: {notice:?}"
+        );
     }
 
     #[test]
