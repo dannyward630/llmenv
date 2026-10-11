@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The codebase-memory health notice says the server did not answer yet, and asks for one `list_projects` call before the kill step. Before, it said the graph tools do not work, and the agent skipped them for the session (#2639) [fix:hook]
 - `llmenv doctor` skips a token-efficiency check that reads a non-UTF-8 variable and says its result is unknown. Before, it could report Pass from the value in `settings.json` (#2643) [fix:doctor]
 - A path that starts with `~` stops with an error that names `HOME` when `HOME` is not UTF-8. Before, the path stayed unexpanded with no message (#2645) [fix:paths]
+- A `~` at the start of `features.codebase_memory` `index_path` expands to `HOME` before the server and the indexer read it. Before, the path was read as a relative directory name. With `HOME` unknown and `index_path` unset, the error asks for `index_path` (#2651) [fix:config]
+- A failed removal of a stale proxy pidfile or a staging directory is logged with its path. Before, the failure left no log line, and the proxy reported that it had cleared the pidfile (#2629) [fix:mcp]
+- An unreadable `transcript-sessions.json` no longer erases its stored session mappings. The record fails with an error that names the file. A missing or corrupt file still starts empty (#2612) [fix:session-log]
+- `llmenv upgrade` shows the start of the GitHub error body. A 403 names the rate limit, and a 404 on the stable track suggests `--track beta` (#2611) [fix:upgrade]
+- A non-UTF-8 `LLMENV_EXTRA_TAGS` still turns bundle features off, and the hook now tells the agent which features are off and why. Before, only the hook log showed it (#2610) [fix:hook]
 
 ## [3.12.2] - 2026-10-10
 

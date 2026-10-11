@@ -111,16 +111,21 @@ pub(crate) fn resolve_allowed_roots(cm: &CodebaseMemory, bases: &RootBases) -> V
 }
 
 /// The cache folder codebase-memory-mcp serves: `index_path`, or its own default.
-fn cache_dir(cm: &CodebaseMemory, home: Option<&Path>) -> PathBuf {
-    cm.index_path
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            home.map_or_else(
-                || PathBuf::from("~/.cache/codebase-memory-mcp"),
-                |h| h.join(".cache/codebase-memory-mcp"),
-            )
-        })
+///
+/// # Errors
+/// No `index_path` is set and `HOME` is unknown. A literal `~` would be
+/// read as a directory name, so the caller must set `index_path` instead.
+fn cache_dir(cm: &CodebaseMemory, home: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(index_path) = &cm.index_path {
+        return Ok(PathBuf::from(index_path));
+    }
+    let home = home.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot locate the codebase-memory cache: HOME is not set. \
+             Set features.codebase_memory index_path to a directory."
+        )
+    })?;
+    Ok(home.join(".cache/codebase-memory-mcp"))
 }
 
 /// A `codebase-memory-mcp` command with the environment of the server llmenv launches.
@@ -227,7 +232,7 @@ pub(crate) fn check_roots(
     Ok(RootsReport {
         listed,
         missing,
-        cache_dir: cache_dir(cm, home),
+        cache_dir: cache_dir(cm, home)?,
     })
 }
 
@@ -698,11 +703,21 @@ mod tests {
     fn the_cache_dir_is_the_index_path_or_the_default() {
         let mut c = cm(&[]);
         assert_eq!(
-            cache_dir(&c, Some(Path::new("/home/u"))),
+            cache_dir(&c, Some(Path::new("/home/u"))).unwrap(),
             Path::new("/home/u/.cache/codebase-memory-mcp")
         );
         c.index_path = Some("/idx".into());
-        assert_eq!(cache_dir(&c, None), Path::new("/idx"));
+        assert_eq!(cache_dir(&c, None).unwrap(), Path::new("/idx"));
+    }
+
+    #[test]
+    fn the_cache_dir_without_home_or_index_path_is_an_error() {
+        let c = cm(&[]);
+        let err = cache_dir(&c, None).unwrap_err();
+        assert!(
+            err.to_string().contains("index_path"),
+            "error must name the fix: {err}"
+        );
     }
 
     #[test]

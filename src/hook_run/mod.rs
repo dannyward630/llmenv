@@ -757,6 +757,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     return Ok(HookExit::Block);
                 }
             } else {
+                let text = match features_scope::take_unresolved_notice() {
+                    Some(notice) => format!("{notice}\n\n{text}"),
+                    None => text,
+                };
                 let out = adapter.emit_hook_context(hook_event_name, &text);
                 if !out.is_empty()
                     && let Err(e) = writeln!(std::io::stdout(), "{out}")
