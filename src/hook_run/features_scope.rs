@@ -29,7 +29,7 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
             config_path.display()
         );
         tracing::warn!("features not resolved from bundles: {err:#}");
-        UNRESOLVED_NOTICE.set(unresolved_notice(&err)).ok();
+        record_unresolved(&err);
         return config;
     };
     let env = match crate::scope::matcher::Env::detect_for_config(&config) {
@@ -39,8 +39,7 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
                 "features not resolved from bundles: {e:#}. Fix the environment, or unset the \
                  variable."
             );
-            // One hook process resolves features once, so the first notice is the only one.
-            UNRESOLVED_NOTICE.set(unresolved_notice(&e)).ok();
+            record_unresolved(&e);
             return config;
         }
     };
@@ -53,8 +52,15 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
 static UNRESOLVED_NOTICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The notice for the agent, if bundle features were skipped in this hook process.
+/// Reads the value and leaves it set, so every call returns the same notice.
 pub(crate) fn take_unresolved_notice() -> Option<&'static str> {
     UNRESOLVED_NOTICE.get().map(String::as_str)
+}
+
+/// Store the notice for `err`. The first notice wins: one hook process resolves features once,
+/// so a later failure adds no new information for the agent.
+fn record_unresolved(err: &anyhow::Error) {
+    UNRESOLVED_NOTICE.set(unresolved_notice(err)).ok();
 }
 
 /// The text that tells the agent which features were skipped, and why.
@@ -71,11 +77,14 @@ fn resolve_with(mut config: Config, config_dir: &Path, active: &ActiveScopes) ->
     match bundle_features(&config.capabilities, &refs) {
         Ok(Some(from_bundles)) => overlay(config.features.get_or_insert_default(), from_bundles),
         Ok(None) => {}
-        Err(e) => tracing::error!(
-            "features not resolved from bundles in {}: {e:#}. Fix the bundle.yaml, or set the \
-             feature in the root `features:` block of config.yaml",
-            config_dir.display()
-        ),
+        Err(e) => {
+            tracing::error!(
+                "features not resolved from bundles in {}: {e:#}. Fix the bundle.yaml, or set the \
+                 feature in the root `features:` block of config.yaml",
+                config_dir.display()
+            );
+            record_unresolved(&e);
+        }
     }
     config
 }

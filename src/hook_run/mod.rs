@@ -725,7 +725,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         adapter.name(),
         &claude_code_version,
     );
-    // Taken once, after `run_inner`, so every output path below carries it to the agent (#2658).
+    // Read after `run_inner`, so every output path below carries it to the agent (#2658).
     let notice = features_scope::take_unresolved_notice();
     match result {
         Ok(text) => {
