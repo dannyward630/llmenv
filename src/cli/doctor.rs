@@ -1294,7 +1294,9 @@ pub(super) fn run_doctor(
     if cache_dir.exists() {
         let probe = cache_dir.join(".llmenv-doctor-probe");
         std::fs::write(&probe, b"").context("cache directory not writable")?;
-        let _ = std::fs::remove_file(&probe);
+        if let Err(e) = std::fs::remove_file(&probe) {
+            tracing::warn!("could not remove doctor probe {} ({e})", probe.display());
+        }
     } else {
         crate::paths::create_dir_owner_only(&cache_dir).context("cache directory not writable")?;
     }

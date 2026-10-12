@@ -218,6 +218,8 @@ A value that is not UTF-8 is no longer treated as unset.
 A command that reads `HOME`, `USER`, or `CLAUDE_CONFIG_DIR` stops with an error that names the variable.
 An example is `HOME is not valid UTF-8; set HOME to a UTF-8 value and retry`.
 This covers `llmenv doctor`, `llmenv setup`, user-scope matching, the keychain read, and the task project tag.
+(changed in v3.13.0) `EDITOR`, `VISUAL`, `SHELL`, `BASH_COMPLETION_USER_DIR`, and `ZSH_CUSTOM` also stop with this error.
+The statusline and color settings log the error and read the variable as unset.
 
 - The config guard prints its error and does not run.
 - For `LLMENV_EXTRA_TAGS`, a command stops, and a hook logs the error and skips the bundle features.

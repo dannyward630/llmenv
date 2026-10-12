@@ -68,6 +68,7 @@ pub fn collect_status_data(
     cache_root: &Path,
     hashing: HashingMode,
 ) -> StatusDataJson {
+    let (throttle, throttle_error) = collect_throttle(throttle_configs, &active.tags);
     StatusDataJson {
         schema: "llmenv-status-v1",
         v: 1,
@@ -79,7 +80,8 @@ pub fn collect_status_data(
             plugins: collect_plugins(config, &active.tags),
             mcps: collect_mcps(config, bundle_mcp, &active.tags),
             icm: collect_icm(),
-            throttle: collect_throttle(throttle_configs, &active.tags),
+            throttle,
+            throttle_error,
             config_stale: config_stale
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: collect_cache(cache_root, hashing),
@@ -278,7 +280,7 @@ fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> TasksData {
 fn collect_throttle(
     throttle_configs: &[Throttle],
     active_tags: &BTreeSet<String>,
-) -> Option<ThrottleData> {
+) -> (Option<ThrottleData>, Option<String>) {
     collect_throttle_with_stored_fallback(
         throttle_configs,
         active_tags,
@@ -290,25 +292,32 @@ fn collect_throttle(
 /// tests can exercise the resolve/fallback branching without touching the
 /// real state dir (mirrors the `_with_state_dir` DI pattern used in
 /// `crate::throttle` and `crate::cli::statusline::icons`).
+///
+/// The second element is set when the stored state exists but cannot be read.
+/// That case is an error, not "throttling off", so the widget can show it.
 fn collect_throttle_with_stored_fallback(
     throttle_configs: &[Throttle],
     active_tags: &BTreeSet<String>,
     read_stored: impl FnOnce() -> anyhow::Result<Option<Throttle>>,
-) -> Option<ThrottleData> {
+) -> (Option<ThrottleData>, Option<String>) {
     let resolved = crate::throttle::resolve_active_throttle(throttle_configs, active_tags)
         .inspect_err(|e| tracing::warn!("throttle resolution failed (non-fatal): {e}"))
         .ok()
-        .flatten()
-        .or_else(|| {
-            read_stored()
-                .inspect_err(|e| tracing::debug!("stored throttle state unavailable: {e}"))
-                .ok()
-                .flatten()
-        });
-    resolved.map(|t| ThrottleData {
+        .flatten();
+    if let Some(t) = resolved {
+        return (Some(throttle_data(t)), None);
+    }
+    match read_stored() {
+        Ok(stored) => (stored.map(throttle_data), None),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    }
+}
+
+fn throttle_data(t: Throttle) -> ThrottleData {
+    ThrottleData {
         backend: t.backend,
         cooldown_secs: t.max_wait,
-    })
+    }
 }
 
 /// Compare the manifest hash the agent booted with against the current one,
@@ -798,10 +807,13 @@ mod tests {
         });
         assert_eq!(
             result,
-            Some(ThrottleData {
-                backend: "fresh".into(),
-                cooldown_secs: 60
-            })
+            (
+                Some(ThrottleData {
+                    backend: "fresh".into(),
+                    cooldown_secs: 60
+                }),
+                None
+            )
         );
     }
 
@@ -811,17 +823,35 @@ mod tests {
         let result = collect_throttle_with_stored_fallback(&[], &tags(&["t"]), || Ok(Some(stored)));
         assert_eq!(
             result,
-            Some(ThrottleData {
-                backend: "stored".into(),
-                cooldown_secs: 45
-            })
+            (
+                Some(ThrottleData {
+                    backend: "stored".into(),
+                    cooldown_secs: 45
+                }),
+                None
+            )
         );
     }
 
     #[test]
     fn collect_throttle_none_when_neither_resolves_nor_stored() {
         let result = collect_throttle_with_stored_fallback(&[], &tags(&["t"]), || Ok(None));
-        assert!(result.is_none());
+        assert_eq!(result, (None, None));
+    }
+
+    #[test]
+    fn collect_throttle_reports_unreadable_stored_state_as_error() {
+        let result = collect_throttle_with_stored_fallback(&[], &tags(&["t"]), || {
+            Err(anyhow::anyhow!(
+                "parsing throttle state: /state/throttle.json"
+            ))
+        });
+        assert_eq!(result.0, None);
+        let error = result.1.expect("unreadable state must surface an error");
+        assert!(
+            error.contains("/state/throttle.json"),
+            "error names the file: {error}"
+        );
     }
 
     // --- collect_config_stale ---

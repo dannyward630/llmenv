@@ -179,6 +179,7 @@ llmenv edit [BUNDLE-NAME]
 
 Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
 `bundles/<name>.yaml` file) in `$EDITOR`. Falls back to `$VISUAL`, then `vi`.
+A non-UTF-8 `$EDITOR` stops the command with an error that names it (changed in v3.13.0).
 
 ## `completions`
 

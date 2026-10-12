@@ -1660,7 +1660,7 @@ fn run_statusline_cmd(use_color: bool) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let data_path = statusline_data_path_with_env(&config, &|name| std::env::var(name).ok())?;
+    let data_path = statusline_data_path_with_env(&config, &crate::env_var::utf8_var_or_log)?;
 
     let output = statusline::run_statusline(&config, &data_path, &mut std::io::stdin(), use_color)?;
     print!("{output}");
@@ -4168,10 +4168,8 @@ fn run_task_session_command(
             let id = resolve_session_id(state_dir, &project, id)?;
             // Validate the session exists rather than printing "0/0 done" for
             // a typo'd id (session_progress returns (0, 0) for any unknown id).
-            let session = session::try_list_sessions(state_dir)?
-                .into_iter()
-                .find(|s| s.id == id)
-                .ok_or_else(|| anyhow::anyhow!("no session '{id}' found"))?;
+            // A corrupt session file is reported with its path, not as a missing id (#2628).
+            let session = session::load_existing_session(state_dir, &id)?;
             let (done, total) = session::try_session_progress(state_dir, &session.id)?;
             let state = if session.is_open() {
                 "open"
@@ -5048,9 +5046,11 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
 }
 
 fn run_edit(bundle: Option<String>) -> anyhow::Result<()> {
-    let editor = std::env::var("EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .unwrap_or_else(|_| "vi".to_owned());
+    // VISUAL is read only when EDITOR is unset, so a bad VISUAL does not block an EDITOR that works.
+    let editor = match crate::env_var::utf8_var("EDITOR")? {
+        Some(editor) => editor,
+        None => crate::env_var::utf8_var("VISUAL")?.unwrap_or_else(|| "vi".to_owned()),
+    };
     let path = if let Some(name) = bundle {
         if crate::paths::is_unsafe_join_target(&name) {
             anyhow::bail!("unsafe bundle name: {name}");
@@ -5196,7 +5196,7 @@ fn run_completions_install(
 ) -> anyhow::Result<()> {
     let shell = match shell {
         Some(s) => s,
-        None => detect_shell(std::env::var("SHELL").ok().as_deref())?,
+        None => detect_shell(crate::env_var::utf8_var("SHELL")?.as_deref())?,
     };
     let target_dir = match dir {
         Some(d) => {
@@ -5210,10 +5210,9 @@ fn run_completions_install(
             if home_str == "~" {
                 anyhow::bail!("cannot determine home directory: $HOME is unset or empty");
             }
-            let bash_completion_user_dir = std::env::var("BASH_COMPLETION_USER_DIR")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let zsh_custom = std::env::var("ZSH_CUSTOM").ok().filter(|s| !s.is_empty());
+            let bash_completion_user_dir =
+                crate::env_var::utf8_var("BASH_COMPLETION_USER_DIR")?.filter(|s| !s.is_empty());
+            let zsh_custom = crate::env_var::utf8_var("ZSH_CUSTOM")?.filter(|s| !s.is_empty());
             completion_target_dir(
                 shell,
                 Path::new(&home_str),

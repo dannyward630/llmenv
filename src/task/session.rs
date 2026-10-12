@@ -294,7 +294,7 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 /// [`load_session`] for a session the caller expects to exist. A missing file reads "no session
 /// found"; a read or parse failure names the file and the cause, so a corrupt or unreadable
 /// session is not reported as a typo'd id (#2424).
-fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
+pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
     let path = session_path(state_dir, id);
     let content = match std::fs::read_to_string(&path) {
@@ -382,6 +382,42 @@ pub(crate) fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>
     Ok(sessions)
 }
 
+/// Every session in the store, failing on any file that cannot be read or parsed. Unlike
+/// [`try_list_sessions`], a corrupt file is an error that names the file, not a skipped entry.
+/// The Stop reminder needs the full set, so a missing task in it must come from a real absence
+/// and not from a corrupt file (#2628).
+///
+/// # Errors
+/// Returns an error if the store cannot be read or any session file is corrupt.
+fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
+    let dir = sessions_dir(state_dir);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("reading sessions dir {}", dir.display()))
+            );
+        }
+    };
+    let mut sessions = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("reading an entry of {}", dir.display()))?
+            .path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading session file {}", path.display()))?;
+        let session: Session = serde_json::from_str(&content).with_context(|| {
+            format!("session file {} is not valid session JSON", path.display())
+        })?;
+        sessions.push(session);
+    }
+    Ok(sessions)
+}
+
 /// Every currently open session tagged with `project`, tolerating a missing
 /// or unreadable store by treating it as empty. Callers that must distinguish
 /// "genuinely empty" from "couldn't read the store" should use
@@ -442,19 +478,37 @@ pub(crate) fn open_sessions_visible_to(
     sessions
 }
 
-/// [`session_ids_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
+/// Fallible [`session_ids_for_project`] over [`list_sessions_strict`]. A corrupt session file is
+/// an error, so the caller can report it instead of losing that file's tasks (#2628).
+///
+/// # Errors
+/// Returns an error if any session file cannot be read or parsed.
+pub(crate) fn try_session_ids_for_project(
+    state_dir: &Path,
+    project: &str,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    Ok(list_sessions_strict(state_dir)?
+        .into_iter()
+        .filter(|s| s.project == project)
+        .map(|s| s.id)
+        .collect())
+}
+
+/// [`try_session_ids_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
 /// Open and closed sessions both count, because a task of a closed session can still be `wip`.
-#[must_use]
-pub(crate) fn session_ids_visible_to(
+///
+/// # Errors
+/// Returns an error if any session file cannot be read or parsed.
+pub(crate) fn try_session_ids_visible_to(
     state_dir: &Path,
     project: &str,
     caller: Option<&str>,
-) -> std::collections::HashSet<String> {
-    list_sessions(state_dir)
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    Ok(list_sessions_strict(state_dir)?
         .into_iter()
         .filter(|s| s.project == project && s.visible_to(caller))
         .map(|s| s.id)
-        .collect()
+        .collect())
 }
 
 /// Update a session's `last_activity` to now. No-op (returns `Ok`) if the
@@ -916,10 +970,9 @@ pub(crate) fn session_summary(
     state_dir: &Path,
     session_id: &str,
 ) -> anyhow::Result<SessionSummary> {
-    let session = try_list_sessions(state_dir)?
-        .into_iter()
-        .find(|s| s.id == session_id)
-        .ok_or_else(|| anyhow::anyhow!("no session '{session_id}' found"))?;
+    // The per-file loader names a corrupt session file. A scan of the whole store would report it
+    // as a missing session (#2628).
+    let session = load_existing_session(state_dir, session_id)?;
     let tasks = try_tasks_in_session(state_dir, session_id)?;
     let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
     let total = tasks.len() as u64;
@@ -1699,6 +1752,48 @@ mod tests {
     fn try_list_sessions_missing_store_is_empty_not_error() {
         let dir = TempDir::new().expect("test");
         assert_eq!(try_list_sessions(dir.path()).unwrap(), Vec::new());
+    }
+
+    proptest::proptest! {
+        /// Any session file that is not a session is an error naming the file. A lenient read
+        /// would drop it, and its tasks with it (#2628).
+        #[test]
+        fn list_sessions_strict_errors_on_any_non_session_file(junk in "#[ -~]{1,64}") {
+            let dir = TempDir::new().expect("test");
+            std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+            let bad = session_path(dir.path(), "bad-session");
+            std::fs::write(&bad, &junk).expect("test");
+            let err = list_sessions_strict(dir.path()).expect_err("non-session file must fail");
+            let text = format!("{:#}", err);
+            proptest::prop_assert!(text.contains(&bad.display().to_string()));
+        }
+    }
+
+    #[test]
+    fn list_sessions_strict_names_a_corrupt_session_file() {
+        let dir = TempDir::new().expect("test");
+        std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+        let bad = session_path(dir.path(), "bad-session");
+        std::fs::write(&bad, "{ not json").expect("test");
+
+        let err = list_sessions_strict(dir.path()).expect_err("corrupt file must fail");
+        assert!(
+            format!("{err:#}").contains(&bad.display().to_string()),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn session_summary_names_a_corrupt_session_file_instead_of_missing() {
+        let dir = TempDir::new().expect("test");
+        std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+        let bad = session_path(dir.path(), "bad-session");
+        std::fs::write(&bad, "{ not json").expect("test");
+
+        let err = session_summary(dir.path(), "bad-session").expect_err("corrupt must fail");
+        let text = format!("{err:#}");
+        assert!(text.contains(&bad.display().to_string()), "{text}");
+        assert!(!text.contains("no session"), "{text}");
     }
 
     #[cfg(unix)]

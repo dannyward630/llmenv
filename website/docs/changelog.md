@@ -35,7 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A failed removal of a stale proxy pidfile or a staging directory is logged with its path. Before, the failure left no log line, and the proxy reported that it had cleared the pidfile (#2629) [fix:mcp]
 - An unreadable `transcript-sessions.json` no longer erases its stored session mappings. The record fails with an error that names the file. A missing or corrupt file still starts empty (#2612) [fix:session-log]
 - `llmenv upgrade` shows the start of the GitHub error body. A 403 names the rate limit, and a 404 on the stable track suggests `--track beta` (#2611) [fix:upgrade]
-- A non-UTF-8 `LLMENV_EXTRA_TAGS` still turns bundle features off, and the hook now tells the agent which features are off and why. Before, only the hook log showed it (#2610) [fix:hook]
+- The statusline shows `throttle unreadable` when `throttle.json` exists but cannot be read or parsed. Before, it showed throttling as off (#2609) [fix:throttle]
+- An unreadable session map no longer starts an ICM transcript that cannot be linked, which left one orphan per launch. A corrupt `transcript-sessions.json` is moved to `transcript-sessions.json.corrupt` before the next write, so its other mappings survive. The features-skipped notice now reaches the agent on the deny and error paths too (#2658) [fix:session]
+- `llmenv task session show` and `llmenv task session summary` name a corrupt session file with its path. Before, they reported no session was found. The Stop reminder names an unreadable session file instead of silently dropping its tasks (#2628) [fix:task]
+- A failed removal of a temp, probe, result, or stale lock file is logged with its path. Read failures in the slippage and stop-dedupe state log at error level, which the default log filter shows. A file at a content-hash folder path is no longer reused as a cached folder (#2657) [fix:hook]
+- A non-UTF-8 `EDITOR`, `VISUAL`, `SHELL`, `BASH_COMPLETION_USER_DIR`, or `ZSH_CUSTOM` fails with an error that names the variable. The statusline, color, icon, and MCP root reads log a non-UTF-8 value and then treat it as unset. Before, they used the default with no message. A non-UTF-8 `HOME` no longer puts U+FFFD into an MCP root path (#2600) [fix:env]
+- The Stop reminder says that the project cannot be resolved, instead of showing no wip tasks. A session map that cannot be read is an error, not an empty map, so a lookup no longer misses a session silently (#2658, #2628) [fix:task]
 
 ## [3.12.2] - 2026-10-10
 
