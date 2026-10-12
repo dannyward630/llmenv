@@ -735,18 +735,25 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         }
     }
 
-    match run_inner(
+    let result = run_inner(
         parsed,
         claude_session_id,
         payload,
         adapter.name(),
         &claude_code_version,
-    ) {
+    );
+    // Taken once, after `run_inner`, so every output path below carries it to the agent (#2658).
+    let notice = features_scope::take_unresolved_notice();
+    match result {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
             if text.starts_with("__DENY__:") {
                 let reason = text.trim_start_matches("__DENY__:");
+                let reason = match notice {
+                    Some(notice) => format!("{notice}\n\n{reason}"),
+                    None => reason.to_string(),
+                };
                 let envelope = serde_json::json!({
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
@@ -775,21 +782,25 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                 }
             } else {
                 let text = append_pending_notice(text, launch_client::check_pending_notice());
-                let text = match features_scope::take_unresolved_notice() {
+                let text = match notice {
                     Some(notice) => format!("{notice}\n\n{text}"),
                     None => text,
                 };
                 let out = adapter.emit_hook_context(hook_event_name, &text);
-                if !out.is_empty()
-                    && let Err(e) = writeln!(std::io::stdout(), "{out}")
-                    && e.kind() != std::io::ErrorKind::BrokenPipe
-                {
+                if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
             }
         }
         Err(e) => {
             eprintln!("llmenv: memory {event} skipped: {e}");
+            // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
+            if let Some(notice) = notice {
+                let out = adapter.emit_hook_context(hook_event_name, notice);
+                if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
+                    eprintln!("llmenv: failed to write hook output: {e}");
+                }
+            }
         }
     }
     Ok(HookExit::Success)
@@ -1951,7 +1962,13 @@ async fn handle_session_log(
             // SessionStart: once per launch, worth revalidating (#1090).
             ensure_transcript_session(cfg, client, csid, ctx, state_path, true).await
         }
-        (_, Some(csid)) => state_path.and_then(|p| state::lookup_session_at(p, csid)),
+        (_, Some(csid)) => state_path.and_then(|p| match state::lookup_session_at(p, csid) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("llmenv: session log skipped for this event: {e:#}");
+                None
+            }
+        }),
         (_, None) => None,
     };
     let lifecycle_kind = match event {
@@ -1993,7 +2010,15 @@ async fn ensure_transcript_session(
     verify: bool,
 ) -> Option<String> {
     let path = state_path?;
-    if let Some(existing) = state::lookup_session_at(path, csid) {
+    let existing = match state::lookup_session_at(path, csid) {
+        Ok(existing) => existing,
+        Err(e) => {
+            // Starting a new transcript here would orphan it: the map cannot record the link (#2658).
+            eprintln!("llmenv: no ICM transcript started for this session: {e:#}");
+            return None;
+        }
+    };
+    if let Some(existing) = existing {
         if !verify {
             return Some(existing);
         }
@@ -2465,12 +2490,71 @@ fn direct_index_stdout(
 fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     // A failed removal shows below: `create_new` then fails on what is still there.
-    let _ = std::fs::remove_file(path);
+    if let Some(e) = session_state::removal_error_to_log(std::fs::remove_file(path)) {
+        tracing::error!("could not remove result file {} ({e})", path.display());
+    }
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
+}
+
+/// Writes one hook output line to `w`. Returns the error to report, or `None` when there is no
+/// output or the reader went away. A closed pipe is normal for a hook, so it is not an error.
+fn write_hook_line(w: &mut impl std::io::Write, out: &str) -> Option<std::io::Error> {
+    if out.is_empty() {
+        return None;
+    }
+    match writeln!(w, "{out}") {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => None,
+        Err(e) => Some(e),
+    }
+}
+
+#[cfg(test)]
+mod write_hook_line_tests {
+    use super::write_hook_line;
+    use std::io::{Error, ErrorKind, Write};
+
+    /// A writer that fails every write with the given kind.
+    struct Failing(ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(Error::from(self.0))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn empty_output_writes_nothing_and_reports_nothing() {
+        let mut buf = Vec::new();
+        assert!(write_hook_line(&mut buf, "").is_none());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn output_is_written_as_one_line() {
+        let mut buf = Vec::new();
+        assert!(write_hook_line(&mut buf, "context").is_none());
+        assert_eq!(buf, b"context\n");
+    }
+
+    #[test]
+    fn a_closed_pipe_is_not_reported() {
+        assert!(write_hook_line(&mut Failing(ErrorKind::BrokenPipe), "x").is_none());
+    }
+
+    #[test]
+    fn any_other_write_error_is_reported() {
+        let kind =
+            write_hook_line(&mut Failing(ErrorKind::PermissionDenied), "x").map(|e| e.kind());
+        assert_eq!(kind, Some(ErrorKind::PermissionDenied));
+    }
 }
 
 /// The stdout for an indexer that reports its result as JSON: the result file, or null when the
@@ -6224,7 +6308,9 @@ mod session_log_tests {
 
         assert_eq!(id.as_deref(), Some("icm-sess-1"));
         assert_eq!(
-            state::lookup_session_at(&state_path, "claude-1").as_deref(),
+            state::lookup_session_at(&state_path, "claude-1")
+                .unwrap()
+                .as_deref(),
             Some("icm-sess-1")
         );
     }
@@ -6372,7 +6458,9 @@ mod session_log_tests {
             "a cached id that fails verification must be replaced"
         );
         assert_eq!(
-            state::lookup_session_at(&state_path, "claude-4").as_deref(),
+            state::lookup_session_at(&state_path, "claude-4")
+                .unwrap()
+                .as_deref(),
             Some("icm-fresh"),
             "the correlation map must be updated to the fresh id"
         );

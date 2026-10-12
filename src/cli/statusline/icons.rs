@@ -49,7 +49,7 @@ pub fn resolve_icons(
     icon_set: IconSet,
     configured: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    resolve_icons_with_env(icon_set, configured, &|name| std::env::var(name).ok())
+    resolve_icons_with_env(icon_set, configured, &crate::env_var::utf8_var_or_log)
 }
 
 fn to_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
