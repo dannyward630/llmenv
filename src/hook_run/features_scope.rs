@@ -28,7 +28,7 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
             "config path {} has no parent directory",
             config_path.display()
         );
-        tracing::warn!("features not resolved from bundles: {err:#}");
+        tracing::error!("features not resolved from bundles: {err:#}");
         record_unresolved(&err);
         return config;
     };
@@ -57,10 +57,12 @@ pub(crate) fn take_unresolved_notice() -> Option<&'static str> {
     UNRESOLVED_NOTICE.get().map(String::as_str)
 }
 
-/// Store the notice for `err`. The first notice wins: one hook process resolves features once,
-/// so a later failure adds no new information for the agent.
+/// Store the notice for `err`. The first notice wins, because the agent gets one notice per
+/// hook run. A later cause is logged so that it is not lost.
 fn record_unresolved(err: &anyhow::Error) {
-    UNRESOLVED_NOTICE.set(unresolved_notice(err)).ok();
+    if UNRESOLVED_NOTICE.set(unresolved_notice(err)).is_err() {
+        tracing::error!("another bundle feature failure is not in the agent notice: {err:#}");
+    }
 }
 
 /// The text that tells the agent which features were skipped, and why.
@@ -138,7 +140,10 @@ fn bundle_features(
         match crate::merge::read_bundle_yaml(&b.path, &b.name) {
             Ok(Some(caps)) => push(format!("bundle '{}'", b.name), b.precedence, &caps),
             Ok(None) => {}
-            Err(e) => tracing::warn!("bundle '{}' skipped for features: {e:#}", b.name),
+            Err(e) => {
+                tracing::error!("bundle '{}' skipped for features: {e:#}", b.name);
+                record_unresolved(&e);
+            }
         }
     }
     Ok(merge_capabilities(&contributors)?.features)
@@ -336,6 +341,9 @@ mod tests {
             &active("user", "rust"),
         );
         assert_eq!(tracker_enabled(&out), None);
+        // The skip must reach the agent. The slot is set once per process, so only its presence
+        // is asserted.
+        assert!(take_unresolved_notice().is_some());
     }
 
     proptest::proptest! {
