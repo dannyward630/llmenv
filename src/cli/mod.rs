@@ -4961,10 +4961,7 @@ fn run_sync(dry_run: bool) -> anyhow::Result<()> {
 ///
 /// This is advisory: serde ignored the key, so the rest of the file still loads. A failure to
 /// run the check is a warning too, so it never stops `validate` or `doctor`.
-pub(super) fn warn_unknown_config_keys(
-    config_path: &std::path::Path,
-    warn: &dyn std::fmt::Display,
-) {
+fn warn_unknown_config_keys(config_path: &std::path::Path, warn: &dyn std::fmt::Display) {
     match crate::config::unknown_top_level_keys(config_path) {
         Ok(keys) => {
             for key in keys {
