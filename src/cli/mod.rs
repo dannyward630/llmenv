@@ -4963,6 +4963,11 @@ fn run_validate(use_color: bool) -> anyhow::Result<()> {
     let pass = doctor_pass(use_color);
     let fail = doctor_fail(use_color);
     let warn = doctor_warning(use_color);
+    // Advisory, not a failure: serde ignored the key, so the rest of the file still loads.
+    for key in crate::config::unknown_top_level_keys(&config_path)? {
+        let msg = crate::config::unknown_key_message(&crate::util::display_safe(&key));
+        eprintln!("{warn} {msg}");
+    }
     let mut valid = true;
     let mut seen_names = HashSet::new();
     for bundle in &config.bundle {
