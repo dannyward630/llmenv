@@ -1253,10 +1253,7 @@ pub(super) fn run_doctor(
     // Check that config parses
     eprintln!("{pass} Config is valid YAML");
 
-    for key in crate::config::unknown_top_level_keys(&config_path)? {
-        let msg = crate::config::unknown_key_message(&crate::util::display_safe(&key));
-        eprintln!("{warn} {msg}");
-    }
+    super::warn_unknown_config_keys(&config_path, &warn);
 
     // Structural validation: bundle directories, marketplace references, permission grants
     let config_dir = paths::config_dir()?;

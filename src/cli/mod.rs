@@ -4957,17 +4957,32 @@ fn run_sync(dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print one advisory line for each top-level config key that llmenv does not read (#2669).
+///
+/// This is advisory: serde ignored the key, so the rest of the file still loads. A failure to
+/// run the check is a warning too, so it never stops `validate` or `doctor`.
+pub(super) fn warn_unknown_config_keys(
+    config_path: &std::path::Path,
+    warn: &dyn std::fmt::Display,
+) {
+    match crate::config::unknown_top_level_keys(config_path) {
+        Ok(keys) => {
+            for key in keys {
+                let msg = crate::config::unknown_key_message(&crate::util::display_safe(&key));
+                eprintln!("{warn} {msg}");
+            }
+        }
+        Err(e) => eprintln!("{warn} cannot check for unknown top-level keys: {e:#}"),
+    }
+}
+
 fn run_validate(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let pass = doctor_pass(use_color);
     let fail = doctor_fail(use_color);
     let warn = doctor_warning(use_color);
-    // Advisory, not a failure: serde ignored the key, so the rest of the file still loads.
-    for key in crate::config::unknown_top_level_keys(&config_path)? {
-        let msg = crate::config::unknown_key_message(&crate::util::display_safe(&key));
-        eprintln!("{warn} {msg}");
-    }
+    warn_unknown_config_keys(&config_path, &warn);
     let mut valid = true;
     let mut seen_names = HashSet::new();
     for bundle in &config.bundle {
