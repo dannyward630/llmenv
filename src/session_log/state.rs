@@ -108,9 +108,13 @@ const MAP_LOCK_KEY: &str = "transcript-sessions";
 /// can read the same map. A corrupt-map rename by one hook can then move the other hook's
 /// fresh map aside (#2667).
 fn lock_map(path: &Path) -> anyhow::Result<std::fs::File> {
-    let dir = match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => Path::new("."),
+    // No fallback to ".": locking creates the directory and resets its mode, and a bare file name
+    // would put that in the user's project.
+    let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        anyhow::bail!(
+            "the session map path {} has no parent directory, so it cannot be locked",
+            path.display()
+        );
     };
     crate::hook_run::session_state::lock_state_file(dir, MAP_LOCK_KEY, "session map").ok_or_else(
         || {
@@ -126,7 +130,9 @@ fn lock_map(path: &Path) -> anyhow::Result<std::fs::File> {
 /// Prove that the map at `path` can be written, without changing its entries.
 ///
 /// Call this before ICM starts a transcript. A transcript that cannot be linked is an orphan,
-/// and an unwritable map fails every later event the same way (#2667).
+/// and an unwritable map fails every later event the same way (#2667). The check holds only
+/// for this moment: a lock that stays busy at record time can still orphan one transcript,
+/// and the caller logs that case.
 ///
 /// # Errors
 /// The lock cannot be taken, or the map cannot be read or written.
@@ -349,6 +355,19 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_file_name_is_refused_before_anything_is_created() {
+        // A bare name has no parent. The lock must not fall back to the working directory.
+        let err =
+            record_at(Path::new("transcript-sessions.json"), "claude-1", "icm-a").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has no parent directory"),
+            "{err:#}"
+        );
+        assert!(!Path::new("transcript-sessions.json").exists());
+        assert!(!Path::new("transcript-sessions.lock").exists());
+    }
+
+    #[test]
     fn check_writable_creates_no_map_when_none_exists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript-sessions.json");
@@ -380,6 +399,20 @@ mod tests {
                 expected.insert(claude.clone(), icm.clone());
             }
             prop_assert_eq!(load_at(&path).unwrap(), expected);
+        }
+
+        #[test]
+        fn check_writable_never_changes_the_stored_pairs(
+            pairs in prop::collection::vec(("\\PC{1,16}", "\\PC{0,16}"), 0..8),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transcript-sessions.json");
+            for (claude, icm) in &pairs {
+                record_at(&path, claude, icm).unwrap();
+            }
+            let before = load_at(&path).unwrap();
+            check_writable_at(&path).unwrap();
+            prop_assert_eq!(load_at(&path).unwrap(), before);
         }
 
         #[test]

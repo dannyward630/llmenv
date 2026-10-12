@@ -7088,9 +7088,12 @@ mod session_log_tests {
             .and(body_string_contains(
                 crate::session_log::transcript::SHOW_TOOL,
             ))
+            // The text icm-mcp sends for an unknown session: `session <id> not found`.
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc":"2.0","id":1,
-                "error":{"code":-32602,"message":"session not found"}
+                "result":{"isError":true,"content":[
+                    {"type":"text","text":"session icm-stale not found"}
+                ]}
             })))
             .mount(&server)
             .await;
