@@ -4,6 +4,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# RUSTSEC-2024-0449 is an unmaintained-crate notice, not a known exploit. serde_yaml_ng 0.10.0
+# pulls in unsafe-libyaml, and no safe upgrade exists. Replacing the YAML crate is tracked in
+# #2677. Re-check this ignore by 2026-11-30 (cargo-deny 0.19 has no expiry key).
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml_ng; see #2677" },
+]
 
 [licenses]
 version = 2
