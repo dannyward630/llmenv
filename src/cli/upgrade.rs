@@ -229,7 +229,7 @@ fn install_binary(data: &[u8]) -> Result<()> {
         }
         Err(e) => {
             let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
-                tracing::warn!("upgrade: failed to restore backup after verification error: {e}")
+                tracing::error!("upgrade: failed to restore backup after verification error: {e}")
             });
             if let Err(re) = restore_err {
                 anyhow::bail!(

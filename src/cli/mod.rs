@@ -2186,10 +2186,10 @@ fn build_and_materialize(
 fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path) {
     migrate_stranded_transcripts_once(adapter_root, state_dir);
     if let Err(e) = crate::materialize::inherit::link_projects_dir(state_dir, cache_path) {
-        tracing::warn!("could not inherit /resume transcripts (non-fatal): {e:#}");
+        tracing::error!("could not inherit /resume transcripts (non-fatal): {e:#}");
     }
     if let Err(e) = crate::materialize::inherit::link_session_logs_dir(state_dir, cache_path) {
-        tracing::warn!("could not inherit session logs (non-fatal): {e:#}");
+        tracing::error!("could not inherit session logs (non-fatal): {e:#}");
     }
     // Capture before inherit: Claude Code only ever writes these into the config
     // dir, so without this the durable store would never gain a copy to hand to
@@ -2198,7 +2198,7 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
         tracing::warn!("could not capture folder state into the store (non-fatal): {e:#}");
     }
     if let Err(e) = crate::materialize::inherit::inherit_copied_files(state_dir, cache_path) {
-        tracing::warn!("could not inherit prompt history (non-fatal): {e:#}");
+        tracing::error!("could not inherit prompt history (non-fatal): {e:#}");
     }
 }
 
@@ -2218,7 +2218,7 @@ fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
         Ok(0) => {}
         Ok(n) => eprintln!("[llmenv] inherited /resume transcripts from {n} older folder(s)"),
         Err(e) => {
-            tracing::warn!("migrating stranded transcripts failed (non-fatal): {e:#}");
+            tracing::error!("migrating stranded transcripts failed (non-fatal): {e:#}");
             return;
         }
     }
@@ -2312,7 +2312,7 @@ fn write_cache_manifest(
             let victim = cache_path.join(&ghost);
             if let Err(e) = std::fs::remove_file(&victim) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!("removing stale cache file {}: {e}", victim.display());
+                    tracing::error!("removing stale cache file {}: {e}", victim.display());
                 }
             } else {
                 tracing::debug!("removed stale cache file {}", victim.display());
@@ -2462,7 +2462,7 @@ fn build_manifest(
                 bundle_memory_slice,
                 &manifest.capabilities.host,
             ) {
-                tracing::warn!("failed to persist bundle-merge cache: {e}");
+                tracing::error!("failed to persist bundle-merge cache: {e}");
             }
         }
         Err(e) => tracing::warn!("failed to compute merge signature for cache: {e}"),

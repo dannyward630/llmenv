@@ -84,7 +84,7 @@ pub fn tag_recall_queries(tags: &[String]) -> anyhow::Result<Vec<TagRecallQuery>
     tags.iter()
         .map(|tag| {
             validate_tag(tag).map_err(|e| {
-                warn!(tag = %tag, error = %e, "tag name validation failed");
+                error!(tag = %tag, error = %e, "tag name validation failed");
                 e
             })?;
             debug!(tag = %tag, "tag recall query created");
@@ -669,7 +669,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         eprintln!("llmenv hook-run: failed to read stdin: {e}");
     }
     let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf)
-        .inspect_err(|e| tracing::warn!("hook-run: failed to parse stdin JSON: {e}"))
+        .inspect_err(|e| tracing::error!("hook-run: failed to parse stdin JSON: {e}"))
         .ok();
     let hook_event_name: &str = stdin_json
         .as_ref()
@@ -1540,7 +1540,7 @@ fn run_inner(
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
             let prev = std::fs::read_to_string(dedup_path)
                 .inspect_err(|e| {
-                    tracing::warn!("failed to read dedup cache {}: {e}", dedup_path.display())
+                    tracing::error!("failed to read dedup cache {}: {e}", dedup_path.display())
                 })
                 .ok();
             let is_unchanged = chunk_unchanged(prev.as_deref(), &storage_chunk);

@@ -263,7 +263,7 @@ fn apply_roots(
                 })
                 .into_owned();
                 let reason = crate::hook_run::mcp_health::tidy_reason(&text);
-                tracing::warn!("codebase-memory-mcp allow-root {path} failed: {reason}");
+                tracing::error!("codebase-memory-mcp allow-root {path} failed: {reason}");
                 still_missing.push((root, reason));
             }
             Err(e) => {
@@ -407,7 +407,7 @@ pub(crate) fn session_start_notice(
             (!text.is_empty()).then(|| format!("{text}\n"))
         }
         Err(e) => {
-            tracing::warn!(error = %e, "codebase-memory roots could not be applied");
+            tracing::error!(error = %e, "codebase-memory roots could not be applied");
             Some(format!(
                 "codebase-memory: cannot apply the allowed roots: {e}. Run `llmenv doctor`.\n"
             ))

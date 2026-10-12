@@ -480,7 +480,11 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
     match std::fs::remove_file(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
         Err(e) => {
-            tracing::warn!(path = %p.display(), error = %e, "failed to unlink cache symlink; skipping");
+            tracing::error!(
+                path = %p.display(),
+                error = %e,
+                "failed to unlink cache symlink; skipping"
+            );
             report.failed.push(p.to_path_buf());
         }
     }
