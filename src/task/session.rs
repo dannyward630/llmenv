@@ -375,7 +375,11 @@ pub(crate) fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>
                 tracing::warn!(error = %e, path = %path.display(), "skipping unreadable session file");
             }
             Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "skipping corrupt session file");
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    "skipping corrupt session file"
+                );
             }
         }
     }

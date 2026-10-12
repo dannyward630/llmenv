@@ -2249,7 +2249,7 @@ fn inject_cached_auth_if_available(
                 }
             }
             Err(e) => {
-                tracing::warn!("auth inject failed for {} (non-fatal): {e}", entry.email);
+                tracing::error!("auth inject failed for {} (non-fatal): {e}", entry.email);
                 AuthStatus::default()
             }
         },
@@ -2267,7 +2267,7 @@ fn inject_cached_credentials(adapter_root: &std::path::Path, cache_path: &std::p
     match crate::auth::credentials::inject_if_missing(backend, adapter_root, cache_path) {
         Ok(true) => eprintln!("[llmenv] auth: OAuth credential inherited from durable state"),
         Ok(false) => {}
-        Err(e) => tracing::warn!("credential inject failed (non-fatal): {e}"),
+        Err(e) => tracing::error!("credential inject failed (non-fatal): {e}"),
     }
 }
 
