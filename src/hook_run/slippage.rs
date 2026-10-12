@@ -112,7 +112,8 @@ pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> Sessi
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionStats::default(),
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "slippage: read log unreadable");
+            // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
+            tracing::error!(path = %path.display(), error = %e, "slippage: read log unreadable");
             return SessionStats::default();
         }
     };

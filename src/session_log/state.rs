@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use llmenv_paths::{state_dir, write_owner_only_atomic};
 
 /// Cap on the correlation map's entry count (#509 item 2). Nothing ever
@@ -42,37 +43,78 @@ pub(crate) fn state_path() -> PathBuf {
 
 /// Load the correlation map at `path`. A missing file is the normal
 /// first-run case and returns an empty map silently. A file that exists but
-/// fails to parse (truncated by a crash, hand-edited, corrupted) is handled
-/// fail-soft: the map degrades to empty and a `warn!` message is logged.
-/// A file that exists but cannot be read is an error. A caller that then
-/// wrote the empty map back would erase every stored mapping.
-///
-/// **Deliberate deviation from hard-error convention:** Unlike persistent
-/// config (plugins, `.claude.json`), session correlation state is ephemeral
-/// and low-stakes — loss of correlation just means new session IDs next
-/// launch. Session logging must never block a session over a corrupt state
-/// file; fail-soft is correct here. The tradeoff prioritizes availability
-/// over corruption detection (contrast: #522 treats corrupt `installed_plugins.json`
-/// as a hard error to avoid losing version pins).
+/// fails to parse (truncated by a crash, hand-edited, corrupted) is an error.
+/// A lookup must not treat it as a miss (#2658). A file that exists but
+/// cannot be read is an error too. Writes use [`load_for_write`], which moves a corrupt
+/// file aside instead of failing.
 fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
-    let s = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    let Some(s) = read_map_text(path)? else {
+        return Ok(BTreeMap::default());
+    };
+    // A corrupt map is an error here, not a miss. A miss would end a session's
+    // lifecycle link silently (#2658). The next write moves the file aside.
+    serde_json::from_str(&s).with_context(|| {
+        format!(
+            "the session map {} is corrupt. The next write moves it aside to {}.corrupt",
+            path.display(),
+            path.display()
+        )
+    })
+}
+
+/// Read the map text at `path`. `None` means the file is missing.
+fn read_map_text(path: &Path) -> anyhow::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
         // A missing file is the normal first run, so it is not a warning.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => anyhow::bail!(
             "cannot read the session map {}: {e}. Fix its permissions, or remove the file to \
              start over.",
             path.display()
         ),
+    }
+}
+
+/// Load the map before a write. A file that does not parse is moved to
+/// `transcript-sessions.json.corrupt` first. Without the move, the write would
+/// replace the file and erase every other mapping in it (#2658).
+fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    let Some(s) = read_map_text(path)? else {
+        return Ok(BTreeMap::default());
     };
-    Ok(serde_json::from_str(&s).unwrap_or_else(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "corrupt transcript-sessions.json, resetting");
-        BTreeMap::default()
-    }))
+    match serde_json::from_str(&s) {
+        Ok(map) => Ok(map),
+        Err(e) => {
+            // A second corruption must not overwrite the first aside copy (#2658 review).
+            let mut aside = path.with_extension("json.corrupt");
+            if aside.exists() {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos());
+                aside = path.with_extension(format!("json.corrupt.{nanos}"));
+            }
+            std::fs::rename(path, &aside).with_context(|| {
+                format!(
+                    "moving the corrupt session map {} aside to {}",
+                    path.display(),
+                    aside.display()
+                )
+            })?;
+            // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
+            tracing::error!(
+                error = %e,
+                path = %path.display(),
+                aside = %aside.display(),
+                "corrupt transcript-sessions.json moved aside, starting a new map"
+            );
+            Ok(BTreeMap::default())
+        }
+    }
 }
 
 fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    let mut map = load_at(path)?;
+    let mut map = load_for_write(path)?;
     // Evict before the insert. Evicting after it could drop the new key itself, when that key
     // sorts first, and the lookup for this session would then miss.
     if !map.contains_key(claude_session_id) && map.len() >= MAX_CORRELATION_ENTRIES {
@@ -97,14 +139,15 @@ fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyh
 /// Crate-internal: lets callers that already resolved `state_path()` (e.g. one
 /// hook invocation handling several events) avoid re-resolving it, and lets
 /// tests exercise this without touching the global state-dir env var.
-#[must_use]
-pub(crate) fn lookup_session_at(path: &Path, claude_session_id: &str) -> Option<String> {
-    // A lookup writes nothing, so an unreadable map only costs this session its correlation.
-    let map = load_at(path).unwrap_or_else(|e| {
-        tracing::warn!("{e:#}. This session starts a new transcript.");
-        BTreeMap::default()
-    });
-    map.get(claude_session_id).cloned()
+///
+/// # Errors
+/// The map file exists but cannot be read. A caller MUST NOT start a new
+/// transcript then, because it could not record the link (#2658).
+pub(crate) fn lookup_session_at(
+    path: &Path,
+    claude_session_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(load_at(path)?.get(claude_session_id).cloned())
 }
 
 /// Record the correlation into the map at `path` (read-modify-write, atomic,
@@ -150,11 +193,30 @@ mod tests {
     }
 
     #[test]
-    fn load_at_degrades_to_empty_on_corrupt_json_instead_of_panicking() {
+    fn load_at_errors_on_corrupt_json_instead_of_reading_as_a_miss() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript-sessions.json");
         std::fs::write(&path, "{not valid json").unwrap();
-        assert!(load_at(&path).unwrap().is_empty());
+        let result = lookup_session_at(&path, "claude-1");
+        assert!(result.is_err(), "corrupt must not be a miss: {result:?}");
+        let text = format!("{:#}", result.unwrap_err());
+        assert!(text.contains(&path.display().to_string()), "{text}");
+    }
+
+    proptest! {
+        /// Any content that is not a JSON map is kept byte for byte in the aside file,
+        /// and the write that moved it still records its pair (#2658).
+        #[test]
+        fn a_corrupt_map_is_kept_byte_for_byte_in_the_aside_file(junk in "#[ -~]{1,64}") {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transcript-sessions.json");
+            std::fs::write(&path, &junk).unwrap();
+            record_at(&path, "claude-new", "icm-new").unwrap();
+            let aside = dir.path().join("transcript-sessions.json.corrupt");
+            prop_assert_eq!(std::fs::read_to_string(&aside).unwrap(), junk);
+            let found = lookup_session_at(&path, "claude-new").unwrap();
+            prop_assert_eq!(found.as_deref(), Some("icm-new"));
+        }
     }
 
     /// Write-only mode makes the read fail while a write still succeeds. Before the fix the record
@@ -172,8 +234,47 @@ mod tests {
         let result = record_at(&path, "c", "icm-c");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(result.is_err(), "an unreadable map must fail the record");
-        assert_eq!(lookup_session_at(&path, "a").as_deref(), Some("icm-a"));
-        assert_eq!(lookup_session_at(&path, "b").as_deref(), Some("icm-b"));
+        assert_eq!(
+            lookup_session_at(&path, "a").unwrap().as_deref(),
+            Some("icm-a")
+        );
+        assert_eq!(
+            lookup_session_at(&path, "b").unwrap().as_deref(),
+            Some("icm-b")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lookup_on_an_unreadable_map_is_an_error_not_a_miss() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        record_at(&path, "a", "icm-a").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let result = lookup_session_at(&path, "a");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // A miss would start a new transcript that can never be linked (#2658).
+        assert!(
+            result.is_err(),
+            "an unreadable map must not look like a miss"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_map_is_moved_aside_before_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        std::fs::write(&path, "{not valid json").unwrap();
+        record_at(&path, "claude-new", "icm-new").unwrap();
+
+        let aside = dir.path().join("transcript-sessions.json.corrupt");
+        assert_eq!(std::fs::read_to_string(&aside).unwrap(), "{not valid json");
+        assert_eq!(
+            lookup_session_at(&path, "claude-new").unwrap().as_deref(),
+            Some("icm-new")
+        );
     }
 
     #[test]
@@ -185,7 +286,10 @@ mod tests {
         }
         // "aaa" sorts before every "claude-" key, so pop_first would have dropped it at once.
         record_at(&path, "aaa", "icm-new").unwrap();
-        assert_eq!(lookup_session_at(&path, "aaa").as_deref(), Some("icm-new"));
+        assert_eq!(
+            lookup_session_at(&path, "aaa").unwrap().as_deref(),
+            Some("icm-new")
+        );
         assert_eq!(load_at(&path).unwrap().len(), MAX_CORRELATION_ENTRIES);
     }
 

@@ -4,6 +4,10 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# unsafe-libyaml has no safe upgrade. It comes in through serde_yaml_ng. Review by 2026-12-12 (#2674).
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained, no safe upgrade exists (#2674)" },
+]
 
 [licenses]
 version = 2

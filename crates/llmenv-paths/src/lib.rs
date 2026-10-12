@@ -492,8 +492,19 @@ fn write_owner_only_atomic_in_dir(
                 continue;
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(e);
+                // This crate has no logger, so a failed cleanup is carried in the returned error.
+                return match std::fs::remove_file(&tmp_path) {
+                    Err(cleanup) if cleanup.kind() != std::io::ErrorKind::NotFound => {
+                        Err(std::io::Error::new(
+                            e.kind(),
+                            format!(
+                                "{e}; also could not remove temp file {}: {cleanup}",
+                                tmp_path.display()
+                            ),
+                        ))
+                    }
+                    _ => Err(e),
+                };
             }
         }
     }
