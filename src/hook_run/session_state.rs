@@ -146,6 +146,16 @@ fn remove_if_present(path: &Path) -> std::io::Result<()> {
 /// Remove `.lock` files in `dir` older than `max_age_days` whose `.json` is gone. A session in its
 /// first update holds a lock with no `.json` yet; removing that lock would let a second writer
 /// lock a new file and lose an update, so only old locks go.
+/// The error to log for a file removal, or `None` when the file is already gone. A missing file
+/// is the normal outcome of a race, so it is not an error (#2657).
+pub(crate) fn removal_error_to_log(result: std::io::Result<()>) -> Option<std::io::Error> {
+    match result {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(e),
+    }
+}
+
 pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -162,12 +172,28 @@ pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
             && !path.with_extension("json").exists()
         {
             // Logged at error: the default log filter is ERROR, so a warn would be invisible (#2657).
-            if let Err(e) = std::fs::remove_file(&path)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
+            if let Some(e) = removal_error_to_log(std::fs::remove_file(&path)) {
                 tracing::error!("cannot remove stale lock {}: {e}", path.display());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::removal_error_to_log;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn a_removal_that_succeeds_or_finds_nothing_logs_nothing() {
+        assert!(removal_error_to_log(Ok(())).is_none());
+        assert!(removal_error_to_log(Err(Error::from(ErrorKind::NotFound))).is_none());
+    }
+
+    #[test]
+    fn any_other_removal_error_is_returned_to_log() {
+        let logged = removal_error_to_log(Err(Error::from(ErrorKind::PermissionDenied)));
+        assert_eq!(logged.map(|e| e.kind()), Some(ErrorKind::PermissionDenied));
     }
 }
 
