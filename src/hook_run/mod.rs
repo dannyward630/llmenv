@@ -24,7 +24,7 @@ mod recall;
 mod relevance;
 pub(crate) mod repeat_detect;
 mod session_ledger;
-mod session_state;
+pub(crate) mod session_state;
 mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
@@ -1509,7 +1509,11 @@ fn run_inner(
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         let wake = wake_args(event, settings, stdin_payload, &env.cwd);
         let client = resolved_client.map(|r| r.client);
-        let state_path = Some(state::state_path());
+        let state_path = state::state_path()
+            .inspect_err(
+                |e| error!(error = %e, "no ICM transcript state: the session map is unavailable"),
+            )
+            .ok();
         let ctx = build_scope_context(
             &active,
             tags,
@@ -2000,29 +2004,26 @@ async fn ensure_transcript_session(
             return None;
         }
     };
-    if let Some(existing) = existing {
-        if !verify {
-            return Some(existing);
-        }
-        match client {
-            Some(client) => match transcript_dispatch::verify_session(client, &existing).await {
-                Ok(()) => return Some(existing),
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        session_id = %existing,
-                        "cached ICM transcript session id failed verification, re-establishing"
-                    );
-                }
-            },
-            None => return Some(existing),
-        }
+    if let Some(existing) = existing
+        && let Some(id) = cached_transcript_id(client, &existing, verify).await
+    {
+        return Some(id);
     }
-    let (true, Some(client)) = (cfg.transcript_wants(LogLevel::Info), client) else {
+    if !cfg.transcript_wants(LogLevel::Info) {
+        return None;
+    }
+    let Some(client) = client else {
+        error!("no ICM transcript started: transcripts are on, but no MCP client is configured");
         return None;
     };
+    // Check the map before ICM starts a transcript. A transcript that cannot be linked is an
+    // orphan, and each later event would add another one (#2667).
+    if let Err(e) = state::check_writable_at(path) {
+        error!(error = %e, "no ICM transcript started: the session map cannot be written");
+        return None;
+    }
     let metadata = scope_metadata_json(ctx);
-    match transcript_dispatch::start_session(
+    let id = match transcript_dispatch::start_session(
         client,
         &ctx.adapter,
         ctx.project.as_deref(),
@@ -2030,15 +2031,52 @@ async fn ensure_transcript_session(
     )
     .await
     {
-        Ok(id) => {
-            if let Err(e) = state::record_session_at(path, csid, &id) {
-                error!(error = %e, "failed to persist transcript session correlation");
-            }
-            Some(id)
-        }
+        Ok(id) => id,
         Err(e) => {
             error!(error = %e, "failed to start ICM transcript session");
+            return None;
+        }
+    };
+    if let Err(e) = state::record_session_at(path, csid, &id) {
+        error!(
+            error = %e,
+            session_id = %id,
+            "ICM transcript started but its link was not recorded, so this event is not logged"
+        );
+        return None;
+    }
+    Some(id)
+}
+
+/// Decide whether a recorded transcript id still serves this session. `Some` keeps the link.
+/// `None` means ICM confirmed the session is gone, so the caller starts a new one.
+///
+/// A transport failure keeps the link. ICM being unreachable says nothing about the session,
+/// and a new transcript would orphan the old one (#2667).
+async fn cached_transcript_id(
+    client: Option<&McpHttpClient>,
+    existing: &str,
+    verify: bool,
+) -> Option<String> {
+    let Some(client) = client.filter(|_| verify) else {
+        return Some(existing.to_owned());
+    };
+    match transcript_dispatch::verify_session(client, existing).await {
+        Ok(transcript_dispatch::Liveness::Live) => Some(existing.to_owned()),
+        Ok(transcript_dispatch::Liveness::Gone) => {
+            error!(
+                session_id = %existing,
+                "cached ICM transcript session no longer exists, re-establishing"
+            );
             None
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                session_id = %existing,
+                "cannot verify the cached ICM transcript session, keeping its link"
+            );
+            Some(existing.to_owned())
         }
     }
 }
@@ -7050,7 +7088,10 @@ mod session_log_tests {
             .and(body_string_contains(
                 crate::session_log::transcript::SHOW_TOOL,
             ))
-            .respond_with(ResponseTemplate::new(404))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc":"2.0","id":1,
+                "error":{"code":-32602,"message":"session not found"}
+            })))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -7092,6 +7133,108 @@ mod session_log_tests {
             Some("icm-fresh"),
             "the correlation map must be updated to the fresh id"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_transcript_session_keeps_link_when_icm_is_unreachable() {
+        // #2667: a transient ICM outage must not orphan a valid transcript.
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        state::record_session_at(&state_path, "claude-5", "icm-live").unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("initialize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                crate::session_log::transcript::SHOW_TOOL,
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                crate::session_log::transcript::START_TOOL,
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-new")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: None,
+            }),
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
+        };
+
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-5",
+            &ctx(),
+            Some(&state_path),
+            true,
+        )
+        .await;
+
+        assert_eq!(id.as_deref(), Some("icm-live"));
+        assert_eq!(
+            state::lookup_session_at(&state_path, "claude-5")
+                .unwrap()
+                .as_deref(),
+            Some("icm-live"),
+            "the link must survive an unreachable ICM"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_transcript_session_starts_nothing_when_the_map_is_unwritable() {
+        // #2667: a transcript that cannot be linked is an orphan, so none is started.
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("initialize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                crate::session_log::transcript::START_TOOL,
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-new")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: None,
+            }),
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
+        };
+        // A directory where the lock file belongs makes the map unwritable. The lock step
+        // resets the state dir mode, so a read-only dir would not stop the write.
+        std::fs::create_dir(state_dir.path().join("transcript-sessions.lock")).unwrap();
+
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-6",
+            &ctx(),
+            Some(&state_path),
+            true,
+        )
+        .await;
+
+        assert_eq!(id, None);
     }
 
     #[tokio::test]

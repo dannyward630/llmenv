@@ -53,22 +53,40 @@ pub(crate) async fn start_session(
     Ok(id)
 }
 
-/// Verify that `session_id` still exists in ICM.
+/// Text in ICM's JSON-RPC error when a session id is unknown. ICM has no typed
+/// not-found code, so this text is the only signal.
+const SESSION_GONE_MARKER: &str = "session not found";
+
+/// Whether ICM still holds a recorded transcript session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Liveness {
+    /// ICM returned the session.
+    Live,
+    /// ICM answered that the session does not exist.
+    Gone,
+}
+
+/// Ask ICM whether `session_id` still exists.
 ///
-/// A recorded session id is a cache, not proof of liveness (#1090) — ICM may
-/// have pruned or restarted since it was recorded. This has no dedicated
-/// "not found" signal to distinguish from a transient network failure; any
-/// `call_tool` error is treated as "don't trust this id", which is the safe
-/// default (worst case: an extra session gets started when ICM was merely
-/// unreachable for a moment).
+/// A recorded session id is a cache, not proof of liveness (#1090). ICM may
+/// have pruned or restarted since it was recorded.
 ///
 /// # Errors
-/// Any `call_tool` failure, including ICM reporting the session doesn't exist.
-pub(crate) async fn verify_session(client: &McpHttpClient, session_id: &str) -> anyhow::Result<()> {
-    client
+/// A transport failure, or any reply that is not "session not found". ICM being
+/// unreachable says nothing about the session, so the caller MUST keep its link
+/// then (#2667).
+pub(crate) async fn verify_session(
+    client: &McpHttpClient,
+    session_id: &str,
+) -> anyhow::Result<Liveness> {
+    match client
         .call_tool(SHOW_TOOL, show_session_args(session_id))
-        .await?;
-    Ok(())
+        .await
+    {
+        Ok(_) => Ok(Liveness::Live),
+        Err(e) if format!("{e:#}").contains(SESSION_GONE_MARKER) => Ok(Liveness::Gone),
+        Err(e) => Err(e),
+    }
 }
 
 /// Record one event into `session_id`.
@@ -231,11 +249,14 @@ mod tests {
             .mount(&server)
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        verify_session(&client, "sess-42").await.unwrap();
+        assert_eq!(
+            verify_session(&client, "sess-42").await.unwrap(),
+            Liveness::Live
+        );
     }
 
     #[tokio::test]
-    async fn verify_session_errors_when_icm_reports_a_jsonrpc_error() {
+    async fn verify_session_reports_gone_when_icm_says_session_not_found() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -245,7 +266,21 @@ mod tests {
             .mount(&server)
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let err = verify_session(&client, "stale-session").await.unwrap_err();
-        assert!(err.to_string().contains("session not found"));
+        assert_eq!(
+            verify_session(&client, "stale-session").await.unwrap(),
+            Liveness::Gone
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_session_errors_when_icm_is_unreachable() {
+        // A transport failure must not read as "gone": the caller keeps the link.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        assert!(verify_session(&client, "sess-42").await.is_err());
     }
 }
