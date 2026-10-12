@@ -89,7 +89,8 @@ pub fn materialize_with_mode(
         }
         // Strict mode: a content-hashed folder that already exists is
         // byte-identical, so reuse it untouched.
-        HashingMode::Strict if dest.exists() => {
+        // A file at this path is not a cached folder, so it must not be reused (#2657).
+        HashingMode::Strict if dest.is_dir() => {
             crate::cache_trace::emit_cache_trace("content_hash", true, cache_start.elapsed(), None);
             return Ok(Rendered { path: dest, hash });
         }
@@ -131,7 +132,8 @@ pub fn materialize_with_mode(
                 // A failed cleanup must not hide the rename error below it.
                 tracing::error!("cannot remove staging dir {}: {rm}", staging.display());
             }
-            if dest.exists() {
+            // Only a directory is a copy that can be used. A file at `dest` is an error (#2657).
+            if dest.is_dir() {
                 tracing::warn!(
                     "rename into {} failed, so the copy already there is used: {e}",
                     dest.display()
@@ -323,6 +325,32 @@ mod tests {
         assert!(
             err.to_string().contains("traversal"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// #2657: a file at the content-hash path is not a cached folder. Strict mode must not return
+    /// it as a hit. It may fail, or it may produce a real directory at that path.
+    #[test]
+    fn strict_mode_does_not_reuse_a_file_at_the_hash_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("cache dir");
+        let src = tmp.path().join("src.txt");
+        std::fs::write(&src, b"x").expect("write src");
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from("a.txt"), src);
+        let m = MergedManifest {
+            files,
+            ..Default::default()
+        };
+        let hash = cache::hash_manifest(&m).expect("hash");
+        let folder = cache::folder_name(HashingMode::Strict, "", &hash);
+        std::fs::write(cache.join(&folder), b"not a folder").expect("squatter file");
+
+        let result = materialize_with_mode(&m, &cache, HashingMode::Strict, "");
+        assert!(
+            result.as_ref().is_err() || result.as_ref().is_ok_and(|r| r.path.is_dir()),
+            "a file at the hash path was returned as a cached folder: {result:?}"
         );
     }
 

@@ -528,6 +528,7 @@ llmenv edit [BUNDLE-NAME]
 
 Open `config.yaml` (or, if `BUNDLE-NAME` is given, the matching
 `bundles/<name>.yaml` file) in `$EDITOR`. Falls back to `$VISUAL`, then `vi`.
+A non-UTF-8 `$EDITOR` stops the command with an error that names it (changed in v3.13.0).
 
 The editor is supervised the same way [`launch`](#launch) supervises an engine
 (changed in v4.0.0): a signal sent to `llmenv` alone doesn't end it, so it can't
