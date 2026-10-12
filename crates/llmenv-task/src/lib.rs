@@ -27,6 +27,7 @@ use relation::Relation;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a tracked task.
@@ -1360,14 +1361,16 @@ fn store_for_reminder(state_dir: &Path, project: &str) -> Result<Vec<Task>, Stri
     let sessions = session::try_open_sessions_for_project(state_dir, project);
     match (sessions, list_tasks_strict(state_dir)) {
         (Ok(_), Ok(tasks)) => Ok(tasks),
-        (Err(e), _) | (_, Err(e)) => Err(store_warning_text(&e)),
+        (Err(e), _) | (_, Err(e)) => Err(store_warning_text(
+            &e.context("the task store cannot be read"),
+        )),
     }
 }
 
 /// The reminder text for a store that cannot be read.
 fn store_warning_text(error: &anyhow::Error) -> String {
     format!(
-        "The task store cannot be read, so the task reminders were not checked ({error:#}). \
+        "The task reminders were not checked ({error:#}). \
          Fix the task store, then run `llmenv task ls --all` to confirm."
     )
 }
@@ -1537,16 +1540,17 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
 /// conversation id, else those of sessions that [`session::Session`] does not hide from it
 /// (#2511).
 fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Vec<Task>> {
-    let project = match project::current_tag() {
-        Ok(project) => project,
-        Err(e) => {
-            tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            return Ok(Vec::new());
-        }
-    };
-    let mut tasks = filter_tasks_for_project(state_dir, &project, list_tasks_strict(state_dir)?);
+    // An unresolved project must reach the Stop reminder as an error, not as an empty list
+    // that looks like "no wip tasks" (#2658 review).
+    let project = project::current_tag()
+        .map_err(|e| anyhow::Error::new(e).context("cannot resolve the project tag"))?;
+    // Strict session reads: a corrupt session file must reach the Stop reminder as an error,
+    // not drop its tasks silently (#2628).
+    let project_ids = session::try_session_ids_for_project(state_dir, &project)?;
+    let stored = list_tasks_strict(state_dir).context("the task store cannot be read")?;
+    let mut tasks = keep_tasks_in_sessions(stored, &project_ids);
     if caller.is_some() {
-        let visible = session::session_ids_visible_to(state_dir, &project, caller);
+        let visible = session::try_session_ids_visible_to(state_dir, &project, caller)?;
         tasks.retain(|t| t.session.as_ref().is_some_and(|id| visible.contains(id)));
     }
     Ok(tasks)
@@ -1562,6 +1566,14 @@ fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Ve
 #[must_use]
 pub fn filter_tasks_for_project(state_dir: &Path, project: &str, tasks: Vec<Task>) -> Vec<Task> {
     let session_ids = session::session_ids_for_project(state_dir, project);
+    keep_tasks_in_sessions(tasks, &session_ids)
+}
+
+/// Keep the tasks whose session is in `session_ids`. A task with no session is dropped.
+fn keep_tasks_in_sessions(
+    tasks: Vec<Task>,
+    session_ids: &std::collections::HashSet<String>,
+) -> Vec<Task> {
     tasks
         .into_iter()
         .filter(|t| {

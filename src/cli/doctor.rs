@@ -281,7 +281,9 @@ fn ensure_cache_dir_writable(cache_dir: &Path) -> anyhow::Result<()> {
         Ok(meta) if meta.is_dir() => {
             let probe = cache_dir.join(".llmenv-doctor-probe");
             std::fs::write(&probe, b"").context("cache directory not writable")?;
-            let _ = std::fs::remove_file(&probe);
+            if let Err(e) = std::fs::remove_file(&probe) {
+                tracing::warn!("could not remove doctor probe {} ({e})", probe.display());
+            }
         }
         Ok(_) => anyhow::bail!(
             "cache directory {} is not a directory",
