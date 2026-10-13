@@ -487,4 +487,14 @@ mod tests {
         );
         assert!(target.exists(), "and its target must survive");
     }
+
+    proptest::proptest! {
+        /// A name is accepted exactly when it is one non-empty component that is not `.` or `..`.
+        #[test]
+        fn reject_traversal_accepts_only_single_components(s in "[a-z./]{0,8}") {
+            let accepted = reject_traversal(OsStr::new(&s)).is_ok();
+            let single = !s.is_empty() && s != "." && s != ".." && !s.contains('/');
+            proptest::prop_assert_eq!(accepted, single, "name {:?}", s);
+        }
+    }
 }

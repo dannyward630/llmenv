@@ -768,12 +768,26 @@ fn open_log_file(path: &Path, max_bytes: u64, harden_dir: bool) -> anyhow::Resul
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating log directory {}", parent.display()))?;
     }
-    let dir = crate::paths::dirfd::open_dir_nofollow(parent).with_context(|| {
-        format!(
-            "log directory {} is a symlink or not a directory; refusing to write through it",
-            parent.display()
-        )
-    })?;
+    // ELOOP and ENOTDIR are the two codes for a symlink, which differ by platform. Any other
+    // error is reported as itself, not as a refused link.
+    let dir = match crate::paths::dirfd::open_dir_nofollow(parent) {
+        Ok(dir) => dir,
+        Err(e)
+            if matches!(
+                rustix::io::Errno::from_io_error(&e),
+                Some(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR)
+            ) =>
+        {
+            anyhow::bail!(
+                "log directory {} is a symlink or not a directory; refusing to write through it",
+                parent.display()
+            );
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("opening log directory {}", parent.display())));
+        }
+    };
     if !harden_dir {
         refuse_foreign_owner(&dir, parent)?;
     }
@@ -2357,6 +2371,25 @@ mod lock_and_log_safety_tests {
         assert!(
             lock_holder(&lock).is_err(),
             "an unreadable lock must not read as stale"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_bounded_log_rotates_at_the_limit_and_not_below_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("proxy.log");
+        std::fs::write(&log, vec![b'x'; 1023]).expect("seed below limit");
+        drop(open_bounded_log(&log, 1024, false).expect("open below limit"));
+        assert!(
+            !dir.path().join("proxy.log.1").exists(),
+            "a log below the limit must not rotate"
+        );
+        std::fs::write(&log, vec![b'x'; 1024]).expect("seed at limit");
+        drop(open_bounded_log(&log, 1024, false).expect("open at limit"));
+        assert!(
+            dir.path().join("proxy.log.1").exists(),
+            "a log at the limit must rotate"
         );
     }
 
