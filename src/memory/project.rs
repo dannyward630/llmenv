@@ -76,10 +76,16 @@ fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
 /// git cannot start in `cwd`, fails for a reason other than "not a repository", or the git
 /// common directory cannot be resolved. The caller decides what the agent sees.
 pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<Option<String>> {
-    if let Some(name) = git_output(cwd, &["config", "--get", "remote.origin.url"])?
-        .as_deref()
-        .and_then(repo_name_from_url)
-    {
+    if let Some(url) = git_output(cwd, &["config", "--get", "remote.origin.url"])? {
+        // A remote that is set but has no readable name is a config problem. Falling back to the
+        // folder name would hide it. The URL is masked, so credentials stay out of the error.
+        let name = repo_name_from_url(&url).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot read a repo name from the origin URL {}. \
+                 Set a valid origin with `git remote set-url origin <url>`.",
+                crate::git::sanitize_git_url(&url)
+            )
+        })?;
         return Ok(Some(name));
     }
     // The common dir is the main repo's `.git`, also from a linked worktree.
@@ -143,6 +149,28 @@ mod tests {
             session_project(&sub).ok().flatten().as_deref(),
             Some("real-name")
         );
+    }
+
+    #[test]
+    fn session_project_errors_on_an_unparseable_origin_and_masks_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("odd-remote");
+        std::fs::create_dir(&checkout).unwrap();
+        git(&checkout, &["init", "-q"]);
+        git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                // The last path segment is ".git", so the parser finds no repo name.
+                "https://user:secret@/.git",
+            ],
+        );
+        let err = session_project(&checkout).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("origin URL"), "unexpected error: {text}");
+        assert!(!text.contains("secret"), "credentials leaked into: {text}");
     }
 
     #[test]
