@@ -1472,6 +1472,8 @@ All nine honor `format:`.
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
 | `tasks` | `☑ {done}/{total}` (summed across the current project's open sessions, #905); renders empty when no session is open for this project | `☑ 2/5` | `done`, `total` (summed across every session open for the current project), `current` (title of the task currently `wip`/`waiting` among those sessions; empty when none). The default doesn't show `current` — combine it yourself, e.g. `format: "{done}/{total} — {current}"` |
 
+The `tasks` widget shows `tasks: unreadable` in place of its count when a session or task file cannot be read, so a read error never looks like no work (changed in v3.13.0).
+
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
 on `pr`, or `{count}` on `scopes`) is left in the output literally rather than
 being stripped — only the placeholders listed above are substituted.
