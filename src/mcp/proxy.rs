@@ -691,34 +691,151 @@ pub(super) fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
     open_bounded_log(path, PROXY_LOG_MAX_BYTES, true)
 }
 
-/// Refuses a parent directory that is a symlink, or that another uid owns, for a log directory
-/// that llmenv does not harden (#2599). The check is by name, so it narrows the window for a swap
-/// and does not close it: the log open uses `O_NOFOLLOW` on the final component only (#2685).
+/// Refuses a log directory that another uid owns (#2599). The owner is read from the open
+/// directory fd, so it judges the directory that the log is written into (#2685).
 #[cfg(unix)]
-fn refuse_untrusted_parent(parent: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-    let meta = std::fs::symlink_metadata(parent)
-        .with_context(|| format!("inspecting log directory {}", parent.display()))?;
-    if meta.file_type().is_symlink() {
-        anyhow::bail!(
-            "log directory {} is a symlink; refusing to write through it",
-            parent.display()
-        );
-    }
+fn refuse_foreign_owner(dir: &std::os::fd::OwnedFd, parent: &Path) -> anyhow::Result<()> {
     let euid = rustix::process::geteuid().as_raw();
-    if meta.uid() != euid {
+    let owner = rustix::fs::fstat(dir)
+        .with_context(|| format!("inspecting log directory {}", parent.display()))?
+        .st_uid;
+    if owner != euid {
         anyhow::bail!(
-            "log directory {} is owned by uid {}, not uid {euid}; refusing to write through it",
-            parent.display(),
-            meta.uid()
+            "log directory {} is owned by uid {owner}, not uid {euid}; refusing to write through it",
+            parent.display()
         );
     }
     Ok(())
 }
 
+/// Rotates `name` in `dir` to its `.1` generation when it has reached `max_bytes`. A missing file
+/// has nothing to rotate. A symlink, FIFO, or other non-regular entry is refused and not renamed.
+///
+/// Every step names the entry relative to `dir`, so a swapped parent is never the one renamed
+/// (#2685).
+#[cfg(unix)]
+fn rotate_full_log(
+    dir: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+    path: &Path,
+    max_bytes: u64,
+) -> anyhow::Result<()> {
+    use rustix::fs::FileType;
+    use std::os::fd::AsFd as _;
+    let Some(st) = crate::paths::dirfd::stat_at_nofollow(dir.as_fd(), name)
+        .with_context(|| format!("inspecting log {}", path.display()))?
+    else {
+        return Ok(());
+    };
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+        anyhow::bail!(
+            "log path {} is not a regular file; refusing to write through it",
+            path.display()
+        );
+    }
+    let size = u64::try_from(st.st_size)
+        .with_context(|| format!("log {} reports a negative size", path.display()))?;
+    if size < max_bytes {
+        return Ok(());
+    }
+    // Single generation: enough to keep the previous failure's trace around without unbounded
+    // growth. NotFound means a peer rotated first, which leaves the bound intact.
+    let rotated = Path::new(name).with_extension("log.1");
+    match crate::paths::dirfd::rename_at(dir.as_fd(), name, dir.as_fd(), rotated.as_os_str()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("rotating log {}", path.display()))),
+    }
+}
+
+/// Opens the log at `path` for appending, with the parent checks and the rotation of
+/// [`open_bounded_log`]. The parent is opened once as a directory fd, and the rotation and the open
+/// are relative to that fd, so a parent swapped after the check is never the one written to (#2685).
+#[cfg(unix)]
+fn open_log_file(path: &Path, max_bytes: u64, harden_dir: bool) -> anyhow::Result<std::fs::File> {
+    use std::os::fd::AsFd as _;
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("log path {} has no file name", path.display()))?;
+    if harden_dir {
+        crate::paths::create_dir_owner_only(parent)
+            .with_context(|| format!("creating state directory {}", parent.display()))?;
+    } else {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating log directory {}", parent.display()))?;
+    }
+    // ELOOP and ENOTDIR are the two codes for a symlink, which differ by platform. Any other
+    // error is reported as itself, not as a refused link.
+    let dir = match crate::paths::dirfd::open_dir_nofollow(parent) {
+        Ok(dir) => dir,
+        Err(e)
+            if matches!(
+                rustix::io::Errno::from_io_error(&e),
+                Some(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR)
+            ) =>
+        {
+            anyhow::bail!(
+                "log directory {} is a symlink or not a directory; refusing to write through it",
+                parent.display()
+            );
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("opening log directory {}", parent.display())));
+        }
+    };
+    if !harden_dir {
+        refuse_foreign_owner(&dir, parent)?;
+    }
+    rotate_full_log(&dir, name, path, max_bytes)?;
+    crate::paths::dirfd::open_append_at(dir.as_fd(), name)
+        .with_context(|| format!("opening log {}", path.display()))
+}
+
+/// Opens the log at `path` for appending. A platform without `openat` has only the name checks.
 #[cfg(not(unix))]
-fn refuse_untrusted_parent(_parent: &Path) -> anyhow::Result<()> {
-    Ok(())
+fn open_log_file(path: &Path, max_bytes: u64, harden_dir: bool) -> anyhow::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        if harden_dir {
+            crate::paths::create_dir_owner_only(parent)
+                .with_context(|| format!("creating state directory {}", parent.display()))?;
+        } else {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating log directory {}", parent.display()))?;
+        }
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_file() => {
+            anyhow::bail!(
+                "log path {} is not a regular file ({:?}); refusing to write through it",
+                path.display(),
+                meta.file_type()
+            );
+        }
+        Ok(meta) if meta.len() >= max_bytes => {
+            if let Err(e) = std::fs::rename(path, path.with_extension("log.1"))
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(
+                    anyhow::Error::new(e).context(format!("rotating log {}", path.display()))
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("inspecting log {}", path.display())));
+        }
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening log {}", path.display()))
 }
 
 /// Opens `path` for appending as a size-bounded diagnostic log, rotating it to
@@ -749,66 +866,7 @@ pub(crate) fn open_bounded_log(
     max_bytes: u64,
     harden_dir: bool,
 ) -> anyhow::Result<std::fs::File> {
-    if let Some(parent) = path.parent() {
-        if harden_dir {
-            crate::paths::create_dir_owner_only(parent)
-                .with_context(|| format!("creating state directory {}", parent.display()))?;
-        } else {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating log directory {}", parent.display()))?;
-            refuse_untrusted_parent(parent)?;
-        }
-    }
-
-    // Refuse anything at this path that isn't a plain file. `symlink_metadata`
-    // rather than `metadata` so a symlink is seen as a symlink: opening one would
-    // append the child's stderr to whatever it points at, and a pre-placed FIFO
-    // would block the open — hanging the shell prompt on every export.
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if !meta.is_file() => {
-            anyhow::bail!(
-                "log path {} is not a regular file ({:?}); refusing to write through it",
-                path.display(),
-                meta.file_type()
-            );
-        }
-        Ok(meta) => {
-            if meta.len() >= max_bytes {
-                // Single generation: enough to keep the previous failure's trace
-                // around without unbounded growth. NotFound means a peer rotated
-                // first, which leaves the bound intact.
-                if let Err(e) = std::fs::rename(path, path.with_extension("log.1"))
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    return Err(
-                        anyhow::Error::new(e).context(format!("rotating log {}", path.display()))
-                    );
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("inspecting log {}", path.display())));
-        }
-    }
-
-    let mut opts = std::fs::OpenOptions::new();
-    opts.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-        // The check above is by name, so a symlink can be swapped in before the
-        // open. O_NOFOLLOW makes the open fail on a final-component symlink. It
-        // applies on both hardening paths: a user-set path is the one most likely
-        // to be writable by another uid (#2588). O_NONBLOCK makes the open of a FIFO
-        // with no reader fail instead of blocking the shell prompt.
-        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
-        opts.custom_flags(flags.bits().cast_signed());
-    }
-    let file = opts
-        .open(path)
-        .with_context(|| format!("opening log {}", path.display()))?;
+    let file = open_log_file(path, max_bytes, harden_dir)?;
     // The opened file, not the earlier name lookup, is the one written to.
     let opened = file
         .metadata()
@@ -2313,6 +2371,25 @@ mod lock_and_log_safety_tests {
         assert!(
             lock_holder(&lock).is_err(),
             "an unreadable lock must not read as stale"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_bounded_log_rotates_at_the_limit_and_not_below_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let log = dir.path().join("proxy.log");
+        std::fs::write(&log, vec![b'x'; 1023]).expect("seed below limit");
+        drop(open_bounded_log(&log, 1024, false).expect("open below limit"));
+        assert!(
+            !dir.path().join("proxy.log.1").exists(),
+            "a log below the limit must not rotate"
+        );
+        std::fs::write(&log, vec![b'x'; 1024]).expect("seed at limit");
+        drop(open_bounded_log(&log, 1024, false).expect("open at limit"));
+        assert!(
+            dir.path().join("proxy.log.1").exists(),
+            "a log at the limit must rotate"
         );
     }
 

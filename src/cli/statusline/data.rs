@@ -66,6 +66,10 @@ pub struct CacheData {
 pub struct TasksData {
     pub session: Option<SessionProgress>,
     pub current: Option<String>,
+    /// Set when the task or session files cannot be read. The widget shows this instead of
+    /// an empty or lower count, which would look like no work (#2687).
+    #[serde(default)]
+    pub unreadable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]

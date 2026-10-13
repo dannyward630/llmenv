@@ -117,6 +117,10 @@ pub enum ResolveError {
     )]
     AmbiguousCodebaseMemory(Vec<String>),
     #[error(
+        "codebase_memory: index_path cannot be expanded, so the server would get a literal `~`: {0}"
+    )]
+    IndexPathUnexpandable(String),
+    #[error(
         "mcp '{name}': refusing cleartext http:// to public address {addr}: use an https:// \
          URL, or move the server onto a loopback, private, or Tailscale address"
     )]
@@ -338,17 +342,21 @@ fn resolve_codebase_memory(
     cm: &CodebaseMemory,
     _project_root: &Path,
     _state_dir: &Path,
-) -> ResolvedMcp {
+) -> Result<ResolvedMcp, ResolveError> {
     let mut env = BTreeMap::new();
     if let Some(index_path) = &cm.index_path {
-        env.insert("CBM_CACHE_DIR".to_string(), index_path.clone());
+        // The loader expands `~` (#2651). This is the last place the path is read before the
+        // server, so a value that skipped the loader fails here instead of as a directory name.
+        let expanded = crate::paths::expand_tilde(index_path)
+            .map_err(|e| ResolveError::IndexPathUnexpandable(format!("{e:#}")))?;
+        env.insert("CBM_CACHE_DIR".to_string(), expanded);
     }
     // The SessionStart auto-index sets the same variable (`index_command`), so the server and the
     // indexer agree on the budget (#2154).
     if let Some(budget) = cm.mem_budget_mb {
         env.insert("CBM_MEM_BUDGET_MB".to_string(), budget.to_string());
     }
-    ResolvedMcp {
+    Ok(ResolvedMcp {
         name: CODEBASE_MEMORY_MCP_NAME.to_string(),
         kind: ResolvedKind::Stdio {
             command: "codebase-memory-mcp".to_string(),
@@ -362,7 +370,7 @@ fn resolve_codebase_memory(
         memory_hook: None,
         // Its tools are used on demand, so tool search fits them (#2356).
         always_load: None,
-    }
+    })
 }
 
 /// Select and resolve `codebase_memory` entries whose `when` tags intersect
@@ -399,7 +407,7 @@ pub(crate) fn resolve_codebase_memory_entries(
             active[0],
             project_root,
             state_dir,
-        )]),
+        )?]),
         _ => {
             let tag_sets: Vec<String> = active.iter().map(|c| c.when.join(",")).collect();
             Err(ResolveError::AmbiguousCodebaseMemory(tag_sets))
@@ -784,7 +792,8 @@ mod tests {
             index_path: None,
             mcp_permissions: None,
         };
-        let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
+        let resolved =
+            resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state")).unwrap();
         assert_eq!(resolved.name, CODEBASE_MEMORY_MCP_NAME);
         assert_eq!(
             resolved.always_load, None,
@@ -820,7 +829,8 @@ mod tests {
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
         };
-        let resolved = resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state"));
+        let resolved =
+            resolve_codebase_memory(&cm, Path::new("/repos/proj"), Path::new("/state")).unwrap();
         match resolved.kind {
             ResolvedKind::Stdio { env, .. } => {
                 assert_eq!(
@@ -1021,7 +1031,7 @@ mod tests {
                 let cm = CodebaseMemory { allowed_roots: vec![], mem_budget_mb: None, when: vec!["proj".to_string()], index_path: None, mcp_permissions: None };
                 let project_root = std::path::PathBuf::from(&path_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, Path::new("/state"));
-                match resolved.kind {
+                match resolved.unwrap().kind {
                     ResolvedKind::Stdio { env, .. } => {
                         prop_assert!(!env.contains_key("CBM_ALLOWED_ROOT"));
                     }
@@ -1042,7 +1052,7 @@ mod tests {
                 let project_root = std::path::PathBuf::from(&project_root_str);
                 let state_dir = std::path::PathBuf::from(&state_dir_str);
                 let resolved = resolve_codebase_memory(&cm, &project_root, &state_dir);
-                match resolved.kind {
+                match resolved.unwrap().kind {
                     ResolvedKind::Stdio { env, .. } => {
                         prop_assert!(!env.contains_key("CBM_CACHE_DIR"));
                     }
@@ -1064,9 +1074,13 @@ mod tests {
                     Path::new("/repos/proj"),
                     Path::new("/state"),
                 );
-                match resolved.kind {
+                match resolved.unwrap().kind {
                     ResolvedKind::Stdio { env, .. } => {
-                        prop_assert_eq!(env.get("CBM_CACHE_DIR").cloned(), Some(index_path));
+                        // The override wins, and a leading `~` is expanded on the way (#2689).
+                        prop_assert_eq!(
+                            env.get("CBM_CACHE_DIR").cloned(),
+                            crate::paths::expand_tilde(&index_path).ok()
+                        );
                     }
                     ResolvedKind::Remote { .. } => prop_assert!(false, "expected Stdio"),
                 }
@@ -1082,7 +1096,10 @@ mod tests {
                     mem_budget_mb: budget,
                     ..Default::default()
                 };
-                match resolve_codebase_memory(&cm, Path::new("/r"), Path::new("/s")).kind {
+                match resolve_codebase_memory(&cm, Path::new("/r"), Path::new("/s"))
+                    .unwrap()
+                    .kind
+                {
                     ResolvedKind::Stdio { env, .. } => env,
                     ResolvedKind::Remote { .. } => BTreeMap::new(),
                 }

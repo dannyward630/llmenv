@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::resume::ResumeContext;
-use super::{
-    Task, TaskNote, TaskState, list_tasks, now_rfc3339, slugify, task_path, tasks_dir, unique_slug,
-};
+use super::{Task, TaskNote, TaskState, now_rfc3339, slugify, task_path, tasks_dir, unique_slug};
 use anyhow::Context;
 
 /// A task session: a named (or anonymous) span of work, tagged with the
@@ -632,15 +630,6 @@ fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
     }
 }
 
-/// Every task currently tagged with `session_id`. A task file that cannot be read is skipped.
-/// Use [`try_tasks_in_session`] where a decision depends on the whole session (#2598).
-fn tasks_in_session(state_dir: &Path, session_id: &str) -> Vec<Task> {
-    list_tasks(state_dir)
-        .into_iter()
-        .filter(|t| t.session.as_deref() == Some(session_id))
-        .collect()
-}
-
 /// [`tasks_in_session`], but a read error on the tasks directory or on any task file is an error
 /// instead of an empty list or a skipped file. Finishing, abandoning, or guarding a session on a
 /// store it cannot fully read would skip the unfinished check (#2416, #2598).
@@ -800,18 +789,6 @@ pub(crate) fn update_resume(
         save_session(state_dir, &session)?;
         Ok(session)
     })
-}
-
-/// `(done, total)` counts for tasks tagged with `session_id`.
-///
-/// Counts that a display or a decision reads from a store already checked by the caller. The
-/// statusline data has no error channel, so it reads this lenient count and an unreadable task
-/// file is left out. Callers that need a count they can trust use [`try_session_progress`] (#2608).
-#[must_use]
-pub(crate) fn session_progress(state_dir: &Path, session_id: &str) -> (u64, u64) {
-    let tasks = tasks_in_session(state_dir, session_id);
-    let done = tasks.iter().filter(|t| t.state == TaskState::Done).count() as u64;
-    (done, tasks.len() as u64)
 }
 
 /// One task's fields relevant to a session summary — a stable subset of
@@ -2314,7 +2291,10 @@ mod tests {
         add_task_for_session(dir.path(), "Task two", ParentSpec::Detached, &session.id)
             .expect("test");
         done_task(dir.path(), &t1.slug).expect("test");
-        assert_eq!(session_progress(dir.path(), &session.id), (1, 2));
+        assert_eq!(
+            try_session_progress(dir.path(), &session.id).ok(),
+            Some((1, 2))
+        );
     }
 
     #[test]
@@ -2641,7 +2621,8 @@ mod tests {
                 };
                 save_task(dir.path(), &task).expect("test");
             }
-            let (done, total) = session_progress(dir.path(), session_id);
+            let (done, total) = try_session_progress(dir.path(), session_id)
+                .map_err(|e| proptest::test_runner::TestCaseError::fail(e.to_string()))?;
             prop_assert!(done <= total);
             prop_assert_eq!(total, expected_total);
             prop_assert_eq!(done, expected_done);

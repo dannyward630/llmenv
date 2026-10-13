@@ -513,24 +513,31 @@ fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
 /// stateless `TurnStart` recall (#2253). The project lookup runs git, so only
 /// `SessionStart` and a stateless `TurnStart` pay for it; the adaptive
 /// `TurnStart` reads the project from its session ledger.
+///
+/// # Errors
+/// The project cannot be named. The caller skips the event's memory work, because a recall
+/// without a project scope would return other projects' memories (#2688).
 fn wake_args(
     event: HookEvent,
     settings: Option<MemoryHookSettings>,
     payload: &serde_json::Value,
     cwd: &str,
-) -> WakeUpArgs {
+) -> anyhow::Result<WakeUpArgs> {
     let adaptive = settings.is_some_and(|s| s.adaptive_recall);
     let wants_project = match event {
         HookEvent::SessionStart => true,
         HookEvent::TurnStart => !adaptive,
         _ => false,
     };
-    WakeUpArgs {
+    let project = if wants_project {
+        crate::memory::project::session_project(&hook_cwd(payload, cwd))?
+    } else {
+        None
+    };
+    Ok(WakeUpArgs {
         max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
-        project: wants_project
-            .then(|| crate::memory::project::session_project(&hook_cwd(payload, cwd)))
-            .flatten(),
-    }
+        project,
+    })
 }
 
 /// Whether `event` writes to the recall ledger without any MCP call (#2249).
@@ -1507,7 +1514,19 @@ fn run_inner(
         // can be top-level or bundle-declared, when the chunk has none of its own.
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
-        let wake = wake_args(event, settings, stdin_payload, &env.cwd);
+        // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
+        let (wake, memory_notice) = match wake_args(event, settings, stdin_payload, &env.cwd) {
+            Ok(args) => (args, None),
+            Err(e) => {
+                tracing::error!("memory skipped for {event}: {e:#}");
+                let args = WakeUpArgs {
+                    max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
+                    project: None,
+                };
+                (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
+            }
+        };
+        let memory_skipped = memory_notice.is_some();
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
             .inspect_err(
@@ -1596,7 +1615,7 @@ fn run_inner(
             &ctx,
             crate::paths::state_dir(),
         );
-        let health_notice = if event == HookEvent::SessionStart {
+        let session_notice = if event == HookEvent::SessionStart {
             let health = mcp_health::session_start_notice(rt, &config, config_dir, &active);
             match (health, roots_notice) {
                 (Some(h), Some(r)) => Some(format!("{h}{r}")),
@@ -1604,6 +1623,12 @@ fn run_inner(
             }
         } else {
             None
+        };
+        // The project notice applies to every event, because the recall of every event runs
+        // without its project scope when the lookup fails (#2688).
+        let health_notice = match (session_notice, memory_notice) {
+            (Some(s), Some(p)) => Some(format!("{s}\n{p}")),
+            (s, p) => s.or(p),
         };
         if resumes_checkpoints(
             event,
@@ -1624,6 +1649,7 @@ fn run_inner(
             // condition; no need to re-check the event here too.
             if let Some(client) = &client
                 && !session_end_unchanged
+                && !memory_skipped
             {
                 let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
                 let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
@@ -2832,7 +2858,7 @@ fn handle_web_fetch_in(
         payload["session_id"].as_str(),
     );
     let mut cmd = icm_store_command(exe, checkpoint.as_deref());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::error!("icm-store: failed to spawn detached store child");
@@ -2853,12 +2879,31 @@ fn handle_web_fetch_in(
 /// default. Single source of truth for both the spawned child's
 /// `CBM_CACHE_DIR` and the indexer's own diagnostic log (#1091), so they
 /// can't drift apart.
+///
+/// # Errors
+/// `index_path` cannot be expanded, for example a leading `~` with `HOME` unset.
 pub(crate) fn codebase_memory_cache_dir(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
-) -> std::path::PathBuf {
+) -> anyhow::Result<std::path::PathBuf> {
+    Ok(cache_dir_of(expanded_index_path(cm)?.as_deref(), state_dir))
+}
+
+/// The `index_path` of `cm` with a leading `~` expanded. The loader already does this (#2651),
+/// so this call protects a value that reaches the indexer without the loader.
+///
+/// # Errors
+/// `index_path` cannot be expanded, for example a leading `~` with `HOME` unset.
+fn expanded_index_path(cm: &crate::config::CodebaseMemory) -> anyhow::Result<Option<String>> {
     cm.index_path
-        .as_ref()
+        .as_deref()
+        .map(crate::paths::expand_tilde)
+        .transpose()
+}
+
+/// The cache folder for an already-expanded `index_path`, or the default under `state_dir`.
+fn cache_dir_of(index_path: Option<&str>, state_dir: &std::path::Path) -> std::path::PathBuf {
+    index_path
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state_dir.join("codebase-memory"))
 }
@@ -2877,7 +2922,7 @@ const BOUNDED_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
 ///
 /// # Errors
 /// Propagates `state_dir()` resolution failure.
-fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
+pub(crate) fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(crate::paths::state_dir()?.join("detached-hook.log"))
 }
 
@@ -2913,24 +2958,30 @@ fn redirect_stderr_to_bounded_log(
             cmd.stderr(std::process::Stdio::from(file));
         }
         Err(e) => {
-            tracing::debug!("{context}: log unavailable ({e:#}), stderr discarded");
+            tracing::warn!(
+                "{context}: log unavailable ({e:#}); the child's stderr is discarded. Check that the log path is a regular file owned by you."
+            );
         }
     }
 }
 
-/// Send a detached child's stderr to the shared bounded log instead of
-/// discarding it (#1133, the same remedy as #1091).
+/// Send a detached child's stderr to the shared bounded log instead of discarding it (#1133, the
+/// same remedy as #1091). `log` is the resolved [`detached_child_log_path`].
 ///
-/// `Stdio::null()` leaves such a child with no report channel whatsoever: its
-/// own `tracing` events go to a fmt layer writing to that same null stderr, so
-/// a failure is discarded twice over.
-pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
-    match detached_child_log_path() {
+/// `Stdio::null()` leaves such a child with no report channel whatsoever: its own `tracing`
+/// events go to a fmt layer writing to that same null stderr, so a failure is discarded twice over.
+pub(crate) fn redirect_stderr_to_detached_log(
+    cmd: &mut std::process::Command,
+    log: anyhow::Result<std::path::PathBuf>,
+) {
+    match log {
         // Always state_dir-rooted, so `harden_dir: true` is safe.
         Ok(path) => redirect_stderr_to_bounded_log(cmd, &path, true, "detached child"),
         Err(e) => {
             cmd.stderr(std::process::Stdio::null());
-            tracing::debug!("detached child: cannot resolve log path ({e:#}), stderr discarded");
+            tracing::warn!(
+                "detached child: cannot resolve log path ({e:#}); the child's stderr is discarded"
+            );
         }
     }
 }
@@ -2944,15 +2995,11 @@ pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
 /// `cm.mem_budget_mb` is (#2154). Same treatment as `resolve_codebase_memory`
 /// (`src/mcp/resolve.rs`), which this mirrors so the SessionStart auto-index
 /// and the MCP server launch agree on scope and budget.
-fn build_index_repository_command(
-    project_root: &std::path::Path,
-    cm: &crate::config::CodebaseMemory,
-) -> std::process::Command {
-    index_command(project_root, cm.index_path.as_deref(), cm.mem_budget_mb)
-}
-
-/// [`build_index_repository_command`] from the two values the command needs, so the checkpointed
-/// wrapper (`detached_cbm`) can rebuild it from a checkpoint file (#2396).
+/// The indexer command for `project_root`. The checkpointed wrapper (`detached_cbm`) rebuilds it
+/// from a checkpoint file (#2396).
+///
+/// `index_path` MUST already be expanded (see [`expanded_index_path`]). A literal `~` would reach
+/// the child as a directory name.
 fn index_command(
     project_root: &std::path::Path,
     index_path: Option<&str>,
@@ -3144,11 +3191,18 @@ fn trigger_codebase_memory_index(
 ) {
     // A checkpointed run goes through `llmenv cbm-index-run`, which observes the indexer's exit
     // status. Without a checkpoint the indexer starts directly, as before (#2396).
-    let cache_dir = codebase_memory_cache_dir(cm, state_dir);
+    let index_path = match expanded_index_path(cm) {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::error!("codebase-memory index skipped: cannot expand index_path: {e:#}");
+            return;
+        }
+    };
+    let cache_dir = cache_dir_of(index_path.as_deref(), state_dir);
     let result_path = index_result_path(&cache_dir, project_root);
     let inputs = detached_cbm::IndexInputs {
         project_root: project_root.display().to_string(),
-        index_path: cm.index_path.clone(),
+        index_path: index_path.clone(),
         mem_budget_mb: cm.mem_budget_mb,
         result_path: Some(result_path.display().to_string()),
     };
@@ -3164,7 +3218,7 @@ fn trigger_codebase_memory_index(
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
-        build_index_repository_command(project_root, cm)
+        index_command(project_root, index_path.as_deref(), cm.mem_budget_mb)
     });
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -3262,7 +3316,7 @@ fn spawn_detached(
     cwd: &std::path::Path,
 ) -> anyhow::Result<()> {
     cmd.current_dir(cwd);
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let mut child = cmd.spawn()?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
@@ -3359,7 +3413,7 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
         None,
     );
     let mut cmd = consolidation_run_command(exe, checkpoint.as_deref());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::error!(
@@ -4376,6 +4430,33 @@ mod tests {
 
     // Pins the shared log name: the three detached children, the docs, and any
     // operator told where to look must all agree on one path.
+    #[cfg(unix)]
+    #[test]
+    fn a_detached_child_stderr_reaches_the_log_it_is_given() -> anyhow::Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let log = dir.path().join("detached-hook.log");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo child-stderr-marker >&2"]);
+        redirect_stderr_to_detached_log(&mut cmd, Ok(log.clone()));
+        anyhow::ensure!(cmd.status()?.success(), "the child must run");
+        let text = std::fs::read_to_string(&log)?;
+        anyhow::ensure!(
+            text.contains("child-stderr-marker"),
+            "the child's stderr must reach the log: {text}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_log_path_still_runs_the_detached_child() -> anyhow::Result<()> {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo discarded >&2"]);
+        redirect_stderr_to_detached_log(&mut cmd, Err(anyhow::anyhow!("no state dir")));
+        anyhow::ensure!(cmd.status()?.success(), "the child must run without a log");
+        Ok(())
+    }
+
     #[test]
     fn detached_child_log_path_is_named_under_the_state_dir() {
         let path = detached_child_log_path().expect("test");
@@ -5257,7 +5338,11 @@ mod tests {
             index_path: None,
             mcp_permissions: None,
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/repos/proj"), &cm);
+        let cmd = index_command(
+            std::path::Path::new("/repos/proj"),
+            cm.index_path.as_deref(),
+            cm.mem_budget_mb,
+        );
         assert_eq!(cmd.get_program().to_string_lossy(), "codebase-memory-mcp");
         let args: Vec<String> = cmd
             .get_args()
@@ -5298,7 +5383,11 @@ mod tests {
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/repos/proj"), &cm);
+        let cmd = index_command(
+            std::path::Path::new("/repos/proj"),
+            cm.index_path.as_deref(),
+            cm.mem_budget_mb,
+        );
         let envs: std::collections::BTreeMap<String, String> = cmd
             .get_envs()
             .filter_map(|(k, v)| {
@@ -5317,6 +5406,41 @@ mod tests {
     }
 
     #[test]
+    fn expanded_index_path_removes_a_leading_tilde() {
+        let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
+            mem_budget_mb: None,
+            when: vec!["proj".to_string()],
+            index_path: Some("~/cbm".to_string()),
+            mcp_permissions: None,
+        };
+        let expanded = expanded_index_path(&cm).ok().flatten();
+        assert!(
+            expanded
+                .as_deref()
+                .is_some_and(|p| !p.starts_with('~') && p.ends_with("/cbm")),
+            "a literal tilde must not reach the indexer: {expanded:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_index_path_passes_an_absolute_path_and_none_through() {
+        let mut cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
+            mem_budget_mb: None,
+            when: vec!["proj".to_string()],
+            index_path: Some("/custom/path".to_string()),
+            mcp_permissions: None,
+        };
+        assert_eq!(
+            expanded_index_path(&cm).ok().flatten().as_deref(),
+            Some("/custom/path")
+        );
+        cm.index_path = None;
+        assert_eq!(expanded_index_path(&cm).ok().flatten(), None);
+    }
+
+    #[test]
     fn codebase_memory_cache_dir_defaults_under_state_dir() {
         let cm = crate::config::CodebaseMemory {
             allowed_roots: vec![],
@@ -5326,8 +5450,8 @@ mod tests {
             mcp_permissions: None,
         };
         assert_eq!(
-            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
-            std::path::PathBuf::from("/state/codebase-memory")
+            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")).ok(),
+            Some(std::path::PathBuf::from("/state/codebase-memory"))
         );
     }
 
@@ -5341,8 +5465,8 @@ mod tests {
             mcp_permissions: None,
         };
         assert_eq!(
-            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
-            std::path::PathBuf::from("/custom/path")
+            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")).ok(),
+            Some(std::path::PathBuf::from("/custom/path"))
         );
     }
 
@@ -5366,13 +5490,21 @@ mod tests {
             mem_budget_mb: Some(8192),
             ..Default::default()
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/r"), &with);
+        let cmd = index_command(
+            std::path::Path::new("/r"),
+            with.index_path.as_deref(),
+            with.mem_budget_mb,
+        );
         assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB").as_deref(), Some("8192"));
         let without = crate::config::CodebaseMemory {
             when: vec!["p".into()],
             ..Default::default()
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/r"), &without);
+        let cmd = index_command(
+            std::path::Path::new("/r"),
+            without.index_path.as_deref(),
+            without.mem_budget_mb,
+        );
         assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB"), None);
     }
 
@@ -5572,7 +5704,7 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = build_index_repository_command(&project_root, &cm);
+            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
             let args: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
@@ -5583,7 +5715,7 @@ mod tests {
             proptest::prop_assert_eq!(parsed["repo_path"].as_str(), Some(expected.as_str()));
         }
 
-        // #1493/#1495: build_index_repository_command must never set
+        // #1493/#1495: index_command must never set
         // CBM_ALLOWED_ROOT, and must never set CBM_CACHE_DIR when
         // index_path is unset — mirrors resolve_codebase_memory's contract
         // (src/mcp/resolve.rs), for arbitrary project_root content.
@@ -5597,7 +5729,7 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = build_index_repository_command(&project_root, &cm);
+            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
             let envs: std::collections::BTreeMap<String, String> = cmd
                 .get_envs()
                 .filter_map(|(k, v)| {
@@ -7381,15 +7513,36 @@ mod adaptive_routing_tests {
             default_type: None,
             default_importance: None,
         });
-        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/");
-        assert_eq!(start.project.as_deref(), Some("wake-repo"));
+        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(start.as_deref(), Some("wake-repo"));
         // #2253: the stateless TurnStart recall is scoped to the session project.
-        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/");
-        assert_eq!(stateless.project.as_deref(), Some("wake-repo"));
-        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/");
-        assert_eq!(adaptive_turn.project, None, "the ledger holds the project");
-        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/");
-        assert_eq!(other.project, None);
+        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(stateless.as_deref(), Some("wake-repo"));
+        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(adaptive_turn, None, "the ledger holds the project");
+        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(other, None);
+    }
+
+    #[test]
+    fn wake_args_refuses_to_guess_a_project_when_git_cannot_start() {
+        let payload = serde_json::json!({ "cwd": "/no/such/dir/for/llmenv-hook" });
+        let err = wake_args(HookEvent::SessionStart, None, &payload, "/")
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        assert!(
+            err.contains("cannot run git") && err.contains("/no/such/dir/for/llmenv-hook"),
+            "the agent must see the git failure and the directory: {err}"
+        );
     }
 
     #[test]

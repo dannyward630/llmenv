@@ -86,7 +86,7 @@ pub fn collect_status_data(
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: collect_cache(cache_root, hashing),
             session_log: collect_session_log(),
-            tasks: collect_tasks(),
+            tasks: Some(collect_tasks()),
         },
     }
 }
@@ -232,51 +232,74 @@ fn extract_stat_line(raw: &str, label: &str) -> Option<u64> {
     })
 }
 
-/// Best-effort task-tracker progress, scoped to the sessions open for the
-/// current project (mandatory-sessions design). `session` is `None` when
-/// zero sessions are open for this project (the widget renders empty); `Some`
-/// carries the summed `(done, total)` across every session open for this
-/// project. `None` (the whole `TasksData`) only when the state dir or cwd
-/// can't be resolved.
-fn collect_tasks() -> Option<TasksData> {
+/// Task-tracker progress, scoped to the sessions open for the current project (mandatory-sessions
+/// design). `session` is `None` when zero sessions are open for this project (the widget renders
+/// empty); `Some` carries the summed `(done, total)` across every session open for this project.
+/// A state dir or cwd that cannot be resolved is the `unreadable` marker, not an empty section, so
+/// the status line never reads as "no work" (#2687).
+fn collect_tasks() -> TasksData {
+    let unreadable = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::error!(
+            "cannot read the tasks, {what} is unknown: {e}; the status line shows unreadable"
+        );
+        TasksData {
+            session: None,
+            current: None,
+            unreadable: true,
+        }
+    };
     let state_dir = match crate::paths::state_dir() {
         Ok(dir) => dir,
-        Err(e) => {
-            tracing::debug!("task stat collection unavailable (non-fatal): {e}");
-            return None;
-        }
+        Err(e) => return unreadable("the state directory", &e),
     };
-    let project = match crate::task::project::current_tag() {
-        Ok(project) => project,
-        Err(e) => {
-            tracing::debug!("task stat collection unavailable (no cwd): {e}");
-            return None;
-        }
-    };
-    Some(collect_tasks_from_state_dir(&state_dir, &project))
+    match crate::task::project::current_tag() {
+        Ok(project) => collect_tasks_from_state_dir(&state_dir, &project),
+        Err(e) => unreadable("the project of the working directory", &e),
+    }
 }
 
 /// Internal helper taking injectable state dir + project tag so tests can
 /// exercise this without touching the real, ambient state dir or cwd.
 fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> TasksData {
-    // The status line has no text channel for a warning, so the error goes to the log.
-    let open_sessions = crate::task::session::open_sessions_strict(state_dir, project)
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "cannot read the open sessions; the status line shows none");
-            Vec::new()
-        });
+    // The status line has no text channel for a warning, so the error goes to the log. The
+    // widget shows the `unreadable` marker, so a read failure never looks like "no work".
+    match try_tasks_data(state_dir, project) {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::error!(error = %e, "cannot read the tasks; the status line shows unreadable");
+            TasksData {
+                session: None,
+                current: None,
+                unreadable: true,
+            }
+        }
+    }
+}
+
+/// The task fields of the status line, read strictly: any unreadable session or task file is an
+/// error.
+fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
+    let open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
     let session = if open_sessions.is_empty() {
         None
     } else {
-        let (done, total) = open_sessions.iter().fold((0, 0), |(ad, at), s| {
-            let (d, t) = crate::task::session::session_progress(state_dir, &s.id);
-            (ad + d, at + t)
-        });
-        Some(SessionProgress { done, total })
+        let mut total_progress = (0, 0);
+        for s in &open_sessions {
+            let (d, t) = crate::task::session::try_session_progress(state_dir, &s.id)?;
+            total_progress = (total_progress.0 + d, total_progress.1 + t);
+        }
+        Some(SessionProgress {
+            done: total_progress.0,
+            total: total_progress.1,
+        })
     };
     let session_ids: Vec<String> = open_sessions.into_iter().map(|s| s.id).collect();
-    let current = crate::task::current_wip_title(state_dir, &session_ids);
-    TasksData { session, current }
+    let current = crate::task::current_wip_title(state_dir, &session_ids)?;
+    Ok(TasksData {
+        session,
+        current,
+        unreadable: false,
+    })
 }
 
 /// Prefer resolving fresh against current config (reflects a same-render
@@ -997,6 +1020,36 @@ mod tests {
             StartOutcome::Created(s) => s,
             other => panic!("expected Created, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collect_tasks_an_unreadable_session_store_shows_the_marker_not_no_work() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        created(
+            crate::task::session::start_session(
+                dir.path(),
+                None,
+                None,
+                PROJECT,
+                crate::task::session::StartDecision::Auto,
+            )
+            .unwrap(),
+        );
+        let sessions = crate::task::tasks_dir(dir.path()).join("sessions");
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable_anyway = std::fs::read_dir(&sessions).is_ok();
+        let data = collect_tasks_from_state_dir(dir.path(), PROJECT);
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if readable_anyway {
+            return; // running as root: the permission cannot be enforced
+        }
+        assert!(
+            data.unreadable,
+            "an unreadable store must not look like no work"
+        );
+        assert!(data.session.is_none());
     }
 
     #[test]
