@@ -2887,9 +2887,7 @@ pub(crate) fn codebase_memory_cache_dir(
 ///
 /// # Errors
 /// `index_path` cannot be expanded, for example a leading `~` with `HOME` unset.
-pub(crate) fn expanded_index_path(
-    cm: &crate::config::CodebaseMemory,
-) -> anyhow::Result<Option<String>> {
+fn expanded_index_path(cm: &crate::config::CodebaseMemory) -> anyhow::Result<Option<String>> {
     cm.index_path
         .as_deref()
         .map(crate::paths::expand_tilde)
