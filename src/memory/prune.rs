@@ -239,7 +239,11 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     ensure_retention_unset(&merged.memory, &active.tags)?;
     let client = connect(&config_path, &config)?;
     let cwd = std::env::current_dir().ok();
-    let project = cwd.as_deref().and_then(super::project::session_project);
+    let project = cwd
+        .as_deref()
+        .map(super::project::session_project)
+        .transpose()?
+        .flatten();
     let output = call_tool_blocking(
         client.clone(),
         "icm_memory_recall",

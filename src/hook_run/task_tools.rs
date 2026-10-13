@@ -339,16 +339,15 @@ fn ensure_session(
             )));
         }
     };
-    let detected = match std::env::current_dir() {
-        Ok(cwd) => crate::task::resume::ResumeContext::detected(&cwd),
-        Err(e) => {
-            eprintln!(
-                "llmenv: cannot read the working directory ({e}), so the auto-started task \
-                 session has no branch or issue"
-            );
-            crate::task::resume::ResumeContext::default()
-        }
-    };
+    let detected = std::env::current_dir()
+        .map_err(anyhow::Error::from)
+        .and_then(|cwd| crate::task::resume::ResumeContext::detected(&cwd))
+        .map_err(|e| {
+            deny(&format!(
+                "cannot read the working directory or the git branch for the auto-started task \
+                 session ({e:#}); track this with `llmenv task` manually."
+            ))
+        })?;
     if open_sessions.is_empty()
         && let Err(e) = session::start_session_as(
             state_dir,
