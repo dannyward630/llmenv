@@ -1098,6 +1098,20 @@ mod tests {
         );
     }
 
+    // Catches a field added to Capabilities that serializes by default but has no entry here (#2680).
+    // A field with skip_serializing_if and an empty default is not emitted, so this test cannot see it.
+    #[test]
+    fn every_default_serialized_capabilities_key_is_a_known_bundle_key() {
+        let value = serde_yaml::to_value(Capabilities::default()).unwrap();
+        for key in value.as_mapping().unwrap().keys() {
+            let key = key.as_str().unwrap();
+            assert!(
+                BUNDLE_YAML_KNOWN_KEYS.contains(&key),
+                "Capabilities key '{key}' is missing from BUNDLE_YAML_KNOWN_KEYS"
+            );
+        }
+    }
+
     // #1031: `default_models`, `model_providers`, and `native_default_models`
     // were missing from BUNDLE_YAML_KNOWN_KEYS despite Capabilities' own doc
     // comments documenting bundle-level support for the first two — any

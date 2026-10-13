@@ -1024,15 +1024,15 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn is_git_repo(dir: &Path) -> bool {
-    match git::secure_git()
+/// Whether `dir` is inside a git repository. A failure to start git is an error, not "no repo":
+/// only a non-zero exit from `git rev-parse` means the directory is not a repository.
+fn is_git_repo(dir: &Path) -> anyhow::Result<bool> {
+    let output = git::secure_git()
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir)
         .output()
-    {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
-    }
+        .with_context(|| format!("failed to run git in {}", dir.display()))?;
+    Ok(output.status.success())
 }
 
 fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
