@@ -328,10 +328,15 @@ fn collect_throttle_with_stored_fallback(
     active_tags: &BTreeSet<String>,
     read_stored: impl FnOnce() -> anyhow::Result<Option<Throttle>>,
 ) -> (Option<ThrottleData>, Option<String>) {
-    let resolved = crate::throttle::resolve_active_throttle(throttle_configs, active_tags)
-        .inspect_err(|e| tracing::error!("throttle resolution failed (non-fatal): {e}"))
-        .ok()
-        .flatten();
+    // A failed resolution is an unreadable state, not "throttling off". Passing the error on
+    // lets the widget say so.
+    let resolved = match crate::throttle::resolve_active_throttle(throttle_configs, active_tags) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            tracing::error!("throttle resolution failed (non-fatal): {e:#}");
+            return (None, Some(format!("{e:#}")));
+        }
+    };
     if let Some(t) = resolved {
         return (Some(throttle_data(t)), None);
     }
@@ -858,6 +863,23 @@ mod tests {
                 }),
                 None
             )
+        );
+    }
+
+    #[test]
+    fn collect_throttle_reports_an_unresolvable_throttle_instead_of_off() {
+        // Two entries active at once make resolution fail. That must read as an error, not
+        // as "off", and the stored state must not hide it.
+        let configs = vec![throttle_cfg("a", "t", 60), throttle_cfg("b", "t", 30)];
+        let (throttle, error) =
+            collect_throttle_with_stored_fallback(&configs, &tags(&["t"]), || {
+                panic!("stored fallback must not mask a failed resolution")
+            });
+        assert_eq!(throttle, None);
+        let error = error.expect("a failed resolution must set throttle_error");
+        assert!(
+            error.contains("conflicting backends"),
+            "unexpected error: {error}"
         );
     }
 
