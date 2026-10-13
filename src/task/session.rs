@@ -429,12 +429,12 @@ pub(crate) fn touch_last_activity(state_dir: &Path, session_id: &str) -> anyhow:
         let mut session = match load_session(state_dir, session_id) {
             Ok(session) => session,
             Err(e) if is_not_found(&e) => return Ok(()),
+            // A session that exists but cannot be read is a failed update, not a
+            // successful one. The caller logs it.
             Err(e) => {
-                tracing::warn!(
-                    error = %e, session_id = %session_id,
-                    "could not load session to update last_activity (skipping the touch)"
-                );
-                return Ok(());
+                return Err(e.context(format!(
+                    "cannot update last_activity: session {session_id} did not load"
+                )));
             }
         };
         if !session.is_open() {
@@ -1988,13 +1988,16 @@ mod tests {
     }
 
     #[test]
-    fn touch_last_activity_on_corrupt_session_file_is_a_noop_ok() {
+    fn touch_last_activity_on_corrupt_session_file_is_an_error() {
         let dir = TempDir::new().expect("test");
         std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
         std::fs::write(session_path(dir.path(), "corrupt"), b"not valid json").expect("test");
-        // Tolerated (warned, not propagated) — a corrupt session file must
-        // not turn an already-committed task mutation into an error.
-        touch_last_activity(dir.path(), "corrupt").expect("test");
+        // A corrupt file is a failed update. The error names the session, so the caller can report it.
+        let err = touch_last_activity(dir.path(), "corrupt").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("corrupt"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
