@@ -430,7 +430,7 @@ pub(crate) fn touch_last_activity(state_dir: &Path, session_id: &str) -> anyhow:
             Ok(session) => session,
             Err(e) if is_not_found(&e) => return Ok(()),
             // A session that exists but cannot be read is a failed update, not a
-            // successful one, so the caller learns about it.
+            // successful one. The caller logs it.
             Err(e) => {
                 return Err(e.context(format!(
                     "cannot update last_activity: session {session_id} did not load"
