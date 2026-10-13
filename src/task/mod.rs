@@ -214,6 +214,7 @@ pub(crate) fn load_task(state_dir: &Path, slug: &str) -> anyhow::Result<Task> {
 /// that must distinguish "genuinely empty" from "couldn't read the store"
 /// (e.g. denying a `TaskList` redirect with the real error, #1112) should use
 /// [`try_list_tasks`] instead.
+#[cfg(test)]
 pub(crate) fn list_tasks(state_dir: &Path) -> Vec<Task> {
     match try_list_tasks(state_dir) {
         Ok(tasks) => tasks,
@@ -438,16 +439,25 @@ fn visit<'a>(
     }
 }
 
-/// Title of the most recently updated `wip`/`waiting` task among tasks
-/// tagged to any of `session_ids` — the statusline's "what's in progress
-/// right now" fill-in (#905). `None` when nothing matching is currently
-/// `wip`/`waiting`, or when `session_ids` is empty.
-#[must_use]
-pub(crate) fn current_wip_title(state_dir: &Path, session_ids: &[String]) -> Option<String> {
+/// The title of the most recently updated `wip` or `waiting` task in `session_ids`, for the
+/// statusline's "what's in progress right now" fill-in (#905). `None` when nothing matching is
+/// currently `wip`/`waiting`, or when `session_ids` is empty. A task file that cannot be read is
+/// an error, not a skipped task, so a corrupt file never removes the title without a sign (#2687).
+///
+/// # Errors
+/// The task store cannot be read.
+pub(crate) fn current_wip_title(
+    state_dir: &Path,
+    session_ids: &[String],
+) -> anyhow::Result<Option<String>> {
     if session_ids.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let tasks = list_tasks(state_dir);
+    Ok(wip_title_among(&list_tasks_strict(state_dir)?, session_ids))
+}
+
+/// The title of the most recently updated `wip` or `waiting` task among `session_ids`.
+fn wip_title_among(tasks: &[Task], session_ids: &[String]) -> Option<String> {
     most_recently_updated(tasks.iter().filter(|t| {
         matches!(t.state, TaskState::Wip | TaskState::Waiting)
             && t.session
