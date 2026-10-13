@@ -2202,6 +2202,19 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
     }
 }
 
+/// Create the empty marker, refusing a symlink at its path. A write through a link would land on
+/// the link's target (#2686).
+fn write_marker(marker: &Path) -> std::io::Result<()> {
+    crate::paths::refuse_symlink(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )
+    .open(marker)
+    .map(drop)
+}
+
 /// Fold transcripts stranded in pre-#1059 hashed folders into the durable store,
 /// at most once per state dir.
 ///
@@ -2222,7 +2235,7 @@ fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
             return;
         }
     }
-    if let Err(e) = std::fs::write(&marker, b"") {
+    if let Err(e) = write_marker(&marker) {
         tracing::debug!("could not write {}: {e}", marker.display());
     }
 }
@@ -7107,6 +7120,22 @@ fn is_within_cache(cache_root: &std::path::Path, expanded_path: &str) -> bool {
 mod config_guard_tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "test code")]
+    fn write_marker_does_not_write_through_a_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("victim");
+        let marker = dir.path().join(".transcripts-migrated");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+        assert!(
+            write_marker(&marker).is_err(),
+            "a symlink marker must be refused"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
 
     #[test]
     fn test_is_within_cache_basic() {

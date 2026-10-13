@@ -250,6 +250,9 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
 /// truncates if present. Use for any file containing user state or
 /// credentials (settings, sync state, MCP configs, ICM memory) where
 /// world-readable defaults would leak data on shared systems.
+///
+/// A symlink at `path` is an error on Unix (`O_NOFOLLOW`). The write never lands on the
+/// link's target, which an attacker with write access to the parent could choose (#2686).
 pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -260,6 +263,7 @@ pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
             .create(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
             .open(path)?;
         file.write_all(content)?;
     }
@@ -792,6 +796,23 @@ mod tests {
         assert_eq!(mode & 0o077, 0, "group/other bits set: {mode:o}");
         let body = std::fs::read(&path).expect("read");
         assert_eq!(body, b"sensitive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_refuses_a_symlink_and_leaves_its_target_alone() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("target");
+        let link = tmp.path().join("link");
+        std::fs::write(&target, b"keep").expect("seed target");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let err = write_owner_only(&link, b"attacker").expect_err("symlink must be refused");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(rustix::io::Errno::LOOP.raw_os_error()),
+            "a symlink at the final component must fail with ELOOP: {err}"
+        );
+        assert_eq!(std::fs::read(&target).expect("read target"), b"keep");
     }
 
     #[cfg(unix)]

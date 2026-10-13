@@ -165,6 +165,27 @@ fn download_binary(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<
 }
 
 /// Install `data` as the new binary, with backup/restore safety.
+/// Create `path` for writing, refusing a symlink there. The install directory is writable by the
+/// user, so a link planted at a fixed name would otherwise redirect the write (#2686).
+fn create_refusing_symlink(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    crate::paths::refuse_symlink(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )
+    .open(path)
+}
+
+/// `std::fs::copy`, with the destination opened by [`create_refusing_symlink`]. The copy keeps the
+/// source mode, because the backup is the binary that a failed upgrade restores.
+fn copy_refusing_symlink(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let mut input = std::fs::File::open(src)?;
+    let mut output = create_refusing_symlink(dst)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.set_permissions(input.metadata()?.permissions())
+}
+
 fn install_binary(data: &[u8]) -> Result<()> {
     // Replace target is this binary's own path. Tracked in #2580.
     // nosemgrep: rust.lang.security.current-exe.current-exe
@@ -175,14 +196,14 @@ fn install_binary(data: &[u8]) -> Result<()> {
 
     // Backup lives next to the current binary (same filesystem for atomic rename)
     let backup = current_dir.join(".llmenv-upgrade.bak");
-    std::fs::copy(&current_exe, &backup)
+    copy_refusing_symlink(&current_exe, &backup)
         .with_context(|| format!("failed to backup current binary to {}", backup.display()))?;
 
     // Write new binary to a temp file in the same directory
     let temp = current_dir.join(".llmenv-upgrade.new");
     let write_result = (|| -> Result<()> {
         let mut tmp =
-            std::fs::File::create(&temp).context("failed to create temp file for new binary")?;
+            create_refusing_symlink(&temp).context("failed to create temp file for new binary")?;
         tmp.write_all(data).context("failed to write new binary")?;
         tmp.sync_all().context("failed to sync new binary")?;
 
@@ -1009,5 +1030,20 @@ mod tests {
         let logs = crate::test_log_capture::capture_logs(|| remove_leftover(&stuck, "temp file"));
         assert!(logs.contains("ERROR"), "expected an ERROR line: {logs}");
         assert!(logs.contains("failed to remove temp file"), "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refusing_symlink_does_not_write_through_a_planted_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("victim");
+        let temp = dir.path().join(".llmenv-upgrade.new");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &temp).unwrap();
+        assert!(
+            create_refusing_symlink(&temp).is_err(),
+            "a planted symlink must be refused"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
 }
