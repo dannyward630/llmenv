@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::session_ledger::hash_prefix;
+use super::session_state::lock_state_file;
 
 const STALE_DAYS: u64 = 7;
 
@@ -46,6 +47,13 @@ pub(crate) fn emit_once(state_dir: &Path, session_id: Option<&str>, reminder: &s
     let Some(path) = state_path(state_dir, session_id) else {
         return reminder.to_string();
     };
+    // The lock covers the read and the save, so two Stop hooks cannot both see the reminder as
+    // new (#2678). When the lock fails, lock_state_file logs it, and the reminder is emitted:
+    // that can only repeat a reminder, the same as a damaged record.
+    let _lock = path
+        .parent()
+        .zip(session_id)
+        .and_then(|(dir, id)| lock_state_file(dir, id, "stop dedupe"));
     if reminder.is_empty() {
         clear_last(&path);
         return String::new();
@@ -96,6 +104,7 @@ fn load_last(path: &Path) -> Option<LastReminder> {
 fn save(path: &Path, last: &LastReminder) {
     if let Some(dir) = path.parent() {
         super::session_state::prune_stale_json_files(dir, STALE_DAYS);
+        super::session_state::prune_orphan_locks(dir, STALE_DAYS);
     }
     let result = serde_json::to_vec(last)
         .map_err(std::io::Error::other)
@@ -120,6 +129,19 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn emit_once_still_emits_when_another_hook_holds_the_lock() {
+        let dir = TempDir::new().unwrap();
+        let _held = crate::hook_run::session_state::lock_state_file(
+            &dir.path().join("stop_dedupe"),
+            "s1",
+            "test holder",
+        )
+        .unwrap();
+        // A lock that cannot be taken must not swallow the reminder: the worst case is one repeat.
+        assert_eq!(emit_once(dir.path(), Some("s1"), "reminder"), "reminder");
+    }
 
     #[test]
     fn hook_continuation_reads_only_a_true_boolean() {

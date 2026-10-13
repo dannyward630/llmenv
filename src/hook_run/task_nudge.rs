@@ -166,6 +166,12 @@ pub(crate) fn handle_post_tool_use(
     let Some(path) = session_id.and_then(|id| state_path(state_dir, id)) else {
         return String::new();
     };
+    // Held from the load to the save, so a concurrent hook cannot overwrite a deny marker (#2678).
+    // No lock without a directory: taking it would create the directory for a session that never
+    // wrote state, and there is no state yet to race on.
+    let _lock = session_id
+        .zip(path.parent().filter(|dir| dir.is_dir()))
+        .and_then(|(id, dir)| super::session_state::lock_state_file(dir, id, "task nudge"));
     let Some(mut state) = load(&path) else {
         return String::new();
     };
@@ -390,6 +396,10 @@ pub(crate) fn handle_pre_tool_use(
             "the session id {id:?} is not a plain name, so its state file cannot be placed"
         ));
     };
+    // Same lock as the post-tool handler, so the two read-change-save cycles cannot interleave (#2678).
+    let _lock = path
+        .parent()
+        .and_then(|dir| super::session_state::lock_state_file(dir, id, "task nudge"));
     let tracking = crate::task::tracking(state_dir);
     let mut state = match read_state(&path) {
         Ok(state) => state,

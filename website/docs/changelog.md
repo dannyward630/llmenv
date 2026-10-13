@@ -141,6 +141,11 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - A failed write of the session map no longer starts an ICM transcript that cannot be linked, and a transient ICM outage no longer replaces a valid transcript link. Only a "session not found" reply starts a new transcript. Two hooks that write the map at the same time no longer move each other's map aside (#2667) [fix:hook]
 - A bundle that fails to resolve, or whose `bundle.yaml` cannot be read, tells the agent that its bundle features are off. A state directory that cannot be resolved no longer writes `transcript-sessions.json` into the project. Transcripts that are on with no MCP client log an error (#2668) [fix:hook]
 - Credential and auth entry failures, login injection, host, user, and directory detection for scopes, project marker reads, throttle resolution, upgrade cleanup, task and session file reads, state and cache writes, `/resume` and prompt-history inheritance, and a failed consolidation kill log at error level, which the default log filter shows. Before, they logged at warn level or not at all. A failure to start `git` during sync and a failed hook payload parse show too (#2666) [fix:log]
+- A path that starts with `~` fails with an error that names `HOME` when `HOME` is unset or empty. Before, it resolved against the working directory. This covers `cache.cache_dir`, `LLMENV_CONFIG_DIR`, and `LLMENV_STATE_DIR` (#2679) [fix:paths]
+- A bare file name is refused by the owner-only atomic write, so the file no longer lands in the working directory. `llmenv doctor` reports a failure to start `git` as a failed check, not as "not a git repository" (#2680) [fix:paths]
+- Session logs, session locks, the task store lock, and the proxy pidfile refuse a symlink at their final path, and a non-hardened log directory that is a symlink or owned by another user is refused (#2599) [fix:hook]
+- Hook state files (read-once cache, repeat detection, slippage stats, Stop reminder dedupe, task nudges) are locked for each read-change-save, so two hooks that run at once cannot lose an update (#2678) [fix:hook]
+- A corrupt session file is reported by the task reminders, `llmenv task ls`, `llmenv task session ls`, `llmenv task show current`, and the caller's session lookup, instead of dropping its tasks without a word (#2665) [fix:task]
 
 ## [3.12.2] - 2026-10-10
 
