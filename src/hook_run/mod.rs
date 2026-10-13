@@ -1451,10 +1451,15 @@ fn run_inner(
                             (r, i) => r.or(i),
                         };
                     }
-                    Err(e) => tracing::error!(
-                        "cannot resolve the codebase-memory paths, so the session-start index \
-                         is skipped: {e:#}"
-                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            "cannot resolve the codebase-memory paths, so the session-start index \
+                             is skipped: {e:#}"
+                        );
+                        roots_notice = Some(index_skipped_notice(&format!(
+                            "cannot resolve the project paths: {e:#}"
+                        )));
+                    }
                 },
                 _ => {
                     tracing::debug!(
@@ -3202,7 +3207,9 @@ fn trigger_codebase_memory_index(
         Ok(path) => path,
         Err(e) => {
             tracing::error!("codebase-memory index skipped: cannot expand index_path: {e:#}");
-            return Some(index_skipped_notice(&e));
+            return Some(index_skipped_notice(&format!(
+                "cannot expand index_path: {e:#}"
+            )));
         }
     };
     let cache_dir = cache_dir_of(index_path.as_deref(), state_dir);
@@ -3246,13 +3253,16 @@ fn trigger_codebase_memory_index(
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::error!("codebase-memory-mcp index_repository: failed to spawn: {e}");
+        return Some(index_skipped_notice(&format!(
+            "the indexer did not start: {e}"
+        )));
     }
     None
 }
 
-/// The session-start line for an index skipped because `index_path` cannot be expanded.
-fn index_skipped_notice(err: &anyhow::Error) -> String {
-    format!("codebase-memory: index skipped, cannot expand index_path: {err:#}\n")
+/// The session-start line for an index that did not run. `why` names the cause and the fix.
+fn index_skipped_notice(why: &str) -> String {
+    format!("codebase-memory: index skipped, {why}\n")
 }
 
 /// Whether this hook run starts the unfinished background jobs again: a `SessionStart` that is
@@ -5420,7 +5430,7 @@ mod tests {
 
     #[test]
     fn index_skipped_notice_names_the_skip_and_its_cause() {
-        let notice = index_skipped_notice(&anyhow::anyhow!("HOME is not set"));
+        let notice = index_skipped_notice("cannot expand index_path: HOME is not set");
         assert!(
             notice.contains("index skipped"),
             "unexpected notice: {notice}"
@@ -5464,7 +5474,7 @@ mod tests {
             Some("/custom/path")
         );
         cm.index_path = None;
-        assert_eq!(expanded_index_path(&cm).ok().flatten(), None);
+        assert_eq!(expanded_index_path(&cm).unwrap(), None);
     }
 
     #[test]
