@@ -428,6 +428,18 @@ pub(crate) fn handle_transcript_scan(
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_stats_lock_is_taken_once_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = stats_lock(dir.path(), "s1");
+        assert!(held.is_some(), "a free lock must be taken");
+        assert!(
+            stats_lock(dir.path(), "s1").is_none(),
+            "a held lock must not be taken twice"
+        );
+        drop(held);
+    }
+
     fn cfg(enabled: bool, self_critique: bool) -> SlippageControl {
         SlippageControl {
             enabled,

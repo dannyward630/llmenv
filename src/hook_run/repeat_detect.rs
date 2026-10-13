@@ -279,6 +279,18 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[test]
+    fn the_counter_lock_is_taken_once_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = counter_lock(dir.path(), "s1");
+        assert!(held.is_some(), "a free lock must be taken");
+        assert!(
+            counter_lock(dir.path(), "s1").is_none(),
+            "a held lock must not be taken twice"
+        );
+        drop(held);
+    }
+
     fn config(threshold: u32) -> RepeatDetectConfig {
         RepeatDetectConfig {
             enabled: true,

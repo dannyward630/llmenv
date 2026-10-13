@@ -305,6 +305,23 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn prune_stale_sessions_removes_old_cache_and_orphan_lock_files() {
+        let dir = tempfile::tempdir().expect("test");
+        let cache_dir = read_once_state_dir(dir.path());
+        std::fs::create_dir_all(&cache_dir).expect("test");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+        for name in ["old.json", "orphan.lock"] {
+            let file = std::fs::File::create(cache_dir.join(name)).expect("test");
+            file.set_modified(old).expect("test");
+        }
+
+        SessionCache::prune_stale_sessions(dir.path(), 7);
+
+        assert!(!cache_dir.join("old.json").exists());
+        assert!(!cache_dir.join("orphan.lock").exists());
+    }
+
     fn test_config_warn() -> ReadOnceConfig {
         ReadOnceConfig {
             enabled: true,

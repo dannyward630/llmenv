@@ -220,6 +220,46 @@ mod tests {
         assert!(load_stats(state.path(), "s1").paths.is_empty());
     }
 
+    #[test]
+    fn a_bash_view_is_recorded_when_metrics_are_off() {
+        let state = tempfile::tempdir().expect("state dir");
+        let work = tempfile::tempdir().expect("work dir");
+        let file = work.path().join("existing.txt");
+        std::fs::write(&file, "important").expect("write file");
+        let cfg = crate::config::SlippageControl {
+            enabled: true,
+            read_before_edit: true,
+            metrics: false,
+            ..Default::default()
+        };
+        let view = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cat existing.txt" },
+            "cwd": work.path(),
+        });
+        let write = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": file },
+        });
+
+        crate::hook_run::slippage::handle_post_tool_use(
+            Some(&cfg),
+            &view,
+            Some("s1"),
+            state.path(),
+        );
+
+        assert_eq!(
+            crate::hook_run::slippage::handle_pre_tool_use(
+                Some(&cfg),
+                &write,
+                Some("s1"),
+                state.path()
+            ),
+            ""
+        );
+    }
+
     fn read_before_edit_on() -> crate::config::SlippageControl {
         crate::config::SlippageControl {
             enabled: true,
