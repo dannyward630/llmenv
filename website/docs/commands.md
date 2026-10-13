@@ -520,6 +520,11 @@ project marker whose `enable_bundles` or `disable_bundles` names an unknown
 bundle, an unknown engine id in `disabled_engines`, and a `native_*` key that
 names an unknown engine. Exits non-zero if any of these is found.
 
+Unknown top-level keys (added in v3.13.0): `validate` and `doctor` warn about a top-level key that llmenv does not read,
+and name the key. For `host`, `user`, `network`, and `content`, the warning says to move the block under `scope`.
+Before, a block such as a top-level `user:` was dropped without a message, and `validate` reported the config as valid.
+This is a warning only: it never changes the exit status.
+
 ## `edit`
 
 ```text

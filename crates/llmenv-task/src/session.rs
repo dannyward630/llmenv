@@ -340,7 +340,7 @@ pub fn list_sessions(state_dir: &Path) -> Vec<Session> {
     match try_list_sessions(state_dir) {
         Ok(sessions) => sessions,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to read sessions dir; treating as empty");
+            tracing::error!(error = %e, "failed to read sessions dir; treating as empty");
             Vec::new()
         }
     }
@@ -389,10 +389,18 @@ pub fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
             // this one file) from corrupt JSON content — same reasoning as
             // `try_list_tasks` (#1112).
             Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
-                tracing::warn!(error = %e, path = %path.display(), "skipping unreadable session file");
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    "skipping unreadable session file"
+                );
             }
             Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "skipping corrupt session file");
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    "skipping corrupt session file"
+                );
             }
         }
     }
@@ -444,7 +452,7 @@ pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session
     match try_open_sessions_for_project(state_dir, project) {
         Ok(sessions) => sessions,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to read sessions dir; treating as empty");
+            tracing::error!(error = %e, "failed to read sessions dir; treating as empty");
             Vec::new()
         }
     }

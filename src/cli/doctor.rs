@@ -282,7 +282,7 @@ fn ensure_cache_dir_writable(cache_dir: &Path) -> anyhow::Result<()> {
             let probe = cache_dir.join(".llmenv-doctor-probe");
             std::fs::write(&probe, b"").context("cache directory not writable")?;
             if let Err(e) = std::fs::remove_file(&probe) {
-                tracing::warn!("could not remove doctor probe {} ({e})", probe.display());
+                tracing::error!("could not remove doctor probe {} ({e})", probe.display());
             }
         }
         Ok(_) => anyhow::bail!(
@@ -1529,6 +1529,8 @@ pub(super) fn run_doctor(
 
     // Check that config parses
     eprintln!("{pass} Config is valid YAML");
+
+    super::warn_unknown_config_keys(&config_path, &warn);
 
     // Structural validation: bundle directories, marketplace references, permission grants
     let config_dir = paths::config_dir()?;

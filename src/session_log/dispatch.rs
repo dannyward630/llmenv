@@ -53,22 +53,42 @@ pub(crate) async fn start_session(
     Ok(id)
 }
 
-/// Verify that `session_id` still exists in ICM.
+/// The text ICM puts in its tool error when `session_id` is unknown. ICM has no typed
+/// not-found code, so this text is the only signal. The id is part of the text: ICM
+/// sends `session <id> not found` (icm-mcp `tool_transcript_show`).
+fn session_gone_text(session_id: &str) -> String {
+    format!("session {session_id} not found")
+}
+
+/// Whether ICM still holds a recorded transcript session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Liveness {
+    /// ICM returned the session.
+    Live,
+    /// ICM answered that the session does not exist.
+    Gone,
+}
+
+/// Ask ICM whether `session_id` still exists.
 ///
-/// A recorded session id is a cache, not proof of liveness (#1090) — ICM may
-/// have pruned or restarted since it was recorded. This has no dedicated
-/// "not found" signal to distinguish from a transient network failure; any
-/// `call_tool` error is treated as "don't trust this id", which is the safe
-/// default (worst case: an extra session gets started when ICM was merely
-/// unreachable for a moment).
+/// A recorded session id is a cache, not proof of liveness (#1090). ICM may
+/// have pruned or restarted since it was recorded.
 ///
 /// # Errors
-/// Any `call_tool` failure, including ICM reporting the session doesn't exist.
-pub(crate) async fn verify_session(client: &McpHttpClient, session_id: &str) -> anyhow::Result<()> {
-    client
+/// A transport failure, or any reply that is not "session <id> not found". ICM being
+/// unreachable says nothing about the session, so the caller keeps its link then (#2667).
+pub(crate) async fn verify_session(
+    client: &McpHttpClient,
+    session_id: &str,
+) -> anyhow::Result<Liveness> {
+    match client
         .call_tool(SHOW_TOOL, show_session_args(session_id))
-        .await?;
-    Ok(())
+        .await
+    {
+        Ok(_) => Ok(Liveness::Live),
+        Err(e) if format!("{e:#}").contains(&session_gone_text(session_id)) => Ok(Liveness::Gone),
+        Err(e) => Err(e),
+    }
 }
 
 /// Record one event into `session_id`.
@@ -238,22 +258,61 @@ mod tests {
             .mount(&server)
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        verify_session(&client, "sess-42").await.unwrap();
+        assert_eq!(
+            verify_session(&client, "sess-42").await.unwrap(),
+            Liveness::Live
+        );
     }
 
-    #[tokio::test]
-    async fn verify_session_errors_when_icm_reports_a_jsonrpc_error() {
+    /// ICM reports a tool failure as a successful reply with `isError: true`.
+    fn tool_error(text: &str) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","id":1,
+            "result":{"isError":true,"content":[{"type":"text","text":text}]}})
+    }
+
+    async fn verify_with_tool_error(text: &str, session_id: &str) -> anyhow::Result<Liveness> {
         let _guard = llmenv_util::testkit::port_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc":"2.0","id":1,
-                "error":{"code":-32602,"message":"session not found"}
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(tool_error(text)))
             .mount(&server)
             .await;
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
-        let err = verify_session(&client, "stale-session").await.unwrap_err();
-        assert!(err.to_string().contains("session not found"));
+        verify_session(&client, session_id).await
+    }
+
+    #[tokio::test]
+    async fn verify_session_reports_gone_for_the_text_icm_really_sends() {
+        // icm-mcp tool_transcript_show: format!("session {session_id} not found")
+        let got = verify_with_tool_error("session stale-session not found", "stale-session").await;
+        assert_eq!(got.unwrap(), Liveness::Gone);
+    }
+
+    #[tokio::test]
+    async fn verify_session_keeps_the_link_for_any_other_tool_error() {
+        let got = verify_with_tool_error("get_session failed: disk I/O error", "sess-1").await;
+        assert!(got.is_err(), "another tool error must not read as gone");
+    }
+
+    #[tokio::test]
+    async fn verify_session_ignores_a_not_found_for_a_different_session() {
+        let got = verify_with_tool_error("session other-id not found", "sess-1").await;
+        assert!(
+            got.is_err(),
+            "a not-found for another id must not read as gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_session_errors_when_icm_is_unreachable() {
+        // A transport failure must not read as "gone": the caller keeps the link.
+        let _guard = llmenv_util::testkit::port_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        assert!(verify_session(&client, "sess-42").await.is_err());
     }
 }

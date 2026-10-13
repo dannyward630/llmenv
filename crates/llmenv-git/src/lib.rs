@@ -139,7 +139,7 @@ pub fn has_unpushed_commits(repo: &Path) -> bool {
     {
         Ok(out) => out,
         Err(e) => {
-            tracing::warn!("git rev-list count failed at {}: {}", repo.display(), e);
+            tracing::error!("git rev-list count failed at {}: {}", repo.display(), e);
             return false;
         }
     };

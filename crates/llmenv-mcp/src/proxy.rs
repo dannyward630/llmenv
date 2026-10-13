@@ -533,7 +533,7 @@ fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
             // Don't leave the temp file behind on every failed publish. A failed removal is
             // logged, so a leftover temp file is not silent (#2657).
             if let Err(e) = std::fs::remove_file(&tmp) {
-                tracing::warn!("could not remove pidfile temp {} ({e})", tmp.display());
+                tracing::error!("could not remove pidfile temp {} ({e})", tmp.display());
             }
         })
         .with_context(|| format!("publishing pidfile {}", pid_path.display()))?;

@@ -394,7 +394,7 @@ fn collect_throttle_with_stored_fallback(
     read_stored: impl FnOnce() -> anyhow::Result<Option<Throttle>>,
 ) -> (Option<ThrottleData>, Option<String>) {
     let resolved = crate::throttle::resolve_active_throttle(throttle_configs, active_tags)
-        .inspect_err(|e| tracing::warn!("throttle resolution failed (non-fatal): {e}"))
+        .inspect_err(|e| tracing::error!("throttle resolution failed (non-fatal): {e}"))
         .ok()
         .flatten();
     if let Some(t) = resolved {

@@ -118,7 +118,7 @@ pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> Sessi
         }
     };
     serde_json::from_str(&text).unwrap_or_else(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "slippage: read log is corrupt");
+        tracing::error!(path = %path.display(), error = %e, "slippage: read log is corrupt");
         SessionStats::default()
     })
 }
@@ -212,7 +212,7 @@ pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &
         crate::paths::write_owner_only_atomic(&stats_path(state_dir, session_id), json.as_bytes())
     {
         // A lost read record makes the next Write to that file deny, so the failure must be visible.
-        tracing::warn!("slippage: could not record session stats: {e}");
+        tracing::error!("slippage: could not record session stats: {e}");
     }
 }
 
