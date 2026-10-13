@@ -31,7 +31,7 @@ pub mod session {
         EngineIdentity, PickError, Session, SessionSummary, SessionSummaryTask, StartDecision,
         StartOutcome, StartRequest, delete_tasks_in_session, finish_session, idle_display,
         list_sessions_strict, load_existing_session, open_sessions_strict, pick_open_session,
-        session_progress, session_summary, session_summary_with_agent, start_session,
-        start_session_as, touch_last_activity, try_session_progress, update_resume,
+        session_summary, session_summary_with_agent, start_session, start_session_as,
+        touch_last_activity, try_session_progress, update_resume,
     };
 }

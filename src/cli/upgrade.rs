@@ -186,8 +186,8 @@ fn install_binary(data: &[u8]) -> Result<()> {
     // Write new binary to a temp file in the same directory
     let temp = current_dir.join(".llmenv-upgrade.new");
     let write_result = (|| -> Result<()> {
-        let mut tmp =
-            std::fs::File::create(&temp).context("failed to create temp file for new binary")?;
+        let mut tmp = crate::paths::create_refusing_symlink(&temp)
+            .context("failed to create temp file for new binary")?;
         tmp.write_all(data).context("failed to write new binary")?;
         tmp.sync_all().context("failed to sync new binary")?;
 
@@ -195,7 +195,7 @@ fn install_binary(data: &[u8]) -> Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&temp, perms)
+            tmp.set_permissions(perms)
                 .context("failed to set executable permissions")?;
         }
 
@@ -1390,5 +1390,20 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
         let logs = crate::test_log_capture::capture_logs(|| remove_leftover(&stuck, "temp file"));
         assert!(logs.contains("ERROR"), "expected an ERROR line: {logs}");
         assert!(logs.contains("failed to remove temp file"), "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_refusing_symlink_does_not_write_through_a_planted_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("victim");
+        let temp = dir.path().join(".llmenv-upgrade.new");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &temp).unwrap();
+        assert!(
+            crate::paths::create_refusing_symlink(&temp).is_err(),
+            "a planted symlink must be refused"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
 }

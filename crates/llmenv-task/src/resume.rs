@@ -53,11 +53,13 @@ impl ResumeContext {
     }
 
     /// A context holding only what llmenv can detect in `cwd`.
-    #[must_use]
-    pub fn detected(cwd: &Path) -> Self {
+    ///
+    /// # Errors
+    /// git cannot start in `cwd` (see [`git_branch`]).
+    pub fn detected(cwd: &Path) -> anyhow::Result<Self> {
         let mut detected = Self::default();
-        detected.fill_detected(git_branch(cwd).as_deref());
-        detected
+        detected.fill_detected(git_branch(cwd)?.as_deref());
+        Ok(detected)
     }
 
     /// Fold `update` in. A set value replaces the old one. A list adds the entries it lacks.
@@ -157,23 +159,22 @@ fn detect_issue(branch: &str) -> Option<u32> {
 ///
 /// `LC_ALL=C` keeps git's stderr in English, because [`branch_failure_is_unexpected`] matches an
 /// English message.
-#[must_use]
-pub fn git_branch(cwd: &Path) -> Option<String> {
-    let output = match llmenv_git::secure_git()
+///
+/// # Errors
+/// git cannot start in `cwd`. A missing directory is one such case. A detached HEAD and a
+/// directory outside git are not errors, and they return `Ok(None)`.
+pub fn git_branch(cwd: &Path) -> anyhow::Result<Option<String>> {
+    let output = llmenv_git::secure_git()
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .current_dir(cwd)
         .env("LC_ALL", "C")
         .output()
-    {
-        Ok(output) => output,
-        Err(e) => {
-            eprintln!(
-                "llmenv: cannot run git in {} to detect the branch: {e}",
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot run git in {} to read the branch: {e}",
                 cwd.display()
-            );
-            return None;
-        }
-    };
+            )
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if branch_failure_is_unexpected(output.status.code(), &stderr) {
@@ -183,10 +184,10 @@ pub fn git_branch(cwd: &Path) -> Option<String> {
                 stderr.trim()
             );
         }
-        return None;
+        return Ok(None);
     }
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!name.is_empty()).then_some(name)
+    Ok((!name.is_empty()).then_some(name))
 }
 
 /// Drop control, bidirectional, and zero-width characters, so agent-written text cannot spoof
@@ -422,15 +423,21 @@ mod tests {
     #[test]
     fn git_branch_reads_the_checked_out_branch_even_before_the_first_commit() {
         let repo = git_repo_on("feat/2337-foo");
-        assert_eq!(git_branch(repo.path()).as_deref(), Some("feat/2337-foo"));
+        assert_eq!(
+            git_branch(repo.path()).ok().flatten().as_deref(),
+            Some("feat/2337-foo")
+        );
     }
 
     #[test]
     fn detected_fills_branch_and_issue_from_the_repo() {
         let repo = git_repo_on("fix/2358-bar");
-        let detected = ResumeContext::detected(repo.path());
-        assert_eq!(detected.branch.as_deref(), Some("fix/2358-bar"));
-        assert_eq!(detected.issues, [2358]);
+        let detected = ResumeContext::detected(repo.path()).ok();
+        assert_eq!(
+            detected.as_ref().and_then(|d| d.branch.as_deref()),
+            Some("fix/2358-bar")
+        );
+        assert_eq!(detected.map(|d| d.issues), Some(vec![2358]));
     }
 
     #[test]
@@ -453,8 +460,13 @@ mod tests {
     }
 
     #[test]
-    fn git_branch_is_none_for_a_missing_directory() {
-        assert_eq!(git_branch(Path::new("/no/such/dir/for/llmenv")), None);
+    fn git_branch_errors_when_git_cannot_start_in_a_missing_directory() {
+        let err = git_branch(Path::new("/no/such/dir/for/llmenv")).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("cannot run git") && text.contains("/no/such/dir/for/llmenv"),
+            "the error must name git and the directory: {text}"
+        );
     }
 
     #[test]

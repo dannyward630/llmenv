@@ -461,23 +461,28 @@ fn visit<'a>(
     }
 }
 
-/// Title of the most recently updated `wip`/`waiting` task among tasks
-/// tagged to any of `session_ids` — the statusline's "what's in progress
-/// right now" fill-in (#905). `None` when nothing matching is currently
-/// `wip`/`waiting`, or when `session_ids` is empty.
-#[must_use]
-pub fn current_wip_title(state_dir: &Path, session_ids: &[String]) -> Option<String> {
+/// The title of the most recently updated `wip` or `waiting` task in `session_ids`, for the
+/// statusline's "what's in progress right now" fill-in (#905). `None` when nothing matching is
+/// currently `wip`/`waiting`, or when `session_ids` is empty. A task file that cannot be read is
+/// an error, not a skipped task, so a corrupt file never removes the title without a sign (#2687).
+///
+/// # Errors
+/// The task store cannot be read.
+pub fn current_wip_title(
+    state_dir: &Path,
+    session_ids: &[String],
+) -> anyhow::Result<Option<String>> {
     if session_ids.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let tasks = list_tasks(state_dir);
-    most_recently_updated(tasks.iter().filter(|t| {
+    let tasks = list_tasks_strict(state_dir)?;
+    Ok(most_recently_updated(tasks.iter().filter(|t| {
         matches!(t.state, TaskState::Wip | TaskState::Waiting)
             && t.session
                 .as_deref()
                 .is_some_and(|sid| session_ids.iter().any(|s| s == sid))
     }))
-    .map(|t| t.title.clone())
+    .map(|t| t.title.clone()))
 }
 
 /// The most recently updated of `tasks`, by `updated_at` string comparison

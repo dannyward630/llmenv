@@ -51,7 +51,9 @@ pub(crate) fn redirect_stderr_to_bounded_log(
             cmd.stderr(std::process::Stdio::from(file));
         }
         Err(e) => {
-            tracing::debug!("{context}: log unavailable ({e:#}), stderr discarded");
+            tracing::warn!(
+                "{context}: log unavailable ({e:#}); the child's stderr is discarded. Check that the log path is a regular file owned by you."
+            );
         }
     }
 }
@@ -82,7 +84,9 @@ pub(crate) fn redirect_stderr_to_detached_log(
         ),
         Err(e) => {
             cmd.stderr(std::process::Stdio::null());
-            tracing::debug!("detached child: cannot resolve log path ({e:#}), stderr discarded");
+            tracing::warn!(
+                "detached child: cannot resolve log path ({e:#}); the child's stderr is discarded"
+            );
         }
     }
 }

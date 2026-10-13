@@ -754,7 +754,7 @@ fn write_pr_cache(path: &Path, pr: &Option<PrInfo>, now: i64) {
     }) else {
         return;
     };
-    if let Err(e) = std::fs::write(path, json) {
+    if let Err(e) = crate::paths::write_owner_only(path, json.as_bytes()) {
         tracing::debug!("pr cache write failed (non-fatal): {e}");
     }
 }
@@ -1170,7 +1170,7 @@ fn write_usage_state(path: &Path, pct: f64, now: i64) {
     }
     // Best-effort: a failed write only means the next render's `{delta}`
     // placeholder is empty, not a broken widget — but still worth a trace.
-    if let Err(e) = std::fs::write(path, format!("{pct} {now}")) {
+    if let Err(e) = crate::paths::write_owner_only(path, format!("{pct} {now}").as_bytes()) {
         tracing::debug!("usage delta state write failed (non-fatal): {e}");
     }
 }
