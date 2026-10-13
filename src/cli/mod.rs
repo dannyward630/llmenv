@@ -2533,7 +2533,7 @@ fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
             return;
         }
     }
-    if let Err(e) = std::fs::write(&marker, b"") {
+    if let Err(e) = crate::paths::create_refusing_symlink(&marker) {
         tracing::debug!("could not write {}: {e}", marker.display());
     }
 }
@@ -3871,9 +3871,8 @@ fn run_task_session_command(
         } => {
             let explicit = resume_context.into_context()?;
             let mut detected = explicit.clone();
-            detected.fill_detected(
-                crate::task::resume::git_branch(&std::env::current_dir()?).as_deref(),
-            );
+            let branch = crate::task::resume::git_branch(&std::env::current_dir()?)?;
+            detected.fill_detected(branch.as_deref());
             let is_resume = resume.is_some();
             let decision = match (resume, replace, new) {
                 (Some(id), false, false) => StartDecision::Resume(id),
@@ -6809,6 +6808,22 @@ mod run_supervised_tests {
 mod config_guard_tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "test code")]
+    fn create_refusing_symlink_does_not_write_through_a_marker_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("victim");
+        let marker = dir.path().join(".transcripts-migrated");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+        assert!(
+            crate::paths::create_refusing_symlink(&marker).is_err(),
+            "a symlink marker must be refused"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
 
     #[test]
     fn test_is_within_cache_basic() {

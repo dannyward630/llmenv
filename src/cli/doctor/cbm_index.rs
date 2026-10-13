@@ -165,7 +165,14 @@ pub(super) fn run_doctor_cbm_index(
             return;
         }
     };
-    let cache_dir = crate::hook_run::codebase_memory_cache_dir(entry, &state_dir);
+    let cache_dir = match crate::hook_run::codebase_memory_cache_dir(entry, &state_dir) {
+        Ok(dir) => dir,
+        Err(e) => {
+            let info = super::super::doctor_info(use_color);
+            eprintln!("{info} codebase-memory: cannot expand index_path: {e}");
+            return;
+        }
+    };
     let pass = super::super::doctor_pass(use_color);
     let warn = super::super::doctor_warning(use_color);
     let info = super::super::doctor_info(use_color);

@@ -8,6 +8,8 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
+
 use crate::git::secure_git;
 
 /// The repository name at the end of a git remote URL: HTTPS, `user@host:path`,
@@ -19,38 +21,81 @@ fn repo_name_from_url(url: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = secure_git().args(args).current_dir(dir).output().ok()?;
-    if !output.status.success() {
-        return None;
+/// The trimmed stdout of a successful git run. `None` when the output is empty.
+///
+/// # Errors
+/// The output is not UTF-8.
+fn decode_git_stdout(dir: &Path, stdout: Vec<u8>) -> anyhow::Result<Option<String>> {
+    let text = String::from_utf8(stdout).with_context(|| {
+        format!(
+            "git in {} printed non-UTF-8 output. Check the repository's configuration.",
+            dir.display()
+        )
+    })?;
+    let text = text.trim();
+    Ok((!text.is_empty()).then(|| text.to_string()))
+}
+
+/// The trimmed stdout of `git args` in `dir`. `None` is a normal answer: git exits 1 when the key
+/// is absent, or the directory is not inside a repository.
+///
+/// # Errors
+/// git cannot start in `dir`, or it fails for any other reason, such as "dubious ownership" or an
+/// unreadable `.git`. Any other failure would otherwise pick a different project name silently.
+fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
+    let output = secure_git()
+        .args(args)
+        .current_dir(dir)
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot run git in {} to name the project: {e}. Check that git is installed and on PATH.",
+                dir.display()
+            )
+        })?;
+    if output.status.success() {
+        return decode_git_stdout(dir, output.stdout);
     }
-    let text = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!text.is_empty()).then_some(text)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() == Some(1) || stderr.contains("not a git repository") {
+        return Ok(None);
+    }
+    anyhow::bail!(
+        "git in {} could not name the project ({}): {}. Check that the repository's `.git` \
+         directory is readable and owned by you.",
+        dir.display(),
+        output.status,
+        stderr.trim()
+    )
 }
 
 /// The project name for a session whose working directory is `cwd`.
-pub(crate) fn session_project(cwd: &Path) -> Option<String> {
-    if let Some(name) = git_output(cwd, &["config", "--get", "remote.origin.url"])
+///
+/// # Errors
+/// git cannot start in `cwd`, fails for a reason other than "not a repository", or the git
+/// common directory cannot be resolved. The caller decides what the agent sees.
+pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<Option<String>> {
+    if let Some(name) = git_output(cwd, &["config", "--get", "remote.origin.url"])?
         .as_deref()
         .and_then(repo_name_from_url)
     {
-        return Some(name);
+        return Ok(Some(name));
     }
     // The common dir is the main repo's `.git`, also from a linked worktree.
-    if let Some(name) = git_output(
+    if let Some(common) = git_output(
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .and_then(|common| std::fs::canonicalize(common).ok())
-    .and_then(|common| {
-        common
-            .parent()
-            .and_then(Path::file_name)
-            .map(|n| n.to_string_lossy().into_owned())
-    }) {
-        return Some(name);
+    )? {
+        let common = std::fs::canonicalize(&common).with_context(|| {
+            format!("cannot resolve the git common directory {common}. Check the worktree's link.")
+        })?;
+        let name = common.parent().and_then(Path::file_name).ok_or_else(|| {
+            anyhow::anyhow!("git common directory {} has no parent", common.display())
+        })?;
+        return Ok(Some(name.to_string_lossy().into_owned()));
     }
-    cwd.file_name().map(|n| n.to_string_lossy().into_owned())
+    Ok(cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
 }
 
 #[cfg(test)]
@@ -94,7 +139,10 @@ mod tests {
         );
         let sub = checkout.join("src");
         std::fs::create_dir(&sub).unwrap();
-        assert_eq!(session_project(&sub).as_deref(), Some("real-name"));
+        assert_eq!(
+            session_project(&sub).ok().flatten().as_deref(),
+            Some("real-name")
+        );
     }
 
     #[test]
@@ -105,7 +153,33 @@ mod tests {
         git(&repo, &["init", "-q"]);
         let sub = repo.join("deep");
         std::fs::create_dir(&sub).unwrap();
-        assert_eq!(session_project(&sub).as_deref(), Some("local-repo"));
+        assert_eq!(
+            session_project(&sub).ok().flatten().as_deref(),
+            Some("local-repo")
+        );
+    }
+
+    #[test]
+    fn decode_git_stdout_trims_and_maps_blank_to_none() {
+        let dir = Path::new("/r");
+        assert_eq!(
+            decode_git_stdout(dir, b"  x \n".to_vec())
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("x")
+        );
+        assert_eq!(decode_git_stdout(dir, b" \n".to_vec()).ok().flatten(), None);
+        assert!(decode_git_stdout(dir, vec![0xff, 0xfe]).is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn decode_git_stdout_keeps_any_utf8_text_trimmed(s in ".*") {
+            let got = decode_git_stdout(Path::new("/r"), s.clone().into_bytes()).unwrap();
+            let trimmed = s.trim();
+            proptest::prop_assert_eq!(got.as_deref(), (!trimmed.is_empty()).then_some(trimmed));
+        }
     }
 
     #[test]
@@ -113,8 +187,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plain = dir.path().join("plain-dir");
         std::fs::create_dir(&plain).unwrap();
-        assert_eq!(session_project(&plain).as_deref(), Some("plain-dir"));
-        assert_eq!(session_project(Path::new("/")), None);
+        assert_eq!(
+            session_project(&plain).ok().flatten().as_deref(),
+            Some("plain-dir")
+        );
+        assert_eq!(session_project(Path::new("/")).ok().flatten(), None);
+    }
+
+    #[test]
+    fn session_project_errors_when_git_cannot_start_in_the_directory() {
+        let missing = Path::new("/no/such/dir/for/llmenv-project");
+        let err = session_project(missing).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("cannot run git") && text.contains("/no/such/dir/for/llmenv-project"),
+            "the error must name git and the directory: {text}"
+        );
     }
 
     mod props {

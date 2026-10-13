@@ -280,7 +280,7 @@ fn ensure_cache_dir_writable(cache_dir: &Path) -> anyhow::Result<()> {
     match std::fs::metadata(cache_dir) {
         Ok(meta) if meta.is_dir() => {
             let probe = cache_dir.join(".llmenv-doctor-probe");
-            std::fs::write(&probe, b"").context("cache directory not writable")?;
+            crate::paths::write_owner_only(&probe, b"").context("cache directory not writable")?;
             if let Err(e) = std::fs::remove_file(&probe) {
                 tracing::error!("could not remove doctor probe {} ({e})", probe.display());
             }
