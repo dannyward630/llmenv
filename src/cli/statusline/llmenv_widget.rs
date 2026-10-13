@@ -218,6 +218,9 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
     let Some(tasks) = &data.tasks else {
         return String::new();
     };
+    if tasks.unreadable {
+        return "tasks: unreadable".to_string();
+    }
     let Some(session) = tasks.session else {
         return String::new();
     };
@@ -607,11 +610,26 @@ mod tests {
     }
 
     #[test]
+    fn renders_tasks_unreadable_marker_even_without_a_session() {
+        let data = StatusData {
+            tasks: Some(TasksData {
+                session: None,
+                current: None,
+                unreadable: true,
+            }),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("tasks", &data, None, &icons(), false, false).unwrap();
+        assert_eq!(out, "tasks: unreadable");
+    }
+
+    #[test]
     fn renders_tasks_empty_when_no_session_open_for_project() {
         let data = StatusData {
             tasks: Some(TasksData {
                 session: None,
                 current: None,
+                unreadable: false,
             }),
             ..Default::default()
         };
@@ -625,6 +643,7 @@ mod tests {
             tasks: Some(TasksData {
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: None,
+                unreadable: false,
             }),
             ..Default::default()
         };
@@ -638,6 +657,7 @@ mod tests {
             tasks: Some(TasksData {
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: Some("Ship the release".to_string()),
+                unreadable: false,
             }),
             ..Default::default()
         };
@@ -655,6 +675,7 @@ mod tests {
             tasks: Some(TasksData {
                 session: Some(SessionProgress { done: 0, total: 0 }),
                 current: None,
+                unreadable: false,
             }),
             ..Default::default()
         };
@@ -672,6 +693,7 @@ mod tests {
             tasks: Some(TasksData {
                 session: Some(SessionProgress { done: 0, total: 1 }),
                 current: Some("evil\x1b[31mtitle".to_string()),
+                unreadable: false,
             }),
             ..Default::default()
         };
@@ -750,6 +772,7 @@ mod tests {
             tasks: Some(TasksData {
                 session: Some(SessionProgress { done: 2, total: 5 }),
                 current: Some("Do the thing".to_string()),
+                unreadable: false,
             }),
         }
     }
