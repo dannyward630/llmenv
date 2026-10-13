@@ -453,18 +453,14 @@ pub(crate) fn current_wip_title(
     if session_ids.is_empty() {
         return Ok(None);
     }
-    Ok(wip_title_among(&list_tasks_strict(state_dir)?, session_ids))
-}
-
-/// The title of the most recently updated `wip` or `waiting` task among `session_ids`.
-fn wip_title_among(tasks: &[Task], session_ids: &[String]) -> Option<String> {
-    most_recently_updated(tasks.iter().filter(|t| {
+    let tasks = list_tasks_strict(state_dir)?;
+    Ok(most_recently_updated(tasks.iter().filter(|t| {
         matches!(t.state, TaskState::Wip | TaskState::Waiting)
             && t.session
                 .as_deref()
                 .is_some_and(|sid| session_ids.iter().any(|s| s == sid))
     }))
-    .map(|t| t.title.clone())
+    .map(|t| t.title.clone()))
 }
 
 /// The most recently updated of `tasks`, by `updated_at` string comparison
