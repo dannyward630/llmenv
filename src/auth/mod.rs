@@ -145,12 +145,12 @@ fn load_all_auth_entries(adapter_root: &Path) -> anyhow::Result<Vec<AuthEntry>> 
             }
             let bytes = std::fs::read(&path)
                 .inspect_err(|e| {
-                    tracing::warn!("failed to read auth entry {}: {e}", path.display())
+                    tracing::error!("failed to read auth entry {}: {e}", path.display())
                 })
                 .ok()?;
             serde_json::from_slice::<AuthEntry>(&bytes)
                 .inspect_err(|e| {
-                    tracing::warn!("failed to parse auth entry {}: {e}", path.display())
+                    tracing::error!("failed to parse auth entry {}: {e}", path.display())
                 })
                 .ok()
         })

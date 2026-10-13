@@ -140,18 +140,19 @@ impl Env {
     /// Fresh env detection. `needs` gates the network probes; the hostname (uname syscall),
     /// user, and cwd probes always run.
     fn detect_fresh(needs: NetworkNeeds) -> anyhow::Result<Self> {
+        // Error level: a scope that is silently disabled changes which bundles load (#2666).
         let hostname = detect_hostname().unwrap_or_else(|| {
-            tracing::warn!("hostname detection failed; host-scope matching disabled");
+            tracing::error!("hostname detection failed; host-scope matching disabled");
             String::new()
         });
         let user = match crate::env_var::utf8_var("USER") {
             Ok(Some(user)) => user,
             Ok(None) => {
-                tracing::warn!("$USER unset; user-scope matching disabled");
+                tracing::error!("$USER unset; user-scope matching disabled");
                 String::new()
             }
             Err(e) => {
-                tracing::warn!("{e:#}; user-scope matching disabled");
+                tracing::error!("{e:#}; user-scope matching disabled");
                 String::new()
             }
         };
@@ -159,7 +160,7 @@ impl Env {
             .ok()
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_else(|| {
-                tracing::warn!("current_dir() unavailable; project-scope matching disabled");
+                tracing::error!("current_dir() unavailable; project-scope matching disabled");
                 String::new()
             });
         let home = std::env::var_os("HOME")
@@ -532,7 +533,11 @@ const MAX_DESCRIPTION_BYTES: usize = 1024;
 /// field is truncated to `MAX_DESCRIPTION_BYTES` if oversized.
 fn read_project_file(path: &std::path::Path) -> ProjectFile {
     let Ok(body) = std::fs::read_to_string(path).inspect_err(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "failed to read project marker file; using defaults")
+        tracing::error!(
+            path = %path.display(),
+            error = %e,
+            "failed to read project marker file; using defaults"
+        )
     }) else {
         return ProjectFile::default();
     };
@@ -559,7 +564,7 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
             pf
         }
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 "project marker file {} is not valid YAML: {e}; using defaults",
                 path.display()
             );
@@ -573,7 +578,8 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
 mod tests {
     use super::{
         ContentScope, Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, discover_project, glob_matches,
-        is_valid_tag_charset, matches_content_all, parse_extra_tags, sanitize_tags,
+        is_valid_tag_charset, matches_content_all, parse_extra_tags, read_project_file,
+        sanitize_tags,
     };
     use proptest::prelude::*;
     use std::collections::BTreeSet;
@@ -1246,6 +1252,19 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn malformed_project_file_is_logged_at_error_level() {
+        // #2666: the default log filter is ERROR, so a warn here never reaches the user.
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let marker = temp_dir.path().join(".llmenv.yaml");
+        std::fs::write(&marker, "description: [unclosed\n").expect("write marker");
+        let logs = crate::test_log_capture::capture_logs(|| {
+            assert_eq!(read_project_file(&marker).description, None);
+        });
+        assert!(logs.contains("ERROR"), "expected an ERROR line: {logs}");
+        assert!(logs.contains("not valid YAML"), "{logs}");
     }
 
     #[test]

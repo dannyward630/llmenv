@@ -180,7 +180,7 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
         .stderr(std::process::Stdio::null())
         .status()
     {
-        tracing::warn!("git fetch failed to start in {}: {}", repo.display(), e);
+        tracing::error!("git fetch failed to start in {}: {}", repo.display(), e);
     }
 
     // Attempt fast-forward pull. Suppress git's stderr — we'll print our

@@ -2186,10 +2186,10 @@ fn build_and_materialize(
 fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path) {
     migrate_stranded_transcripts_once(adapter_root, state_dir);
     if let Err(e) = crate::materialize::inherit::link_projects_dir(state_dir, cache_path) {
-        tracing::warn!("could not inherit /resume transcripts (non-fatal): {e:#}");
+        tracing::error!("could not inherit /resume transcripts (non-fatal): {e:#}");
     }
     if let Err(e) = crate::materialize::inherit::link_session_logs_dir(state_dir, cache_path) {
-        tracing::warn!("could not inherit session logs (non-fatal): {e:#}");
+        tracing::error!("could not inherit session logs (non-fatal): {e:#}");
     }
     // Capture before inherit: Claude Code only ever writes these into the config
     // dir, so without this the durable store would never gain a copy to hand to
@@ -2198,7 +2198,7 @@ fn inherit_claude_state(adapter_root: &Path, state_dir: &Path, cache_path: &Path
         tracing::warn!("could not capture folder state into the store (non-fatal): {e:#}");
     }
     if let Err(e) = crate::materialize::inherit::inherit_copied_files(state_dir, cache_path) {
-        tracing::warn!("could not inherit prompt history (non-fatal): {e:#}");
+        tracing::error!("could not inherit prompt history (non-fatal): {e:#}");
     }
 }
 
@@ -2218,7 +2218,7 @@ fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
         Ok(0) => {}
         Ok(n) => eprintln!("[llmenv] inherited /resume transcripts from {n} older folder(s)"),
         Err(e) => {
-            tracing::warn!("migrating stranded transcripts failed (non-fatal): {e:#}");
+            tracing::error!("migrating stranded transcripts failed (non-fatal): {e:#}");
             return;
         }
     }
@@ -2249,7 +2249,7 @@ fn inject_cached_auth_if_available(
                 }
             }
             Err(e) => {
-                tracing::warn!("auth inject failed for {} (non-fatal): {e}", entry.email);
+                tracing::error!("auth inject failed for {} (non-fatal): {e}", entry.email);
                 AuthStatus::default()
             }
         },
@@ -2267,7 +2267,7 @@ fn inject_cached_credentials(adapter_root: &std::path::Path, cache_path: &std::p
     match crate::auth::credentials::inject_if_missing(backend, adapter_root, cache_path) {
         Ok(true) => eprintln!("[llmenv] auth: OAuth credential inherited from durable state"),
         Ok(false) => {}
-        Err(e) => tracing::warn!("credential inject failed (non-fatal): {e}"),
+        Err(e) => tracing::error!("credential inject failed (non-fatal): {e}"),
     }
 }
 
@@ -2312,7 +2312,7 @@ fn write_cache_manifest(
             let victim = cache_path.join(&ghost);
             if let Err(e) = std::fs::remove_file(&victim) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!("removing stale cache file {}: {e}", victim.display());
+                    tracing::error!("removing stale cache file {}: {e}", victim.display());
                 }
             } else {
                 tracing::debug!("removed stale cache file {}", victim.display());
@@ -2462,7 +2462,7 @@ fn build_manifest(
                 bundle_memory_slice,
                 &manifest.capabilities.host,
             ) {
-                tracing::warn!("failed to persist bundle-merge cache: {e}");
+                tracing::error!("failed to persist bundle-merge cache: {e}");
             }
         }
         Err(e) => tracing::warn!("failed to compute merge signature for cache: {e}"),
@@ -4957,12 +4957,29 @@ fn run_sync(dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print one advisory line for each top-level config key that llmenv does not read (#2669).
+///
+/// This is advisory: serde ignored the key, so the rest of the file still loads. A failure to
+/// run the check is a warning too, so it never stops `validate` or `doctor`.
+fn warn_unknown_config_keys(config_path: &std::path::Path, warn: &dyn std::fmt::Display) {
+    match crate::config::unknown_top_level_keys(config_path) {
+        Ok(keys) => {
+            for key in keys {
+                let msg = crate::config::unknown_key_message(&crate::util::display_safe(&key));
+                eprintln!("{warn} {msg}");
+            }
+        }
+        Err(e) => eprintln!("{warn} cannot check for unknown top-level keys: {e:#}"),
+    }
+}
+
 fn run_validate(use_color: bool) -> anyhow::Result<()> {
     let config_path = paths::config_path()?;
     let config = Config::load(&config_path)?;
     let pass = doctor_pass(use_color);
     let fail = doctor_fail(use_color);
     let warn = doctor_warning(use_color);
+    warn_unknown_config_keys(&config_path, &warn);
     let mut valid = true;
     let mut seen_names = HashSet::new();
     for bundle in &config.bundle {

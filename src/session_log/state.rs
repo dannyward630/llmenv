@@ -22,23 +22,11 @@ const MAX_CORRELATION_ENTRIES: usize = 1000;
 
 /// Path to the correlation map file.
 ///
-/// Falls back to a relative path in CWD when `state_dir()` cannot be resolved
-/// (e.g. `$HOME` not set), so transcript correlation never silently breaks
-/// even without filesystem state dir. The fallback logs a `warn!`.
-#[must_use]
-pub(crate) fn state_path() -> PathBuf {
-    state_dir()
-        .map(|d| d.join("transcript-sessions.json"))
-        .unwrap_or_else(|e| {
-            let path = PathBuf::from("transcript-sessions.json");
-            tracing::warn!(
-                error = %e,
-                path = %path.display(),
-                "cannot resolve state dir for transcript-sessions.json, \
-                 using CWD-relative fallback"
-            );
-            path
-        })
+/// # Errors
+/// The state dir cannot be resolved, for example when `$HOME` is not set. A
+/// CWD-relative map would land in the user's project, so there is no fallback (#2668).
+pub(crate) fn state_path() -> anyhow::Result<PathBuf> {
+    Ok(state_dir()?.join("transcript-sessions.json"))
 }
 
 /// Load the correlation map at `path`. A missing file is the normal
@@ -113,7 +101,50 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     }
 }
 
+/// Lock key for the map file, so its lock is `transcript-sessions.lock` in the state dir.
+const MAP_LOCK_KEY: &str = "transcript-sessions";
+
+/// Hold the lock for the map at `path` across one read-modify-write. Without it, two hooks
+/// can read the same map. A corrupt-map rename by one hook can then move the other hook's
+/// fresh map aside (#2667).
+fn lock_map(path: &Path) -> anyhow::Result<std::fs::File> {
+    // No fallback to ".": locking creates the directory and resets its mode, and a bare file name
+    // would put that in the user's project.
+    let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        anyhow::bail!(
+            "the session map path {} has no parent directory, so it cannot be locked",
+            path.display()
+        );
+    };
+    crate::hook_run::session_state::lock_state_file(dir, MAP_LOCK_KEY, "session map").ok_or_else(
+        || {
+            anyhow::anyhow!(
+                "cannot lock the session map {}, so it was not written. Check the state dir \
+                 permissions, and whether another llmenv hook is stuck.",
+                path.display()
+            )
+        },
+    )
+}
+
+/// Prove that the map at `path` can be written, without changing its entries.
+///
+/// Call this before ICM starts a transcript. A transcript that cannot be linked is an orphan,
+/// and an unwritable map fails every later event the same way (#2667). The check holds only
+/// for this moment: a lock that stays busy at record time can still orphan one transcript,
+/// and the caller logs that case.
+///
+/// # Errors
+/// The lock cannot be taken, or the map cannot be read or written.
+pub(crate) fn check_writable_at(path: &Path) -> anyhow::Result<()> {
+    let _lock = lock_map(path)?;
+    let map = load_for_write(path)?;
+    write_owner_only_atomic(path, serde_json::to_string(&map)?.as_bytes())?;
+    Ok(())
+}
+
 fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
+    let _lock = lock_map(path)?;
     let mut map = load_for_write(path)?;
     // Evict before the insert. Evicting after it could drop the new key itself, when that key
     // sorts first, and the lookup for this session would then miss.
@@ -293,6 +324,67 @@ mod tests {
         assert_eq!(load_at(&path).unwrap().len(), MAX_CORRELATION_ENTRIES);
     }
 
+    #[test]
+    fn record_fails_while_another_writer_holds_the_map_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        let _held = crate::hook_run::session_state::lock_state_file(
+            dir.path(),
+            MAP_LOCK_KEY,
+            "test holder",
+        )
+        .unwrap();
+        let err = record_at(&path, "claude-1", "icm-a").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot lock the session map"),
+            "{err:#}"
+        );
+        assert!(!path.exists(), "a write under a busy lock must not happen");
+    }
+
+    #[test]
+    fn check_writable_keeps_every_stored_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        record_at(&path, "claude-1", "icm-a").unwrap();
+        check_writable_at(&path).unwrap();
+        assert_eq!(
+            lookup_session_at(&path, "claude-1").unwrap().as_deref(),
+            Some("icm-a")
+        );
+    }
+
+    #[test]
+    fn a_bare_file_name_is_refused_before_anything_is_created() {
+        // A bare name has no parent. The lock must not fall back to the working directory.
+        let err =
+            record_at(Path::new("transcript-sessions.json"), "claude-1", "icm-a").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has no parent directory"),
+            "{err:#}"
+        );
+        assert!(!Path::new("transcript-sessions.json").exists());
+        assert!(!Path::new("transcript-sessions.lock").exists());
+    }
+
+    #[test]
+    fn check_writable_creates_no_map_when_none_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        check_writable_at(&path).unwrap();
+        assert!(load_at(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn check_writable_fails_when_the_lock_file_cannot_be_opened() {
+        // A directory where the lock file belongs stops the lock step. The map is not written.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-sessions.json");
+        std::fs::create_dir(dir.path().join("transcript-sessions.lock")).unwrap();
+        assert!(check_writable_at(&path).is_err());
+        assert!(!path.exists(), "no map may be written without the lock");
+    }
+
     use proptest::prelude::*;
     proptest! {
         #[test]
@@ -307,6 +399,20 @@ mod tests {
                 expected.insert(claude.clone(), icm.clone());
             }
             prop_assert_eq!(load_at(&path).unwrap(), expected);
+        }
+
+        #[test]
+        fn check_writable_never_changes_the_stored_pairs(
+            pairs in prop::collection::vec(("\\PC{1,16}", "\\PC{0,16}"), 0..8),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transcript-sessions.json");
+            for (claude, icm) in &pairs {
+                record_at(&path, claude, icm).unwrap();
+            }
+            let before = load_at(&path).unwrap();
+            check_writable_at(&path).unwrap();
+            prop_assert_eq!(load_at(&path).unwrap(), before);
         }
 
         #[test]

@@ -3,6 +3,22 @@ pub use llmenv_util::{
     dedup, escape_control, expand_env_refs, merge_json, merge_yaml, strip_unsafe_chars,
 };
 
+/// A control character, or an invisible format character that can reorder or hide text.
+fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+        )
+}
+
 /// Escape every C0/C1 control character in `s` (`char::is_control`) so it's
 /// safe to print verbatim to a terminal (#1076). Config-derived strings
 /// (`native_permissions.*` keys, permission tool names and patterns,
@@ -13,14 +29,18 @@ pub use llmenv_util::{
 /// someone else's terminal. No exceptions for `\n`/`\t`: a legitimate
 /// config key, tool name, or pattern has no reason to contain either.
 ///
+/// Invisible Unicode format characters are escaped too (#2669 review). They are not control
+/// characters, but a bidi override (U+202E) can reorder the text around a key, and a
+/// zero-width character can hide part of it.
+///
 /// Returns `s` unchanged (no allocation) when nothing needs escaping.
 pub(crate) fn display_safe(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.chars().any(char::is_control) {
+    if !s.chars().any(needs_escape) {
         return std::borrow::Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() {
+        if needs_escape(c) {
             out.push_str(&format!("\\u{{{:04x}}}", c as u32));
         } else {
             out.push(c);
@@ -46,6 +66,23 @@ mod tests {
         let out = display_safe("Bash(\x1b[2Kevil*)");
         assert!(!out.contains('\x1b'));
         assert!(out.contains("\\u{001b}"));
+    }
+
+    #[test]
+    fn display_safe_escapes_bidi_override_and_zero_width() {
+        let out = display_safe("key\u{202E}evil\u{200B}");
+        assert!(!out.contains('\u{202E}'));
+        assert!(!out.contains('\u{200B}'));
+        assert!(out.contains("\\u{202e}"));
+        assert!(out.contains("\\u{200b}"));
+    }
+
+    #[test]
+    fn display_safe_keeps_ordinary_non_ascii_text() {
+        assert!(matches!(
+            display_safe("naïve 日本語"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
