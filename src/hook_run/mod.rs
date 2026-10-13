@@ -2853,12 +2853,33 @@ fn handle_web_fetch_in(
 /// default. Single source of truth for both the spawned child's
 /// `CBM_CACHE_DIR` and the indexer's own diagnostic log (#1091), so they
 /// can't drift apart.
+///
+/// # Errors
+/// `index_path` cannot be expanded, for example a leading `~` with `HOME` unset.
 pub(crate) fn codebase_memory_cache_dir(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
-) -> std::path::PathBuf {
+) -> anyhow::Result<std::path::PathBuf> {
+    Ok(cache_dir_of(expanded_index_path(cm)?.as_deref(), state_dir))
+}
+
+/// The `index_path` of `cm` with a leading `~` expanded. The loader already does this (#2651),
+/// so this call protects a value that reaches the indexer without the loader.
+///
+/// # Errors
+/// `index_path` cannot be expanded, for example a leading `~` with `HOME` unset.
+pub(crate) fn expanded_index_path(
+    cm: &crate::config::CodebaseMemory,
+) -> anyhow::Result<Option<String>> {
     cm.index_path
-        .as_ref()
+        .as_deref()
+        .map(crate::paths::expand_tilde)
+        .transpose()
+}
+
+/// The cache folder for an already-expanded `index_path`, or the default under `state_dir`.
+fn cache_dir_of(index_path: Option<&str>, state_dir: &std::path::Path) -> std::path::PathBuf {
+    index_path
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state_dir.join("codebase-memory"))
 }
@@ -2944,15 +2965,11 @@ pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
 /// `cm.mem_budget_mb` is (#2154). Same treatment as `resolve_codebase_memory`
 /// (`src/mcp/resolve.rs`), which this mirrors so the SessionStart auto-index
 /// and the MCP server launch agree on scope and budget.
-fn build_index_repository_command(
-    project_root: &std::path::Path,
-    cm: &crate::config::CodebaseMemory,
-) -> std::process::Command {
-    index_command(project_root, cm.index_path.as_deref(), cm.mem_budget_mb)
-}
-
-/// [`build_index_repository_command`] from the two values the command needs, so the checkpointed
-/// wrapper (`detached_cbm`) can rebuild it from a checkpoint file (#2396).
+/// The indexer command for `project_root`. The checkpointed wrapper (`detached_cbm`) rebuilds it
+/// from a checkpoint file (#2396).
+///
+/// `index_path` MUST already be expanded (see [`expanded_index_path`]). A literal `~` would reach
+/// the child as a directory name.
 fn index_command(
     project_root: &std::path::Path,
     index_path: Option<&str>,
@@ -3144,11 +3161,18 @@ fn trigger_codebase_memory_index(
 ) {
     // A checkpointed run goes through `llmenv cbm-index-run`, which observes the indexer's exit
     // status. Without a checkpoint the indexer starts directly, as before (#2396).
-    let cache_dir = codebase_memory_cache_dir(cm, state_dir);
+    let index_path = match expanded_index_path(cm) {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::error!("codebase-memory index skipped: cannot expand index_path: {e:#}");
+            return;
+        }
+    };
+    let cache_dir = cache_dir_of(index_path.as_deref(), state_dir);
     let result_path = index_result_path(&cache_dir, project_root);
     let inputs = detached_cbm::IndexInputs {
         project_root: project_root.display().to_string(),
-        index_path: cm.index_path.clone(),
+        index_path: index_path.clone(),
         mem_budget_mb: cm.mem_budget_mb,
         result_path: Some(result_path.display().to_string()),
     };
@@ -3164,7 +3188,7 @@ fn trigger_codebase_memory_index(
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
-        build_index_repository_command(project_root, cm)
+        index_command(project_root, index_path.as_deref(), cm.mem_budget_mb)
     });
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -5257,7 +5281,11 @@ mod tests {
             index_path: None,
             mcp_permissions: None,
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/repos/proj"), &cm);
+        let cmd = index_command(
+            std::path::Path::new("/repos/proj"),
+            cm.index_path.as_deref(),
+            cm.mem_budget_mb,
+        );
         assert_eq!(cmd.get_program().to_string_lossy(), "codebase-memory-mcp");
         let args: Vec<String> = cmd
             .get_args()
@@ -5298,7 +5326,11 @@ mod tests {
             index_path: Some("/custom/path".to_string()),
             mcp_permissions: None,
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/repos/proj"), &cm);
+        let cmd = index_command(
+            std::path::Path::new("/repos/proj"),
+            cm.index_path.as_deref(),
+            cm.mem_budget_mb,
+        );
         let envs: std::collections::BTreeMap<String, String> = cmd
             .get_envs()
             .filter_map(|(k, v)| {
@@ -5317,6 +5349,41 @@ mod tests {
     }
 
     #[test]
+    fn expanded_index_path_removes_a_leading_tilde() {
+        let cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
+            mem_budget_mb: None,
+            when: vec!["proj".to_string()],
+            index_path: Some("~/cbm".to_string()),
+            mcp_permissions: None,
+        };
+        let expanded = expanded_index_path(&cm).ok().flatten();
+        assert!(
+            expanded
+                .as_deref()
+                .is_some_and(|p| !p.starts_with('~') && p.ends_with("/cbm")),
+            "a literal tilde must not reach the indexer: {expanded:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_index_path_passes_an_absolute_path_and_none_through() {
+        let mut cm = crate::config::CodebaseMemory {
+            allowed_roots: vec![],
+            mem_budget_mb: None,
+            when: vec!["proj".to_string()],
+            index_path: Some("/custom/path".to_string()),
+            mcp_permissions: None,
+        };
+        assert_eq!(
+            expanded_index_path(&cm).ok().flatten().as_deref(),
+            Some("/custom/path")
+        );
+        cm.index_path = None;
+        assert_eq!(expanded_index_path(&cm).ok().flatten(), None);
+    }
+
+    #[test]
     fn codebase_memory_cache_dir_defaults_under_state_dir() {
         let cm = crate::config::CodebaseMemory {
             allowed_roots: vec![],
@@ -5326,8 +5393,8 @@ mod tests {
             mcp_permissions: None,
         };
         assert_eq!(
-            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
-            std::path::PathBuf::from("/state/codebase-memory")
+            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")).ok(),
+            Some(std::path::PathBuf::from("/state/codebase-memory"))
         );
     }
 
@@ -5341,8 +5408,8 @@ mod tests {
             mcp_permissions: None,
         };
         assert_eq!(
-            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")),
-            std::path::PathBuf::from("/custom/path")
+            codebase_memory_cache_dir(&cm, std::path::Path::new("/state")).ok(),
+            Some(std::path::PathBuf::from("/custom/path"))
         );
     }
 
@@ -5366,13 +5433,21 @@ mod tests {
             mem_budget_mb: Some(8192),
             ..Default::default()
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/r"), &with);
+        let cmd = index_command(
+            std::path::Path::new("/r"),
+            with.index_path.as_deref(),
+            with.mem_budget_mb,
+        );
         assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB").as_deref(), Some("8192"));
         let without = crate::config::CodebaseMemory {
             when: vec!["p".into()],
             ..Default::default()
         };
-        let cmd = build_index_repository_command(std::path::Path::new("/r"), &without);
+        let cmd = index_command(
+            std::path::Path::new("/r"),
+            without.index_path.as_deref(),
+            without.mem_budget_mb,
+        );
         assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB"), None);
     }
 
@@ -5572,7 +5647,7 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = build_index_repository_command(&project_root, &cm);
+            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
             let args: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
@@ -5583,7 +5658,7 @@ mod tests {
             proptest::prop_assert_eq!(parsed["repo_path"].as_str(), Some(expected.as_str()));
         }
 
-        // #1493/#1495: build_index_repository_command must never set
+        // #1493/#1495: index_command must never set
         // CBM_ALLOWED_ROOT, and must never set CBM_CACHE_DIR when
         // index_path is unset — mirrors resolve_codebase_memory's contract
         // (src/mcp/resolve.rs), for arbitrary project_root content.
@@ -5597,7 +5672,7 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = build_index_repository_command(&project_root, &cm);
+            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
             let envs: std::collections::BTreeMap<String, String> = cmd
                 .get_envs()
                 .filter_map(|(k, v)| {

@@ -119,7 +119,7 @@ pub(crate) fn resolve_allowed_roots(cm: &CodebaseMemory, bases: &RootBases) -> V
 /// read as a directory name, so the caller must set `index_path` instead.
 fn cache_dir(cm: &CodebaseMemory, home: Option<&Path>) -> anyhow::Result<PathBuf> {
     if let Some(index_path) = &cm.index_path {
-        return Ok(PathBuf::from(index_path));
+        return Ok(PathBuf::from(crate::paths::expand_tilde(index_path)?));
     }
     let home = home.ok_or_else(|| {
         anyhow::anyhow!(
@@ -131,16 +131,19 @@ fn cache_dir(cm: &CodebaseMemory, home: Option<&Path>) -> anyhow::Result<PathBuf
 }
 
 /// A `codebase-memory-mcp` command with the environment of the server llmenv launches.
-fn cbm_command(cm: &CodebaseMemory, args: &[&str]) -> Command {
+///
+/// # Errors
+/// `index_path` cannot be expanded, for example a leading `~` with `HOME` unset.
+fn cbm_command(cm: &CodebaseMemory, args: &[&str]) -> anyhow::Result<Command> {
     let mut cmd = Command::new("codebase-memory-mcp");
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(index_path) = &cm.index_path {
-        cmd.env("CBM_CACHE_DIR", index_path);
+        cmd.env("CBM_CACHE_DIR", crate::paths::expand_tilde(index_path)?);
     }
-    cmd
+    Ok(cmd)
 }
 
 /// Run `cmd` and wait at most `timeout`. The child is killed on a timeout.
@@ -178,7 +181,7 @@ fn parse_roots(listing: &str) -> Vec<PathBuf> {
 /// # Errors
 /// The command cannot run, times out, or exits non-zero.
 fn list_roots(cm: &CodebaseMemory) -> anyhow::Result<Vec<PathBuf>> {
-    let output = run_with_timeout(cbm_command(cm, &["allow-root", "--list"]), COMMAND_TIMEOUT)
+    let output = run_with_timeout(cbm_command(cm, &["allow-root", "--list"])?, COMMAND_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("codebase-memory-mcp allow-root --list: {e}"))?;
     anyhow::ensure!(
         output.status.success(),
@@ -252,7 +255,7 @@ fn apply_roots(
     let mut still_missing = Vec::new();
     for (root, _) in std::mem::take(&mut report.missing) {
         let path = root.to_string_lossy().into_owned();
-        let outcome = run_with_timeout(cbm_command(cm, &["allow-root", &path]), COMMAND_TIMEOUT);
+        let outcome = run_with_timeout(cbm_command(cm, &["allow-root", &path])?, COMMAND_TIMEOUT);
         match outcome {
             Ok(out) if out.status.success() => report.listed.push(root),
             Ok(out) => {
@@ -733,9 +736,21 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_dir_expands_a_leading_tilde_in_index_path() {
+        let mut c = cm(&[]);
+        c.index_path = Some("~/idx".into());
+        let dir = cache_dir(&c, None).ok();
+        assert!(
+            dir.as_deref().is_some_and(Path::is_absolute),
+            "a relative '~' directory would be a wrong cache: {dir:?}"
+        );
+    }
+
+    #[test]
     fn the_command_gets_the_cache_dir_of_the_server() {
         let env_of = |c: &CodebaseMemory| {
             cbm_command(c, &["allow-root", "--list"])
+                .ok()?
                 .get_envs()
                 .find(|(k, _)| *k == std::ffi::OsStr::new("CBM_CACHE_DIR"))
                 .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))

@@ -19,7 +19,7 @@
 //! land in every session and the feature's whole point is that it doesn't.
 //! Denying the `name` override specifically keeps the auto-index unprompted —
 //! llmenv's own call passes `repo_path` alone (see
-//! `build_index_repository_command`), so nothing llmenv does trips this.
+//! `index_command`), so nothing llmenv does trips this.
 //!
 //! The same hook also denies `persistence: true`, which makes the tool write
 //! `.codebase-memory/graph.db.zst` into the indexed repository. The tool sits in
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn allows_the_shape_llmenv_itself_sends() {
-        // `build_index_repository_command` passes `repo_path` and nothing
+        // `index_command` passes `repo_path` and nothing
         // else; if this ever denied, every SessionStart auto-index would die.
         assert_eq!(
             handle_pre_tool_use(&payload(
