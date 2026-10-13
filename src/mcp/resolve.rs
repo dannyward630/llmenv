@@ -1076,7 +1076,11 @@ mod tests {
                 );
                 match resolved.unwrap().kind {
                     ResolvedKind::Stdio { env, .. } => {
-                        prop_assert_eq!(env.get("CBM_CACHE_DIR").cloned(), Some(index_path));
+                        // The override wins, and a leading `~` is expanded on the way (#2689).
+                        prop_assert_eq!(
+                            env.get("CBM_CACHE_DIR").cloned(),
+                            crate::paths::expand_tilde(&index_path).ok()
+                        );
                     }
                     ResolvedKind::Remote { .. } => prop_assert!(false, "expected Stdio"),
                 }
