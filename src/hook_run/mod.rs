@@ -2972,7 +2972,16 @@ fn redirect_stderr_to_bounded_log(
 /// own `tracing` events go to a fmt layer writing to that same null stderr, so
 /// a failure is discarded twice over.
 pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
-    match detached_child_log_path() {
+    redirect_stderr_to_resolved_log(cmd, detached_child_log_path());
+}
+
+/// [`redirect_stderr_to_detached_log`] with the log path already resolved, so a test can name a
+/// temporary log without changing the state directory.
+fn redirect_stderr_to_resolved_log(
+    cmd: &mut std::process::Command,
+    log: anyhow::Result<std::path::PathBuf>,
+) {
+    match log {
         // Always state_dir-rooted, so `harden_dir: true` is safe.
         Ok(path) => redirect_stderr_to_bounded_log(cmd, &path, true, "detached child"),
         Err(e) => {
@@ -4428,6 +4437,33 @@ mod tests {
 
     // Pins the shared log name: the three detached children, the docs, and any
     // operator told where to look must all agree on one path.
+    #[cfg(unix)]
+    #[test]
+    fn a_detached_child_stderr_reaches_the_log_it_is_given() -> anyhow::Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let log = dir.path().join("detached-hook.log");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo child-stderr-marker >&2"]);
+        redirect_stderr_to_resolved_log(&mut cmd, Ok(log.clone()));
+        anyhow::ensure!(cmd.status()?.success(), "the child must run");
+        let text = std::fs::read_to_string(&log)?;
+        anyhow::ensure!(
+            text.contains("child-stderr-marker"),
+            "the child's stderr must reach the log: {text}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_log_path_still_runs_the_detached_child() -> anyhow::Result<()> {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo discarded >&2"]);
+        redirect_stderr_to_resolved_log(&mut cmd, Err(anyhow::anyhow!("no state dir")));
+        anyhow::ensure!(cmd.status()?.success(), "the child must run without a log");
+        Ok(())
+    }
+
     #[test]
     fn detached_child_log_path_is_named_under_the_state_dir() {
         let path = detached_child_log_path().expect("test");
