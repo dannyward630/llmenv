@@ -102,6 +102,14 @@ pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::
         .join(format!("{session_id}.json"))
 }
 
+/// Lock for one read-change-save of the session's stats file (#2678). When the lock fails,
+/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+fn stats_lock(state_dir: &std::path::Path, session_id: &str) -> Option<std::fs::File> {
+    stats_path(state_dir, session_id)
+        .parent()
+        .and_then(|dir| super::session_state::lock_state_file(dir, session_id, "slippage stats"))
+}
+
 pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> SessionStats {
     // An unreadable or corrupt log means "nothing known to have been read". The
     // write guard then denies a Write to an existing file until the next Read
@@ -162,6 +170,8 @@ pub(crate) fn handle_pre_tool_use(
 
     match tool {
         "Read" => {
+            // Held for the read-change-save of the stats file (#2678). A Write only reads it.
+            let _lock = stats_lock(state_dir, session_id);
             let mut stats = load_stats(state_dir, session_id);
             stats.paths.insert(path_key(path));
             save_stats(state_dir, session_id, &stats);
@@ -205,6 +215,7 @@ pub(super) fn path_key(path: &str) -> String {
 /// session forever.
 pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
     super::session_state::prune_stale_json_files(&state_dir.join("slippage"), 7);
+    super::session_state::prune_orphan_locks(&state_dir.join("slippage"), 7);
     let Ok(json) = serde_json::to_string(stats) else {
         return;
     };
@@ -237,7 +248,13 @@ pub(crate) fn handle_post_tool_use(
     ) else {
         return;
     };
-    if cfg.read_before_edit && tool == "Bash" {
+    let records_bash_read = cfg.read_before_edit && tool == "Bash";
+    if !records_bash_read && !cfg.metrics {
+        return;
+    }
+    // One lock covers both read-change-save cycles of the stats file (#2678).
+    let _lock = stats_lock(state_dir, session_id);
+    if records_bash_read {
         super::slippage_read::record_bash_read(state_dir, session_id, payload);
     }
     if !cfg.metrics {
@@ -410,6 +427,18 @@ pub(crate) fn handle_transcript_scan(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stats_lock_is_taken_once_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = stats_lock(dir.path(), "s1");
+        assert!(held.is_some(), "a free lock must be taken");
+        assert!(
+            stats_lock(dir.path(), "s1").is_none(),
+            "a held lock must not be taken twice"
+        );
+        drop(held);
+    }
 
     fn cfg(enabled: bool, self_critique: bool) -> SlippageControl {
         SlippageControl {
