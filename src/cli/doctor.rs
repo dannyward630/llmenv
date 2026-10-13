@@ -1373,7 +1373,11 @@ pub(super) fn run_doctor(
     }
 
     // Check git remote is reachable
-    if super::is_git_repo(&config_dir) {
+    let in_git_repo = super::is_git_repo(&config_dir).unwrap_or_else(|e| {
+        eprintln!("{warn} Git repository check failed: {e:#}");
+        false
+    });
+    if in_git_repo {
         match super::check_git_remote(&config_dir) {
             Ok(remote) => {
                 let safe_url = crate::git::sanitize_git_url(&remote);

@@ -23,11 +23,9 @@ pub(crate) fn lock_state_file(dir: &Path, key: &str, label: &str) -> Option<File
         tracing::error!("cannot create {}: {e}", dir.display());
         return None;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
+    let mut opts = OpenOptions::new();
+    opts.create(true).truncate(false).write(true).mode(0o600);
+    let file = crate::paths::refuse_symlink(&mut opts)
         .open(dir.join(format!("{key}.lock")))
         .inspect_err(|e| tracing::error!("cannot open {label} lock: {e}"))
         .ok()?;
