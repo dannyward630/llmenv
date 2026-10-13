@@ -4,11 +4,11 @@ use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 /// Expand a leading `~` or `~/` to `$HOME`. Other input is returned unchanged.
-/// Returns the input unchanged when `HOME` is unset or empty.
 ///
 /// # Errors
-/// Returns an error that names `HOME` when the input starts with `~` and `HOME` is set to a
-/// value that is not valid UTF-8. Such a path cannot be expanded, and it must not be used as is.
+/// Returns an error that names `HOME` when the input starts with `~` and `HOME` is unset, empty,
+/// or not valid UTF-8. Such a path cannot be expanded, and it must not be used as is: a relative
+/// `~/x` would otherwise resolve against the working directory.
 pub fn expand_tilde(p: &str) -> anyhow::Result<String> {
     expand_tilde_with_env(p, &|name| std::env::var(name))
 }
@@ -26,11 +26,12 @@ fn expand_tilde_with_env(
     };
     // HOME is read only for a `~` input, so an absolute or relative path never fails on it.
     let home = match get_env("HOME") {
-        // A set-but-empty HOME has the same failure mode as HOME being unset — an
-        // empty home would silently anchor "~/rest" at the filesystem root
-        // ("/rest") instead of leaving the input unchanged (#1179).
+        // An empty HOME would anchor "~/rest" at the filesystem root ("/rest"). An unset
+        // HOME would leave "~/rest" relative to the working directory (#1179, #2679).
         Ok(home) if !home.is_empty() => home,
-        Ok(_) | Err(VarError::NotPresent) => return Ok(p.to_string()),
+        Ok(_) | Err(VarError::NotPresent) => anyhow::bail!(
+            "cannot expand {p:?}: HOME is not set or is empty. Set HOME, or give an absolute path"
+        ),
         Err(VarError::NotUnicode(_)) => anyhow::bail!(
             "cannot expand {p:?}: HOME is not valid UTF-8. Set HOME to a UTF-8 path and retry"
         ),
@@ -292,9 +293,16 @@ pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<(
             format!("path has no file name: {}", path.display()),
         )
     })?;
+    // A bare name such as "foo.json" has an empty parent. Writing it into the working directory
+    // would land the file in the user's project, so the caller must pass a full path.
     if parent.as_os_str().is_empty() {
-        // For paths like "foo.json" (no parent dir), use current dir.
-        return write_owner_only_atomic_in_dir(Path::new("."), file_name, path, content);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "path has no directory component: {}. Pass a path that includes its directory",
+                path.display()
+            ),
+        ));
     }
     // Born owner-only (0o700) at creation, including every missing
     // ancestor — a create_dir_all + post-hoc set_permissions leaves the
@@ -933,20 +941,48 @@ mod tests {
     }
 
     #[test]
-    fn expand_tilde_with_env_empty_home_behaves_like_unset() {
+    fn expand_tilde_with_env_unset_or_empty_home_is_an_error_naming_home() {
         let unset = |_: &str| Err(VarError::NotPresent);
         let empty = |name: &str| match name {
             "HOME" => Ok(String::new()),
             _ => Err(VarError::NotPresent),
         };
-        assert_eq!(
-            expand_tilde_with_env("~/foo", &unset).expect("unset HOME is not an error"),
-            expand_tilde_with_env("~/foo", &empty).expect("empty HOME is not an error")
+        for get_env in [&unset as &dyn Fn(&str) -> Result<String, VarError>, &empty] {
+            for input in ["~", "~/foo"] {
+                let err = expand_tilde_with_env(input, &get_env)
+                    .expect_err("a ~ path with no HOME must fail");
+                assert!(
+                    err.to_string().contains("HOME is not set"),
+                    "{input}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn config_and_state_dir_tilde_overrides_fail_without_home() {
+        let override_only = |name: &str| match name {
+            "LLMENV_CONFIG_DIR" => Some("~/cfg".to_string()),
+            "LLMENV_STATE_DIR" => Some("~/state".to_string()),
+            _ => None,
+        };
+        let config_err = config_dir_with_env(&override_only).expect_err("no HOME for ~/cfg");
+        assert!(
+            config_err.to_string().contains("HOME is not set"),
+            "{config_err}"
         );
-        assert_eq!(
-            expand_tilde_with_env("~/foo", &empty).expect("empty HOME is not an error"),
-            "~/foo"
+        let state_err = state_dir_with_env(&override_only).expect_err("no HOME for ~/state");
+        assert!(
+            state_err.to_string().contains("HOME is not set"),
+            "{state_err}"
         );
+    }
+
+    #[test]
+    fn write_owner_only_atomic_refuses_a_bare_file_name() {
+        let err = write_owner_only_atomic(Path::new("bare.json"), b"x")
+            .expect_err("a bare name must not land in the working directory");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]
@@ -1033,7 +1069,8 @@ mod tests {
         #[test]
         fn expand_tilde_with_env_follows_home(
             rest in "[a-z0-9/_.-]{0,20}",
-            home in "[a-z0-9/_.-]{0,20}",
+            // A non-empty HOME: an empty one is an error, covered by the unit test below.
+            home in "[a-z0-9/_.-]{1,20}",
         ) {
             let input = format!("~/{rest}");
             let read = |_: &str| Ok(home.clone());
@@ -1046,10 +1083,10 @@ mod tests {
         }
 
         #[test]
-        fn expand_tilde_with_env_unset_home_leaves_input(s in ".*") {
+        fn expand_tilde_with_env_unset_home_errors_only_for_a_tilde_input(s in ".*") {
             let unset = |_: &str| Err(VarError::NotPresent);
-            let got = expand_tilde_with_env(&s, &unset).expect("an unset HOME is not an error");
-            prop_assert_eq!(got, s);
+            let reads_home = s == "~" || s.starts_with("~/");
+            prop_assert_eq!(expand_tilde_with_env(&s, &unset).is_err(), reads_home);
         }
 
         #[test]
