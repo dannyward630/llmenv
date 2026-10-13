@@ -18,7 +18,9 @@ fn repo_name_from_url(url: &str) -> Option<String> {
     let trimmed = url.trim_end_matches('/');
     let last_segment = trimmed.rsplit(['/', ':']).next().unwrap_or(trimmed);
     let name = last_segment.strip_suffix(".git").unwrap_or(last_segment);
-    (!name.is_empty()).then(|| name.to_string())
+    // A name with `@` is userinfo, such as `https://user:TOKEN@host`. Storing it would keep the
+    // credential as the project name, so it is not a name.
+    (!name.is_empty() && !name.contains('@')).then(|| name.to_string())
 }
 
 /// The trimmed stdout of a successful git run. `None` when the output is empty.
@@ -83,7 +85,7 @@ pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<Option<String>> {
             anyhow::anyhow!(
                 "cannot read a repo name from the origin URL {}. \
                  Set a valid origin with `git remote set-url origin <url>`.",
-                crate::git::sanitize_git_url(&url)
+                crate::util::strip_unsafe_chars(&crate::git::sanitize_git_url(&url))
             )
         })?;
         return Ok(Some(name));
@@ -117,6 +119,8 @@ mod tests {
             ("git@github.com:phaedrus1992/llmenv.git", Some("llmenv")),
             ("github-phaedrus:phaedrus1992/llmenv.git", Some("llmenv")),
             ("git@host:repo.git", Some("repo")),
+            ("https://user:TOKEN@host", None),
+            ("https://user:TOKEN@host/", None),
             ("", None),
             ("/", None),
         ] {
@@ -197,7 +201,7 @@ mod tests {
                 .as_deref(),
             Some("x")
         );
-        assert_eq!(decode_git_stdout(dir, b" \n".to_vec()).ok().flatten(), None);
+        assert_eq!(decode_git_stdout(dir, b" \n".to_vec()).unwrap(), None);
         assert!(decode_git_stdout(dir, vec![0xff, 0xfe]).is_err());
     }
 
@@ -219,7 +223,7 @@ mod tests {
             session_project(&plain).ok().flatten().as_deref(),
             Some("plain-dir")
         );
-        assert_eq!(session_project(Path::new("/")).ok().flatten(), None);
+        assert_eq!(session_project(Path::new("/")).unwrap(), None);
     }
 
     #[test]
