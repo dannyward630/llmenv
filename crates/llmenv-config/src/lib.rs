@@ -3,6 +3,7 @@ mod effort;
 mod proxy_path;
 mod schema;
 mod template;
+mod unknown_keys;
 mod validate;
 
 pub const STATE_DIR_ENV: &str = "LLMENV_STATE_DIR";
@@ -46,6 +47,7 @@ pub use schema::{
     is_reserved_official_marketplace, split_plugin_ref,
 };
 pub use template::generate_template;
+pub use unknown_keys::{unknown_key_message, unknown_top_level_keys};
 pub use validate::{
     ValidateError, validate_capabilities_env_key, validate_permission_rule,
     validate_permission_string,

@@ -153,7 +153,7 @@ pub(crate) fn build_manifest(
                 bundle_memory_slice,
                 &manifest.capabilities.host,
             ) {
-                tracing::warn!("failed to persist bundle-merge cache: {e}");
+                tracing::error!("failed to persist bundle-merge cache: {e}");
             }
         }
         Err(e) => tracing::warn!("failed to compute merge signature for cache: {e}"),
