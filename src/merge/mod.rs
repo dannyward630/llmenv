@@ -1098,11 +1098,26 @@ mod tests {
         );
     }
 
-    // Catches a field added to Capabilities that serializes by default but has no entry here (#2680).
-    // A field with skip_serializing_if and an empty default is not emitted, so this test cannot see it.
+    // Catches a field added to Capabilities that has no entry in the known-keys list (#2680).
+    // The four fields that skip serializing when empty are populated here so they are emitted.
+    // advisor_size never serializes, so the last assert checks it by name.
     #[test]
-    fn every_default_serialized_capabilities_key_is_a_known_bundle_key() {
-        let value = serde_yaml::to_value(Capabilities::default()).unwrap();
+    fn every_serialized_capabilities_key_is_a_known_bundle_key() {
+        let populated = Capabilities {
+            auto_memory_enabled: Some(true),
+            effort_level: Some("high".into()),
+            model_effort: BTreeMap::from([(
+                "sonnet".to_string(),
+                crate::config::ModelEffort {
+                    effort_level: Some("high".into()),
+                    max_effort_level: None,
+                },
+            )]),
+            advisor_model: Some("opus".into()),
+            ..Capabilities::default()
+        };
+        assert!(BUNDLE_YAML_KNOWN_KEYS.contains(&"advisor_size"));
+        let value = serde_yaml::to_value(populated).unwrap();
         for key in value.as_mapping().unwrap().keys() {
             let key = key.as_str().unwrap();
             assert!(
