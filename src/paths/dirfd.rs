@@ -157,6 +157,48 @@ pub(crate) fn rename_at(
     Ok(rustix::fs::renameat(old_dir, old_name, new_dir, new_name)?)
 }
 
+/// The `lstat` of `name` in `dir`. `None` when there is no entry with that name.
+///
+/// # Errors
+///
+/// `InvalidInput` for anything but a single component, plus `fstatat` errors other than
+/// `ENOENT`.
+pub(crate) fn stat_at_nofollow(
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+) -> io::Result<Option<rustix::fs::Stat>> {
+    reject_traversal(name)?;
+    match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => Ok(Some(st)),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Open `name` in `dir` for appending, creating it with mode 0600 when it is absent.
+///
+/// `O_NOFOLLOW` refuses a symlink at `name`. `O_NONBLOCK` stops a FIFO with no reader from
+/// blocking the open.
+///
+/// # Errors
+///
+/// `InvalidInput` for anything but a single component, plus the `openat` errors.
+pub(crate) fn open_append_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<std::fs::File> {
+    reject_traversal(name)?;
+    let flags = OFlags::WRONLY
+        | OFlags::CREATE
+        | OFlags::APPEND
+        | OFlags::NOFOLLOW
+        | OFlags::NONBLOCK
+        | OFlags::CLOEXEC;
+    Ok(std::fs::File::from(openat(
+        dir,
+        name,
+        flags,
+        Mode::from_raw_mode(0o600),
+    )?))
+}
+
 /// Unlink `name` from `dir`. A symlink is removed, never followed.
 ///
 /// # Errors
