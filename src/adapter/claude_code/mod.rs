@@ -520,7 +520,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let rendered = raw.replace("{{ICM_MCP}}", MEMORY_MCP_NAME);
                 crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
             } else {
-                std::fs::copy(abs, &dest)?;
+                let bytes = std::fs::read(abs)?;
+                crate::paths::write_owner_only(&dest, &bytes)?;
             }
             owned.push(rel.clone());
         }

@@ -165,23 +165,11 @@ fn download_binary(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<
 }
 
 /// Install `data` as the new binary, with backup/restore safety.
-/// Create `path` for writing, refusing a symlink there. The install directory is writable by the
-/// user, so a link planted at a fixed name would otherwise redirect the write (#2686).
-fn create_refusing_symlink(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    crate::paths::refuse_symlink(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true),
-    )
-    .open(path)
-}
-
 /// `std::fs::copy`, with the destination opened by [`create_refusing_symlink`]. The copy keeps the
 /// source mode, because the backup is the binary that a failed upgrade restores.
 fn copy_refusing_symlink(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     let mut input = std::fs::File::open(src)?;
-    let mut output = create_refusing_symlink(dst)?;
+    let mut output = crate::paths::create_refusing_symlink(dst)?;
     std::io::copy(&mut input, &mut output)?;
     output.set_permissions(input.metadata()?.permissions())
 }
@@ -202,8 +190,8 @@ fn install_binary(data: &[u8]) -> Result<()> {
     // Write new binary to a temp file in the same directory
     let temp = current_dir.join(".llmenv-upgrade.new");
     let write_result = (|| -> Result<()> {
-        let mut tmp =
-            create_refusing_symlink(&temp).context("failed to create temp file for new binary")?;
+        let mut tmp = crate::paths::create_refusing_symlink(&temp)
+            .context("failed to create temp file for new binary")?;
         tmp.write_all(data).context("failed to write new binary")?;
         tmp.sync_all().context("failed to sync new binary")?;
 
@@ -211,7 +199,7 @@ fn install_binary(data: &[u8]) -> Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&temp, perms)
+            tmp.set_permissions(perms)
                 .context("failed to set executable permissions")?;
         }
 
@@ -1041,7 +1029,7 @@ mod tests {
         std::fs::write(&target, b"keep").unwrap();
         std::os::unix::fs::symlink(&target, &temp).unwrap();
         assert!(
-            create_refusing_symlink(&temp).is_err(),
+            crate::paths::create_refusing_symlink(&temp).is_err(),
             "a planted symlink must be refused"
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");

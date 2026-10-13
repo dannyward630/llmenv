@@ -251,8 +251,9 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
 /// credentials (settings, sync state, MCP configs, ICM memory) where
 /// world-readable defaults would leak data on shared systems.
 ///
-/// A symlink at `path` is an error on Unix (`O_NOFOLLOW`). The write never lands on the
-/// link's target, which an attacker with write access to the parent could choose (#2686).
+/// A symlink at `path` is an error on Unix (`O_NOFOLLOW`), so the write never lands on the link's
+/// target (#2686). Only the final component is checked. A symlink in a parent directory is still
+/// followed, so the parent must already be a directory the user controls.
 pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
