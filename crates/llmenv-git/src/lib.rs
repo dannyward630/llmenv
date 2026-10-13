@@ -199,8 +199,10 @@ mod repo_state_tests {
         assert!(status.success(), "git {args:?} failed in {}", dir.display());
     }
 
+    /// Pins the branch to `main`, so the upstream config below names the real branch on every
+    /// machine, whatever `init.defaultBranch` is set to.
     fn git_init(dir: &Path) {
-        git_run(dir, &["init", "-q"]);
+        git_run(dir, &["init", "-q", "-b", "main"]);
     }
 
     #[test]
