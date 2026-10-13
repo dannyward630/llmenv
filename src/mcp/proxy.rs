@@ -526,8 +526,21 @@ fn lockfile_path(pid_path: &Path) -> PathBuf {
 /// `fs::write` truncates first, so a concurrent reader can observe an empty
 /// pidfile mid-write.
 fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
+    use std::io::Write as _;
     let tmp = pid_path.with_extension(format!("pid.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, pid.to_string()).with_context(|| format!("writing {}", tmp.display()))?;
+    // The temp name is predictable, so create_new refuses a file or symlink already there (#2599).
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = crate::paths::refuse_symlink(&mut opts)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    file.write_all(pid.to_string().as_bytes())
+        .with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, pid_path)
         .inspect_err(|_| {
             // Don't leave the temp file behind on every failed publish. A failed removal is
@@ -676,6 +689,35 @@ pub(super) fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
 /// the child talks to, and the mode is set at creation rather than chmod'd
 /// after so there is no window in which the file is world-readable.
 ///
+/// A parent directory that is not hardened can be swapped for a symlink after creation, so the
+/// log would be written outside it. A symlink, or a directory owned by another uid, is refused (#2599).
+#[cfg(unix)]
+fn refuse_untrusted_parent(parent: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(parent)
+        .with_context(|| format!("inspecting log directory {}", parent.display()))?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!(
+            "log directory {} is a symlink; refusing to write through it",
+            parent.display()
+        );
+    }
+    let euid = rustix::process::geteuid().as_raw();
+    if meta.uid() != euid {
+        anyhow::bail!(
+            "log directory {} is owned by uid {}, not uid {euid}; refusing to write through it",
+            parent.display(),
+            meta.uid()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn refuse_untrusted_parent(_parent: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// `harden_dir` controls whether the parent directory is forced to `0o700`.
 /// Callers pass `false` for a directory outside llmenv's own state tree (e.g.
 /// a user-configured `codebase_memory.index_path` that may be shared with
@@ -701,6 +743,7 @@ pub(crate) fn open_bounded_log(
         } else {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating log directory {}", parent.display()))?;
+            refuse_untrusted_parent(parent)?;
         }
     }
 
@@ -2277,6 +2320,18 @@ mod lock_and_log_safety_tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn open_bounded_log_refuses_a_symlinked_parent_when_not_hardened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = open_bounded_log(&link.join("proxy.log"), 1024, false)
+            .expect_err("a symlinked parent must be refused when not hardened");
+        assert!(err.to_string().contains("is a symlink"), "{err}");
+    }
+
     #[test]
     fn open_bounded_log_refuses_a_hard_linked_file() {
         let dir = TempDir::new().expect("tempdir");

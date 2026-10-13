@@ -133,7 +133,7 @@ fn with_store_lock<T>(
         use std::os::unix::fs::OpenOptionsExt;
         open_options.mode(0o600);
     }
-    let lock_file = open_options.open(dir.join(".lock"))?;
+    let lock_file = crate::paths::refuse_symlink(&mut open_options).open(dir.join(".lock"))?;
     lock_file.lock()?;
     f()
 }

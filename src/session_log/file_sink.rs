@@ -48,7 +48,7 @@ impl FileSink {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&self.path)?;
+        let mut f = crate::paths::refuse_symlink(&mut opts).open(&self.path)?;
         // `mode(0o600)` above only applies on creation (O_CREAT); a file that
         // already existed (e.g. created with a looser umask before this sink
         // ran, or by an older llmenv version) keeps its prior permissions. Set
