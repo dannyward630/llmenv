@@ -96,6 +96,7 @@ impl SessionCache {
     /// `max_age_days`. Runs opportunistically during save().
     pub fn prune_stale_sessions(state_dir: &Path, max_age_days: u64) {
         super::session_state::prune_stale_json_files(&read_once_state_dir(state_dir), max_age_days);
+        super::session_state::prune_orphan_locks(&read_once_state_dir(state_dir), max_age_days);
     }
 }
 
@@ -229,6 +230,12 @@ pub(crate) fn handle_pre_tool_use(
         .unwrap_or_else(|_| path.to_path_buf());
     let path_key = canonical.to_string_lossy().to_string();
     // Load session cache
+    // Held from the load to the save, so a concurrent Read hook cannot overwrite the cache (#2678).
+    let _lock = super::session_state::lock_state_file(
+        &read_once_state_dir(state_dir),
+        session_id,
+        "read-once cache",
+    );
     let mut cache = SessionCache::load(state_dir, session_id, config.ttl_seconds);
     let now = unix_now();
     let tokens_saved = (file_size / 4) as u64;
@@ -297,6 +304,23 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn prune_stale_sessions_removes_old_cache_and_orphan_lock_files() {
+        let dir = tempfile::tempdir().expect("test");
+        let cache_dir = read_once_state_dir(dir.path());
+        std::fs::create_dir_all(&cache_dir).expect("test");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+        for name in ["old.json", "orphan.lock"] {
+            let file = std::fs::File::create(cache_dir.join(name)).expect("test");
+            file.set_modified(old).expect("test");
+        }
+
+        SessionCache::prune_stale_sessions(dir.path(), 7);
+
+        assert!(!cache_dir.join("old.json").exists());
+        assert!(!cache_dir.join("orphan.lock").exists());
+    }
 
     fn test_config_warn() -> ReadOnceConfig {
         ReadOnceConfig {

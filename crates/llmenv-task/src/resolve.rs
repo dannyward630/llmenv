@@ -66,7 +66,7 @@ fn resolve_identifier_for(
 /// means, else every open session when the choice is unclear. A task of a finished session never
 /// outranks a task of an open one.
 fn preferred_sessions(state_dir: &Path, owner: &EngineIdentity) -> anyhow::Result<Vec<String>> {
-    let open: Vec<_> = session::try_list_sessions(state_dir)?
+    let open: Vec<_> = session::list_sessions_strict(state_dir)?
         .into_iter()
         .filter(session::Session::is_open)
         .collect();
