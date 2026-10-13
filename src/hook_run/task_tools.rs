@@ -161,7 +161,11 @@ fn create(
                 .filter(|d| !d.is_empty())
                 && let Err(e) = task::note_task(state_dir, &t.slug, desc)
             {
-                tracing::warn!(error = %e, slug = %t.slug, "task redirect: description note not saved");
+                tracing::error!(
+                    error = %e,
+                    slug = %t.slug,
+                    "task redirect: description note not saved"
+                );
                 msg.push_str(&format!(" (note: the description wasn't saved — {e})"));
             }
             deny(&msg)
@@ -490,7 +494,7 @@ fn update(input: Option<&Value>, state_dir: &Path) -> String {
             .filter(|s| !s.is_empty())
         && let Err(e) = task::note_task(state_dir, &slug, note)
     {
-        tracing::warn!(error = %e, slug = %slug, "task redirect: progress note not saved");
+        tracing::error!(error = %e, slug = %slug, "task redirect: progress note not saved");
         note_warning = format!(" (note not saved: {e})");
     }
     match outcome {

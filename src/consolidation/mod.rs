@@ -292,7 +292,18 @@ fn kill_process_group(pid: u32) {
         let Some(pid) = rustix::process::Pid::from_raw(pid_i32) else {
             return;
         };
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        // ESRCH means the group already exited, which is the normal outcome. Any other error
+        // (EPERM, for one) leaves a child running, so it is logged (#2666).
+        match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            Err(e) => {
+                tracing::error!(
+                    pid = pid_i32,
+                    error = %e,
+                    "cannot kill the consolidation process group"
+                )
+            }
+        }
     }
     #[cfg(not(unix))]
     {

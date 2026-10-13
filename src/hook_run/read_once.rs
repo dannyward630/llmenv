@@ -186,7 +186,7 @@ pub(crate) fn handle_pre_tool_use(
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!("read_once stat failed for {}: {e}", path.display());
+            tracing::error!("read_once stat failed for {}: {e}", path.display());
             return String::new();
         }
     };

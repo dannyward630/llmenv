@@ -26,7 +26,7 @@ pub(crate) fn sync_auth_on_export(
         // Write failures are warn (not debug) — a read/parse failure is benign
         // (file may have been deleted), but a failed cache or manifest write
         // means the user sees "session login detected" but creds never persist.
-        tracing::warn!("auth sync failed (non-fatal): {e}");
+        tracing::error!("auth sync failed (non-fatal): {e}");
     }
     // Separate from try_sync: the OAuth token refreshes without the account UUID
     // changing, so the UUID short-circuit in try_sync must not gate credential
@@ -34,7 +34,7 @@ pub(crate) fn sync_auth_on_export(
     match crate::auth::credentials::cache_if_needed(backend, adapter_root, config_dir) {
         Ok(true) => tracing::debug!("auth: cached OAuth credential in the durable state dir"),
         Ok(false) => {}
-        Err(e) => tracing::warn!("credential cache failed (non-fatal): {e}"),
+        Err(e) => tracing::error!("credential cache failed (non-fatal): {e}"),
     }
 }
 

@@ -205,12 +205,7 @@ fn install_binary(data: &[u8]) -> Result<()> {
     })();
 
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&temp).inspect_err(|e| {
-            tracing::warn!(
-                "upgrade: failed to remove temp file {}: {e}",
-                temp.display()
-            )
-        });
+        remove_leftover(&temp, "temp file");
         // Restore backup before propagating the error
         let restore_err = restore_backup(&current_exe, &backup);
         if let Err(re) = restore_err {
@@ -222,15 +217,13 @@ fn install_binary(data: &[u8]) -> Result<()> {
     // Verify the new binary works
     match Command::new(&current_exe).arg("--version").output() {
         Ok(output) if output.status.success() => {
-            let _ = std::fs::remove_file(&backup).inspect_err(|e| {
-                tracing::warn!("upgrade: failed to remove backup {}: {e}", backup.display())
-            });
+            remove_leftover(&backup, "backup");
             Ok(())
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
-                tracing::warn!("upgrade: failed to restore backup after verification failure: {e}")
+                tracing::error!("upgrade: failed to restore backup after verification failure: {e}")
             });
             if let Err(re) = restore_err {
                 anyhow::bail!(
@@ -241,7 +234,7 @@ fn install_binary(data: &[u8]) -> Result<()> {
         }
         Err(e) => {
             let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
-                tracing::warn!("upgrade: failed to restore backup after verification error: {e}")
+                tracing::error!("upgrade: failed to restore backup after verification error: {e}")
             });
             if let Err(re) = restore_err {
                 anyhow::bail!(
@@ -250,6 +243,15 @@ fn install_binary(data: &[u8]) -> Result<()> {
             }
             anyhow::bail!("could not verify new binary: {e}; restored original");
         }
+    }
+}
+
+/// Remove a file that the upgrade left behind. A failure is logged at error level, because
+/// the default log filter hides warn. A silent leftover binary is a failure the user never
+/// sees (#2666).
+fn remove_leftover(path: &Path, what: &str) {
+    if let Err(e) = std::fs::remove_file(path) {
+        tracing::error!("upgrade: failed to remove {what} {}: {e}", path.display());
     }
 }
 
@@ -1376,5 +1378,17 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
     fn resolve_is_beta_no_config_defaults_false() {
         // No config available in a test environment, so defaults to release
         assert!(!resolve_is_beta(None));
+    }
+
+    #[test]
+    fn remove_leftover_logs_a_failed_removal_at_error_level() {
+        // #2666: a discarded removal error hid the leftover file from the user.
+        let dir = tempfile::TempDir::new().unwrap();
+        let stuck = dir.path().join("stuck");
+        // remove_file refuses a directory, so the removal fails.
+        std::fs::create_dir(&stuck).unwrap();
+        let logs = crate::test_log_capture::capture_logs(|| remove_leftover(&stuck, "temp file"));
+        assert!(logs.contains("ERROR"), "expected an ERROR line: {logs}");
+        assert!(logs.contains("failed to remove temp file"), "{logs}");
     }
 }

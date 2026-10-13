@@ -2,7 +2,7 @@
 //! MCP tool call.
 
 use serde_json::{Value, json};
-use tracing::{debug, warn};
+use tracing::{debug, error};
 
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
 use llmenv_mcp::mcp_client::McpHttpClient;
@@ -182,7 +182,7 @@ impl Action {
             .await
             .map(|text| strip_advisory(&text))
             .map_err(|e| {
-                warn!(action = ?self, error = %e, "MCP tool call failed");
+                error!(action = ?self, error = %e, "MCP tool call failed");
                 e
             })
     }
