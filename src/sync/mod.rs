@@ -5,15 +5,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing;
 
 /// True if the repo's working tree has staged or unstaged changes.
-fn working_tree_dirty(repo: &Path) -> bool {
-    git::working_tree_dirty(repo)
+///
+/// # Errors
+/// Returns an error when git cannot report the tree state (see `git::working_tree_dirty`).
+fn working_tree_dirty(repo: &Path) -> Result<bool> {
+    git::working_tree_dirty(repo).map_err(anyhow::Error::msg)
 }
 
 /// True if the current branch has commits not yet pushed to its upstream.
-/// Returns false if there's no upstream or git fails — we only want to nudge
-/// the user when we're certain.
-fn has_unpushed_commits(repo: &Path) -> bool {
-    git::has_unpushed_commits(repo)
+/// A branch with no upstream reports false.
+///
+/// # Errors
+/// Returns an error when git cannot report the commit count (see `git::has_unpushed_commits`).
+fn has_unpushed_commits(repo: &Path) -> Result<bool> {
+    git::has_unpushed_commits(repo).map_err(anyhow::Error::msg)
 }
 
 /// Result of [`commit_and_push`]: whether a commit was actually pushed.
@@ -79,7 +84,7 @@ pub fn commit_and_push(repo: &Path, message: &str, push: PushMode) -> Result<Syn
 
     // After staging, an empty `status --porcelain` means there is genuinely
     // nothing to commit — distinct from `git commit` failing for another reason.
-    if !working_tree_dirty(repo) {
+    if !working_tree_dirty(repo)? {
         return Ok(SyncOutcome::NothingToCommit);
     }
 
@@ -160,7 +165,7 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     // a fast-forward could clobber uncommitted edits anyway). Surface a
     // one-line nudge and return early; treat this as success so we don't
     // retry every shell prompt.
-    if working_tree_dirty(repo) {
+    if working_tree_dirty(repo)? {
         eprintln!(
             "llmenv: config in {} has uncommitted changes — run `llmenv sync` to commit and push",
             repo.display()
@@ -197,7 +202,7 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
 
     if pull_status.success() {
         write_state(state_dir, now)?;
-    } else if has_unpushed_commits(repo) {
+    } else if has_unpushed_commits(repo)? {
         eprintln!(
             "llmenv: config in {} has unpushed commits — run `llmenv sync` to push",
             repo.display()

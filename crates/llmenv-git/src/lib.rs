@@ -119,55 +119,149 @@ pub fn git_failure_detail(
 }
 
 /// Check if the working tree has staged or unstaged changes.
-pub fn working_tree_dirty(repo: &Path) -> bool {
-    secure_git()
+///
+/// # Errors
+/// Returns an error when git cannot start or exits non-zero. A failed read is not a clean tree.
+pub fn working_tree_dirty(repo: &Path) -> Result<bool, String> {
+    let output = secure_git()
         .args(["status", "--porcelain"])
         .current_dir(repo)
-        .stderr(Stdio::null())
         .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+        .map_err(|e| format!("cannot run git status in {}: {e}", repo.display()))?;
+    if !output.status.success() {
+        let detail = git_failure_detail(&output.stderr, &output.stdout, output.status);
+        return Err(format!("git status failed in {}: {detail}", repo.display()));
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 /// Check if current branch has commits not yet pushed to its upstream.
-/// Returns false if there's no upstream, git fails, or output can't be parsed —
-/// we only want to nudge the user when we're certain there are unpushed commits.
-pub fn has_unpushed_commits(repo: &Path) -> bool {
-    let output = match secure_git()
+/// A branch with no upstream returns `Ok(false)`, because it has no push target to compare with.
+///
+/// # Errors
+/// Returns an error when git cannot start, prints no count, or fails for any reason other than
+/// a missing upstream. Those cases are not "nothing to push".
+pub fn has_unpushed_commits(repo: &Path) -> Result<bool, String> {
+    let output = secure_git()
         .args(["rev-list", "--count", "@{u}..HEAD"])
         .current_dir(repo)
+        // Keeps git's message in English, so `is_missing_upstream` can match it.
+        .env("LC_ALL", "C")
         .output()
-    {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::error!("git rev-list count failed at {}: {}", repo.display(), e);
-            return false;
-        }
-    };
-
+        .map_err(|e| format!("cannot run git rev-list in {}: {e}", repo.display()))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        tracing::warn!(
-            "git rev-list count failed at {} with exit {}: {}",
-            repo.display(),
-            output.status,
-            stderr
-        );
-        return false;
-    }
-
-    match parse_commit_count(&output.stdout) {
-        Some(count) => count > 0,
-        None => {
-            tracing::warn!("git rev-list count output invalid at {}", repo.display());
-            false
+        let detail = git_failure_detail(&output.stderr, &output.stdout, output.status);
+        if is_missing_upstream(&detail) {
+            return Ok(false);
         }
+        return Err(format!(
+            "git rev-list failed in {}: {detail}",
+            repo.display()
+        ));
     }
+    parse_commit_count(&output.stdout)
+        .map(|count| count > 0)
+        .ok_or_else(|| format!("git rev-list printed no commit count in {}", repo.display()))
+}
+
+/// True when git's failure text says the branch has no upstream. A `@{u}` rev that does not
+/// resolve gives the same error, so both forms count.
+fn is_missing_upstream(detail: &str) -> bool {
+    detail.contains("no upstream") || detail.contains("@{u}")
 }
 
 fn parse_commit_count(output: &[u8]) -> Option<u32> {
     std::str::from_utf8(output)
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code, where a setup failure should panic"
+)]
+mod repo_state_tests {
+    use super::*;
+
+    fn git_init(dir: &Path) {
+        let status = secure_git()
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .expect("spawn git init");
+        assert!(status.success(), "git init failed in {}", dir.display());
+    }
+
+    #[test]
+    fn working_tree_dirty_is_false_for_a_clean_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        git_init(dir.path());
+        assert_eq!(working_tree_dirty(dir.path()), Ok(false));
+    }
+
+    #[test]
+    fn working_tree_dirty_is_true_with_an_untracked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        git_init(dir.path());
+        std::fs::write(dir.path().join("new.txt"), b"x").unwrap();
+        assert_eq!(working_tree_dirty(dir.path()), Ok(true));
+    }
+
+    #[test]
+    fn working_tree_dirty_errors_outside_a_repo_instead_of_reporting_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = working_tree_dirty(dir.path()).unwrap_err();
+        assert!(err.contains("git status failed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn has_unpushed_commits_is_false_when_the_branch_has_no_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        git_init(dir.path());
+        // An unborn HEAD reports "no such branch", not a missing upstream, so commit first.
+        let status = secure_git()
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .expect("spawn git commit");
+        assert!(status.success(), "git commit failed");
+        assert_eq!(has_unpushed_commits(dir.path()), Ok(false));
+    }
+
+    #[test]
+    fn has_unpushed_commits_errors_outside_a_repo_instead_of_reporting_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = has_unpushed_commits(dir.path()).unwrap_err();
+        assert!(
+            err.contains("git rev-list failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn is_missing_upstream_matches_both_git_upstream_messages() {
+        assert!(is_missing_upstream(
+            "fatal: no upstream configured for branch 'x'"
+        ));
+        assert!(is_missing_upstream(
+            "fatal: ambiguous argument '@{u}..HEAD'"
+        ));
+        assert!(!is_missing_upstream("fatal: not a git repository"));
+    }
 }
 
 #[cfg(test)]

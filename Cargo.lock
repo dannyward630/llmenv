@@ -1338,6 +1338,7 @@ name = "llmenv-git"
 version = "3.12.2"
 dependencies = [
  "proptest",
+ "tempfile",
  "tracing",
 ]
 
