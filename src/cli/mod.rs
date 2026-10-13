@@ -3509,21 +3509,19 @@ fn render_task_ls_human(
     state_dir: &Path,
     tasks: Vec<crate::task::Task>,
     use_color: bool,
-) -> String {
+) -> anyhow::Result<String> {
     if tasks.is_empty() {
-        return "No tasks.\n".to_string();
+        return Ok("No tasks.\n".to_string());
     }
-    let priority: Vec<String> = crate::task::project::current_tag()
-        .ok()
-        .map(|p| {
-            crate::task::session::open_sessions_for_project(state_dir, &p)
-                .into_iter()
-                .map(|s| s.id)
-                .collect()
-        })
-        .unwrap_or_default();
+    let priority: Vec<String> = match crate::task::project::current_tag() {
+        Ok(p) => crate::task::session::open_sessions_strict(state_dir, &p)?
+            .into_iter()
+            .map(|s| s.id)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
     let labels: std::collections::HashMap<String, String> =
-        crate::task::session::list_sessions(state_dir)
+        crate::task::session::list_sessions_strict(state_dir)?
             .into_iter()
             .map(|s| (s.id.clone(), s.name.unwrap_or(s.id)))
             .collect();
@@ -3549,7 +3547,7 @@ fn render_task_ls_human(
         out.push_str(&render_task_ls_row(row, use_color));
         out.push('\n');
     }
-    out
+    Ok(out)
 }
 
 /// Render one indented `task ls` row: `<indent><glyph> <label> <slug>  <title>`
@@ -3750,7 +3748,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             let mut tasks = crate::task::try_list_tasks(&state_dir)?;
             if current_project {
                 let project = current_project_tag()?;
-                tasks = crate::task::filter_tasks_for_project(&state_dir, &project, tasks);
+                tasks = crate::task::filter_tasks_for_project(&state_dir, &project, tasks)?;
             }
             if let Some(session_id) = &session {
                 tasks.retain(|t| t.session.as_deref() == Some(session_id.as_str()));
@@ -3775,7 +3773,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
                 None => {
                     use std::io::IsTerminal;
                     let use_color = should_use_color(Some(color), std::io::stdout().is_terminal());
-                    print!("{}", render_task_ls_human(&state_dir, tasks, use_color));
+                    print!("{}", render_task_ls_human(&state_dir, tasks, use_color)?);
                 }
             }
         }
@@ -3991,7 +3989,7 @@ impl ShowTarget {
 /// is visible in one call.
 fn run_task_show_current_or_next(state_dir: &Path, target: ShowTarget) -> anyhow::Result<()> {
     let project = current_project_tag()?;
-    let open_sessions = crate::task::session::open_sessions_for_project(state_dir, &project);
+    let open_sessions = crate::task::session::open_sessions_strict(state_dir, &project)?;
     if open_sessions.is_empty() {
         anyhow::bail!("no open session for this project");
     }
@@ -4207,7 +4205,7 @@ fn run_task_session_command(
             }
         }
         TaskSessionCommand::Ls => {
-            let mut sessions: Vec<_> = session::list_sessions(state_dir)
+            let mut sessions: Vec<_> = session::list_sessions_strict(state_dir)?
                 .into_iter()
                 .filter(session::Session::is_open)
                 .collect();

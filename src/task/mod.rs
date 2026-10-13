@@ -24,6 +24,7 @@ pub(crate) use resolve::resolve_identifier;
 
 pub(crate) use relation::Placement;
 use relation::Relation;
+use session::Session;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -1212,10 +1213,21 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 pub(crate) fn session_start_reminder(state_dir: &Path) -> String {
     // A store that cannot be read leaves the lists empty. The empty-session reminder below names
     // the error, so the agent still sees it.
-    let tasks = list_tasks_strict(state_dir)
-        .map(|tasks| tasks_for_current_project(state_dir, tasks))
-        .unwrap_or_default();
+    // A session file that cannot be read is named here, the same way the Stop reminder names it,
+    // so its tasks are not dropped without a word (#2665).
+    let mut read_warning = String::new();
+    let tasks = match list_tasks_strict(state_dir) {
+        Ok(tasks) => match tasks_for_current_project(state_dir, tasks) {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                read_warning = store_warning_text(&e);
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    };
     combine_reminders([
+        read_warning,
         for_current_project(|project| session::resume_reminders(state_dir, project)),
         wip_reminder(
             &tasks,
@@ -1298,15 +1310,9 @@ struct IdleSession {
 /// (#2339). A `waiting` task makes a session quiet on purpose, so such a
 /// session is not idle.
 #[must_use]
-fn idle_sessions(
-    state_dir: &Path,
-    all_tasks: &[Task],
-    project: &str,
-    caller: Option<&str>,
-) -> Vec<IdleSession> {
+fn idle_sessions(open: Vec<Session>, all_tasks: &[Task]) -> Vec<IdleSession> {
     let by_slug: HashMap<&str, &Task> = all_tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
-    session::open_sessions_visible_to(state_dir, project, caller)
-        .into_iter()
+    open.into_iter()
         .filter_map(|session| {
             let tasks: Vec<Task> = all_tasks
                 .iter()
@@ -1370,12 +1376,13 @@ fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) ->
         Ok(tasks) => tasks,
         Err(warning) => return warning,
     };
-    let open_ids: Vec<String> = session::open_sessions_visible_to(state_dir, project, caller)
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
+        Ok(open) => open,
+        Err(e) => return store_warning_text(&e),
+    };
+    let open_ids: Vec<String> = open.iter().map(|s| s.id.clone()).collect();
     let stalled = relation::stalled_parent_lines(&tasks, &open_ids);
-    let idle = idle_sessions(state_dir, &tasks, project, caller)
+    let idle = idle_sessions(open, &tasks)
         .iter()
         .map(|idle| {
             let id = &idle.session.id;
@@ -1488,8 +1495,11 @@ fn empty_session_lines(
     project: &str,
     caller: Option<&str>,
 ) -> Vec<String> {
-    session::open_sessions_visible_to(state_dir, project, caller)
-        .into_iter()
+    let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
+        Ok(open) => open,
+        Err(e) => return vec![store_warning_text(&e)],
+    };
+    open.into_iter()
         .filter(|s| {
             !tasks
                 .iter()
@@ -1515,12 +1525,12 @@ fn empty_session_lines(
 /// may no longer be "open" — whose `project` matches. Mirrors
 /// [`session_finish_reminders`]'s own project resolution. Empty when the
 /// project can't be resolved (degrades silently — hooks must never error).
-fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> Vec<Task> {
+fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> anyhow::Result<Vec<Task>> {
     let project = match project::current_tag() {
         Ok(project) => project,
         Err(e) => {
             tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            return Vec::new();
+            return Ok(Vec::new());
         }
     };
     filter_tasks_for_project(state_dir, &project, tasks)
@@ -1553,14 +1563,17 @@ fn tasks_visible_to(state_dir: &Path, caller: Option<&str>) -> anyhow::Result<Ve
 /// mandatory sessions) are dropped: they can't be attributed to any
 /// project, and the conservative default is to never surface a task we
 /// can't attribute.
-#[must_use]
+///
+/// # Errors
+/// Returns an error if a session file is corrupt or the sessions dir cannot be read. A tolerant
+/// read would drop that session's tasks without a word (#2665). The caller reports the error.
 pub(crate) fn filter_tasks_for_project(
     state_dir: &Path,
     project: &str,
     tasks: Vec<Task>,
-) -> Vec<Task> {
-    let session_ids = session::session_ids_for_project(state_dir, project);
-    keep_tasks_in_sessions(tasks, &session_ids)
+) -> anyhow::Result<Vec<Task>> {
+    let session_ids = session::try_session_ids_for_project(state_dir, project)?;
+    Ok(keep_tasks_in_sessions(tasks, &session_ids))
 }
 
 /// Keep the tasks whose session is in `session_ids`. A task with no session is dropped.
@@ -1713,8 +1726,12 @@ fn session_finish_reminders(state_dir: &Path, caller: Option<&str>) -> String {
 }
 
 fn finish_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
+    let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
+        Ok(open) => open,
+        Err(e) => return store_warning_text(&e),
+    };
     let mut lines = Vec::new();
-    for session in session::open_sessions_visible_to(state_dir, project, caller) {
+    for session in open {
         let (done, total) = session::session_progress(state_dir, &session.id);
         if total == 0 || done < total {
             continue;
@@ -1827,7 +1844,7 @@ fn waiting_reminder(tasks: &[Task]) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::session::{StartDecision, StartOutcome, open_sessions_for_project, start_session};
+    use super::session::{StartDecision, StartOutcome, open_sessions_strict, start_session};
     use super::*;
     use tempfile::TempDir;
 
@@ -3116,7 +3133,8 @@ mod tests {
         let (session_id, first, second) = idle_session_in_project(dir.path(), &project);
         block_task(dir.path(), &first.slug, &second.slug).expect("test");
 
-        let idle = idle_sessions(dir.path(), &list_tasks(dir.path()), &project, None);
+        let open = session::try_open_sessions_visible_to(dir.path(), &project, None).expect("test");
+        let idle = idle_sessions(open, &list_tasks(dir.path()));
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].session.id, session_id);
         assert_eq!(idle[0].next.slug, second.slug);
@@ -3373,7 +3391,8 @@ mod tests {
                     expected.insert(sid, open);
                 }
             }
-            let idle = idle_sessions(dir.path(), &list_tasks(dir.path()), PROJECT, None);
+            let open = session::try_open_sessions_visible_to(dir.path(), PROJECT, None).expect("test");
+            let idle = idle_sessions(open, &list_tasks(dir.path()));
             let got: std::collections::BTreeMap<String, usize> = idle
                 .iter()
                 .map(|i| (i.session.id.clone(), i.open_count))
@@ -3782,7 +3801,7 @@ mod tests {
         let no_session = t("legacy", TaskState::Open, None, None);
         let tasks = vec![in_project.clone(), other_session, no_session];
 
-        let kept = filter_tasks_for_project(dir.path(), "proj-a", tasks);
+        let kept = filter_tasks_for_project(dir.path(), "proj-a", tasks).expect("test");
         assert_eq!(
             kept.iter().map(|x| x.slug.as_str()).collect::<Vec<_>>(),
             [in_project.slug.as_str()]
@@ -4114,7 +4133,8 @@ mod tests {
         )
         .expect("test");
         start_task(dir.path(), &task.slug, false).expect("test");
-        let reloaded = open_sessions_for_project(dir.path(), PROJECT)
+        let reloaded = open_sessions_strict(dir.path(), PROJECT)
+            .expect("test")
             .into_iter()
             .find(|s| s.id == session.id)
             .expect("test");
@@ -4521,7 +4541,7 @@ mod tests {
                     .filter(|t| t.session.as_deref().is_some_and(|s| a_id_set.contains(s)))
                     .count();
 
-                let result = filter_tasks_for_project(dir.path(), "proj-a", tasks);
+                let result = filter_tasks_for_project(dir.path(), "proj-a", tasks).expect("test");
 
                 for t in &result {
                     // Subset: every returned task was in the input.

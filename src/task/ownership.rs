@@ -39,7 +39,8 @@ pub(crate) fn caller_session(
     project: &str,
     owner: &EngineIdentity,
 ) -> anyhow::Result<Caller> {
-    let open = session::try_open_sessions_for_project(state_dir, project)?;
+    // Strict read: a corrupt session file must not hide the open session that owns this caller (#2665).
+    let open = session::open_sessions_strict(state_dir, project)?;
     Ok(match session::pick_open_session(open, owner) {
         Ok(picked) if picked.visible_to(owner.session_id.as_deref()) => Caller::Session(picked.id),
         Ok(picked) => Caller::Unidentified(format!(

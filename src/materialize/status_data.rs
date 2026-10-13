@@ -259,7 +259,14 @@ fn collect_tasks() -> Option<TasksData> {
 /// Internal helper taking injectable state dir + project tag so tests can
 /// exercise this without touching the real, ambient state dir or cwd.
 fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> TasksData {
-    let open_sessions = crate::task::session::open_sessions_for_project(state_dir, project);
+    let open_sessions = match crate::task::session::open_sessions_strict(state_dir, project) {
+        Ok(open) => open,
+        Err(e) => {
+            // The status line has no text channel for a warning, so the error goes to the log.
+            tracing::error!(error = %e, "cannot read the open sessions; the status line shows none");
+            Vec::new()
+        }
+    };
     let session = if open_sessions.is_empty() {
         None
     } else {

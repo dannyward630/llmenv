@@ -221,8 +221,10 @@ fn todowrite(
         return msg;
     }
 
-    let tracked = match task::try_list_tasks(state_dir) {
-        Ok(tasks) => task::filter_tasks_for_project(state_dir, project, tasks),
+    let tracked = match task::try_list_tasks(state_dir)
+        .and_then(|tasks| task::filter_tasks_for_project(state_dir, project, tasks))
+    {
+        Ok(tasks) => tasks,
         Err(e) => {
             tracing::error!(error = %e, "task redirect: couldn't read the task store");
             return deny(&format!(
@@ -875,7 +877,12 @@ mod tests {
             dir.path(),
             PROJECT,
         );
-        assert_eq!(session::list_sessions(dir.path()).len(), 1);
+        assert_eq!(
+            session::list_sessions_strict(dir.path())
+                .expect("test")
+                .len(),
+            1
+        );
 
         let sessions_dir = task::tasks_dir(dir.path()).join("sessions");
         std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -894,7 +901,9 @@ mod tests {
         }
         assert!(out.starts_with("__DENY__:"), "{out}");
         assert_eq!(
-            session::list_sessions(dir.path()).len(),
+            session::list_sessions_strict(dir.path())
+                .expect("test")
+                .len(),
             1,
             "must not auto-start a second session over an unreadable store: {out}"
         );
