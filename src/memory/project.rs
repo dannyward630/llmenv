@@ -19,28 +19,48 @@ fn repo_name_from_url(url: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = secure_git().args(args).current_dir(dir).output().ok()?;
+/// The trimmed stdout of `git args` in `dir`. `None` is a normal answer: git ran and exited
+/// non-zero (no remote, not a repository), or it printed nothing.
+///
+/// # Errors
+/// git cannot start in `dir`, or it prints bytes that are not UTF-8. A failed start must not
+/// look like "no answer", because the caller would then pick a different project name.
+fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
+    let output = secure_git()
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot run git in {} to name the project: {e}",
+                dir.display()
+            )
+        })?;
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
-    let text = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!text.is_empty()).then_some(text)
+    let text = String::from_utf8(output.stdout)
+        .map_err(|e| anyhow::anyhow!("git in {} printed non-UTF-8 output: {e}", dir.display()))?;
+    let text = text.trim().to_string();
+    Ok((!text.is_empty()).then_some(text))
 }
 
 /// The project name for a session whose working directory is `cwd`.
-pub(crate) fn session_project(cwd: &Path) -> Option<String> {
-    if let Some(name) = git_output(cwd, &["config", "--get", "remote.origin.url"])
+///
+/// # Errors
+/// git cannot start in `cwd` (see [`git_output`]). The caller decides what the agent sees.
+pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<Option<String>> {
+    if let Some(name) = git_output(cwd, &["config", "--get", "remote.origin.url"])?
         .as_deref()
         .and_then(repo_name_from_url)
     {
-        return Some(name);
+        return Ok(Some(name));
     }
     // The common dir is the main repo's `.git`, also from a linked worktree.
     if let Some(name) = git_output(
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
+    )?
     .and_then(|common| std::fs::canonicalize(common).ok())
     .and_then(|common| {
         common
@@ -48,9 +68,9 @@ pub(crate) fn session_project(cwd: &Path) -> Option<String> {
             .and_then(Path::file_name)
             .map(|n| n.to_string_lossy().into_owned())
     }) {
-        return Some(name);
+        return Ok(Some(name));
     }
-    cwd.file_name().map(|n| n.to_string_lossy().into_owned())
+    Ok(cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
 }
 
 #[cfg(test)]
@@ -94,7 +114,10 @@ mod tests {
         );
         let sub = checkout.join("src");
         std::fs::create_dir(&sub).unwrap();
-        assert_eq!(session_project(&sub).as_deref(), Some("real-name"));
+        assert_eq!(
+            session_project(&sub).ok().flatten().as_deref(),
+            Some("real-name")
+        );
     }
 
     #[test]
@@ -105,7 +128,10 @@ mod tests {
         git(&repo, &["init", "-q"]);
         let sub = repo.join("deep");
         std::fs::create_dir(&sub).unwrap();
-        assert_eq!(session_project(&sub).as_deref(), Some("local-repo"));
+        assert_eq!(
+            session_project(&sub).ok().flatten().as_deref(),
+            Some("local-repo")
+        );
     }
 
     #[test]
@@ -113,8 +139,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plain = dir.path().join("plain-dir");
         std::fs::create_dir(&plain).unwrap();
-        assert_eq!(session_project(&plain).as_deref(), Some("plain-dir"));
-        assert_eq!(session_project(Path::new("/")), None);
+        assert_eq!(
+            session_project(&plain).ok().flatten().as_deref(),
+            Some("plain-dir")
+        );
+        assert_eq!(session_project(Path::new("/")).ok().flatten(), None);
+    }
+
+    #[test]
+    fn session_project_errors_when_git_cannot_start_in_the_directory() {
+        let missing = Path::new("/no/such/dir/for/llmenv-project");
+        let err = session_project(missing).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("cannot run git") && text.contains("/no/such/dir/for/llmenv-project"),
+            "the error must name git and the directory: {text}"
+        );
     }
 
     mod props {

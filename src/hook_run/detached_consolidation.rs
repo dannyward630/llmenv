@@ -68,7 +68,11 @@ fn run_consolidation_at(
     let cwd = std::env::current_dir().map_err(|e| {
         anyhow::anyhow!("cannot read the working directory to name the project: {e}")
     })?;
-    let Some(project) = crate::memory::project::session_project(&cwd) else {
+    let project = crate::memory::project::session_project(&cwd)
+        .inspect_err(|e| tracing::error!("consolidation-run: {e:#}"))
+        .ok()
+        .flatten();
+    let Some(project) = project else {
         tracing::error!(
             "consolidation-run: no project name for {}; consolidation skipped",
             cwd.display()

@@ -4058,9 +4058,8 @@ fn run_task_session_command(
         } => {
             let explicit = resume_context.into_context()?;
             let mut detected = explicit.clone();
-            detected.fill_detected(
-                crate::task::resume::git_branch(&std::env::current_dir()?).as_deref(),
-            );
+            let branch = crate::task::resume::git_branch(&std::env::current_dir()?)?;
+            detected.fill_detected(branch.as_deref());
             let is_resume = resume.is_some();
             let decision = match (resume, replace, new) {
                 (Some(id), false, false) => StartDecision::Resume(id),

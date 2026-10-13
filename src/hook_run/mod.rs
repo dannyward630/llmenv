@@ -518,19 +518,32 @@ fn wake_args(
     settings: Option<MemoryHookSettings>,
     payload: &serde_json::Value,
     cwd: &str,
-) -> WakeUpArgs {
+) -> (WakeUpArgs, Option<String>) {
     let adaptive = settings.is_some_and(|s| s.adaptive_recall);
     let wants_project = match event {
         HookEvent::SessionStart => true,
         HookEvent::TurnStart => !adaptive,
         _ => false,
     };
-    WakeUpArgs {
+    let dir = hook_cwd(payload, cwd);
+    let mut notice = None;
+    let project = if wants_project {
+        crate::memory::project::session_project(&dir)
+            .inspect_err(|e| tracing::error!("memory recall project scope: {e:#}"))
+            .unwrap_or_else(|e| {
+                notice = Some(format!(
+                    "llmenv: memory recall is not scoped to a project: {e:#}."
+                ));
+                None
+            })
+    } else {
+        None
+    };
+    let args = WakeUpArgs {
         max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
-        project: wants_project
-            .then(|| crate::memory::project::session_project(&hook_cwd(payload, cwd)))
-            .flatten(),
-    }
+        project,
+    };
+    (args, notice)
 }
 
 /// Whether `event` writes to the recall ledger without any MCP call (#2249).
@@ -1507,7 +1520,7 @@ fn run_inner(
         // can be top-level or bundle-declared, when the chunk has none of its own.
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
-        let wake = wake_args(event, settings, stdin_payload, &env.cwd);
+        let (wake, project_notice) = wake_args(event, settings, stdin_payload, &env.cwd);
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
             .inspect_err(
@@ -1596,7 +1609,7 @@ fn run_inner(
             &ctx,
             crate::paths::state_dir(),
         );
-        let health_notice = if event == HookEvent::SessionStart {
+        let session_notice = if event == HookEvent::SessionStart {
             let health = mcp_health::session_start_notice(rt, &config, config_dir, &active);
             match (health, roots_notice) {
                 (Some(h), Some(r)) => Some(format!("{h}{r}")),
@@ -1604,6 +1617,12 @@ fn run_inner(
             }
         } else {
             None
+        };
+        // The project notice applies to every event, because the recall of every event runs
+        // without its project scope when the lookup fails (#2688).
+        let health_notice = match (session_notice, project_notice) {
+            (Some(s), Some(p)) => Some(format!("{s}\n{p}")),
+            (s, p) => s.or(p),
         };
         if resumes_checkpoints(
             event,
@@ -7456,15 +7475,30 @@ mod adaptive_routing_tests {
             default_type: None,
             default_importance: None,
         });
-        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/");
+        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/").0;
         assert_eq!(start.project.as_deref(), Some("wake-repo"));
         // #2253: the stateless TurnStart recall is scoped to the session project.
-        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/");
+        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/").0;
         assert_eq!(stateless.project.as_deref(), Some("wake-repo"));
-        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/");
+        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/").0;
         assert_eq!(adaptive_turn.project, None, "the ledger holds the project");
-        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/");
+        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/").0;
         assert_eq!(other.project, None);
+    }
+
+    #[test]
+    fn wake_args_tells_the_agent_when_git_cannot_name_the_project() {
+        let payload = serde_json::json!({ "cwd": "/no/such/dir/for/llmenv-hook" });
+        let (args, notice) = wake_args(HookEvent::SessionStart, None, &payload, "/");
+        assert_eq!(
+            args.project, None,
+            "no project may be guessed from a failed git start"
+        );
+        let notice = notice.unwrap_or_default();
+        assert!(
+            notice.contains("cannot run git") && notice.contains("/no/such/dir/for/llmenv-hook"),
+            "the agent must see the git failure and the directory: {notice}"
+        );
     }
 
     #[test]

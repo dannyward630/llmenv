@@ -340,7 +340,15 @@ fn ensure_session(
         }
     };
     let detected = match std::env::current_dir() {
-        Ok(cwd) => crate::task::resume::ResumeContext::detected(&cwd),
+        Ok(cwd) => match crate::task::resume::ResumeContext::detected(&cwd) {
+            Ok(detected) => detected,
+            Err(e) => {
+                return Err(deny(&format!(
+                    "cannot read the git branch for the auto-started task session ({e:#}); \
+                     track this with `llmenv task` manually."
+                )));
+            }
+        },
         Err(e) => {
             eprintln!(
                 "llmenv: cannot read the working directory ({e}), so the auto-started task \
