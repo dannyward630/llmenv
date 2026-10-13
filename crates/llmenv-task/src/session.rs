@@ -329,92 +329,14 @@ pub fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Sessi
     })
 }
 
-/// Every session in the store, tolerating a missing or unreadable store by
-/// treating it as empty (logging the cause via `tracing::warn!`) — same
-/// tolerance policy as [`super::list_tasks`], a single bad file must never
-/// block `session ls` or a hook. Callers that must distinguish "genuinely
-/// empty" from "couldn't read the store" should use [`try_list_sessions`]
-/// instead (#1112).
-#[must_use]
-pub fn list_sessions(state_dir: &Path) -> Vec<Session> {
-    match try_list_sessions(state_dir) {
-        Ok(sessions) => sessions,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to read sessions dir; treating as empty");
-            Vec::new()
-        }
-    }
-}
-
-/// Fallible sibling of [`list_sessions`]: propagates a genuine read error on
-/// the sessions directory itself instead of collapsing it to an empty `Vec`
-/// indistinguishable from "no sessions yet" (#1112). A missing directory
-/// still resolves to `Ok(vec![])`. Per-entry `DirEntry` errors and corrupt
-/// session files are logged via `tracing::warn!` and skipped, never silently
-/// dropped.
-///
-/// # Errors
-/// Returns an error if the sessions directory exists but can't be read (e.g.
-/// permission denied).
-pub fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
-    let dir = sessions_dir(state_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("reading sessions dir {}", dir.display()))
-            );
-        }
-    };
-    let mut sessions = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
-                continue;
-            }
-        };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        match std::fs::read_to_string(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|content| Ok(serde_json::from_str::<Session>(&content)?))
-        {
-            Ok(session) => sessions.push(session),
-            // Distinguish a genuine read failure (e.g. permission denied on
-            // this one file) from corrupt JSON content — same reasoning as
-            // `try_list_tasks` (#1112).
-            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
-                tracing::error!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping unreadable session file"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping corrupt session file"
-                );
-            }
-        }
-    }
-    Ok(sessions)
-}
-
-/// Every session in the store, failing on any file that cannot be read or parsed. Unlike
-/// [`try_list_sessions`], a corrupt file is an error that names the file, not a skipped entry.
+/// Every session in the store, failing on any file that cannot be read or parsed. A corrupt
+/// file is an error that names the file, not a skipped entry.
 /// The Stop reminder needs the full set, so a missing task in it must come from a real absence
 /// and not from a corrupt file (#2628).
 ///
 /// # Errors
 /// Returns an error if the store cannot be read or any session file is corrupt.
-fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
+pub fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
     let dir = sessions_dir(state_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -436,79 +358,48 @@ fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("reading session file {}", path.display()))?;
         let session: Session = serde_json::from_str(&content).with_context(|| {
-            format!("session file {} is not valid session JSON", path.display())
+            format!(
+                "session file {} is not valid session JSON. Repair or delete the file, then retry",
+                path.display()
+            )
         })?;
         sessions.push(session);
     }
     Ok(sessions)
 }
 
-/// Every currently open session tagged with `project`, tolerating a missing
-/// or unreadable store by treating it as empty. Callers that must distinguish
-/// "genuinely empty" from "couldn't read the store" should use
-/// [`try_open_sessions_for_project`] instead (#1112).
-#[must_use]
-pub fn open_sessions_for_project(state_dir: &Path, project: &str) -> Vec<Session> {
-    match try_open_sessions_for_project(state_dir, project) {
-        Ok(sessions) => sessions,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to read sessions dir; treating as empty");
-            Vec::new()
-        }
-    }
-}
-
-/// Fallible sibling of [`open_sessions_for_project`]: propagates a genuine
-/// read error on the sessions directory instead of reporting "no open
-/// sessions", which would make `TaskCreate`'s auto-start auto-create a
-/// second session over an existing-but-unreadable store (#1112).
+/// Every open session tagged with `project`, read strictly. A corrupt session file is an error that names the file,
+/// so its tasks are not dropped without a word (#2665).
 ///
 /// # Errors
-/// Returns an error if the sessions directory exists but can't be read.
-pub fn try_open_sessions_for_project(
-    state_dir: &Path,
-    project: &str,
-) -> anyhow::Result<Vec<Session>> {
-    Ok(try_list_sessions(state_dir)?
+/// Returns an error if the sessions directory cannot be read or a session file is corrupt.
+pub fn open_sessions_strict(state_dir: &Path, project: &str) -> anyhow::Result<Vec<Session>> {
+    Ok(list_sessions_strict(state_dir)?
         .into_iter()
         .filter(|s| s.is_open() && s.project == project)
         .collect())
 }
 
-/// Every session id ever tagged with `project`, open or closed — the basis
-/// for "this project's tasks" ([`super::filter_tasks_for_project`], #1117),
-/// which is deliberately broader than [`open_sessions_for_project`]: a
-/// finished session's tasks still belong to the project that ran them.
-#[must_use]
-pub fn session_ids_for_project(
-    state_dir: &Path,
-    project: &str,
-) -> std::collections::HashSet<String> {
-    list_sessions(state_dir)
-        .into_iter()
-        .filter(|s| s.project == project)
-        .map(|s| s.id)
-        .collect()
-}
-
-/// [`open_sessions_for_project`], cut to the sessions that [`Session::visible_to`] `caller`.
-#[must_use]
-pub(crate) fn open_sessions_visible_to(
+/// [`open_sessions_strict`], cut to the sessions that [`Session::visible_to`] `caller` (#2665).
+///
+/// # Errors
+/// Returns an error if the sessions directory cannot be read or a session file is corrupt.
+pub fn try_open_sessions_visible_to(
     state_dir: &Path,
     project: &str,
     caller: Option<&str>,
-) -> Vec<Session> {
-    let mut sessions = open_sessions_for_project(state_dir, project);
+) -> anyhow::Result<Vec<Session>> {
+    let mut sessions = open_sessions_strict(state_dir, project)?;
     sessions.retain(|s| s.visible_to(caller));
-    sessions
+    Ok(sessions)
 }
 
-/// Fallible [`session_ids_for_project`] over [`list_sessions_strict`]. A corrupt session file is
+/// The id of every session ever tagged with `project`, over [`list_sessions_strict`]. A corrupt file is
 /// an error, so the caller can report it instead of losing that file's tasks (#2628).
 ///
 /// # Errors
 /// Returns an error if any session file cannot be read or parsed.
-pub(crate) fn try_session_ids_for_project(
+pub fn try_session_ids_for_project(
     state_dir: &Path,
     project: &str,
 ) -> anyhow::Result<std::collections::HashSet<String>> {
@@ -524,7 +415,7 @@ pub(crate) fn try_session_ids_for_project(
 ///
 /// # Errors
 /// Returns an error if any session file cannot be read or parsed.
-pub(crate) fn try_session_ids_visible_to(
+pub fn try_session_ids_visible_to(
     state_dir: &Path,
     project: &str,
     caller: Option<&str>,
@@ -540,7 +431,7 @@ pub(crate) fn try_session_ids_visible_to(
 /// session doesn't exist or isn't open — a dangling `task.session` reference
 /// (deleted session file) must never fail the task mutation that triggered
 /// this touch. A present-but-corrupt session file is tolerated the same way,
-/// but warned (matching [`list_sessions`]) rather than swallowed silently.
+/// but warned rather than swallowed silently.
 ///
 /// Runs the read-modify-write under the store lock: it's always called from
 /// outside a held lock (after a task mutation's own lock has been released),
@@ -596,7 +487,7 @@ pub fn start_session_as(
         StartDecision::Auto => {
             // Fallible read: an unreadable store must not look empty and get a
             // duplicate session on top of it (#1112).
-            let existing = try_open_sessions_for_project(state_dir, project)?;
+            let existing = open_sessions_strict(state_dir, project)?;
             if !existing.is_empty() {
                 anyhow::bail!(checkpoint_error(&existing, request.owner));
             }
@@ -614,7 +505,7 @@ pub fn start_session_as(
             Ok(StartOutcome::Resumed(session))
         }
         StartDecision::Replace => {
-            let existing = try_open_sessions_for_project(state_dir, project)?;
+            let existing = open_sessions_strict(state_dir, project)?;
             let mut abandoned = Vec::with_capacity(existing.len());
             for session in existing {
                 abandoned.push(abandon_session(state_dir, session)?);
@@ -1054,7 +945,11 @@ pub(crate) fn missing_context_reminders(
     project: &str,
     caller: Option<&str>,
 ) -> String {
-    open_sessions_visible_to(state_dir, project, caller)
+    let sessions = match try_open_sessions_visible_to(state_dir, project, caller) {
+        Ok(sessions) => sessions,
+        Err(e) => return super::store_warning_text(&e),
+    };
+    sessions
         .iter()
         .filter(|session| session.resume.needs_nudge())
         .filter_map(|session| match try_tasks_in_session(state_dir, &session.id) {
@@ -1097,7 +992,11 @@ const MAX_REMINDER_CONTEXT_CHARS: usize = 2_000;
 /// Like the other reminders it does not presume the session is the reader's own (#1028).
 #[must_use]
 pub(crate) fn resume_reminders(state_dir: &Path, project: &str) -> String {
-    open_sessions_for_project(state_dir, project)
+    let sessions = match open_sessions_strict(state_dir, project) {
+        Ok(sessions) => sessions,
+        Err(e) => return super::store_warning_text(&e),
+    };
+    sessions
         .iter()
         .filter(|session| !session.resume.is_empty())
         .map(|session| {
@@ -1145,6 +1044,18 @@ mod tests {
 
     const PROJECT_A: &str = "project-a-0000000000";
     const PROJECT_B: &str = "project-b-0000000000";
+
+    #[test]
+    fn resume_reminders_names_a_corrupt_session_file_instead_of_dropping_it() {
+        let dir = TempDir::new().expect("test");
+        std::fs::create_dir_all(sessions_dir(dir.path())).expect("test");
+        std::fs::write(session_path(dir.path(), "bad-session"), "{ not json").expect("test");
+        let text = resume_reminders(dir.path(), PROJECT_A);
+        assert!(
+            text.contains("were not checked"),
+            "a corrupt file must be reported: {text}"
+        );
+    }
 
     // --- engine ownership (#2365) ---
 
@@ -1775,13 +1686,13 @@ mod tests {
     #[test]
     fn list_sessions_empty_store_is_empty() {
         let dir = TempDir::new().expect("test");
-        assert!(list_sessions(dir.path()).is_empty());
+        assert!(list_sessions_strict(dir.path()).expect("test").is_empty());
     }
 
     #[test]
-    fn try_list_sessions_missing_store_is_empty_not_error() {
+    fn list_sessions_strict_missing_store_is_empty_not_error() {
         let dir = TempDir::new().expect("test");
-        assert_eq!(try_list_sessions(dir.path()).unwrap(), Vec::new());
+        assert_eq!(list_sessions_strict(dir.path()).unwrap(), Vec::new());
     }
 
     proptest::proptest! {
@@ -1828,7 +1739,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn try_open_sessions_for_project_unreadable_store_errors() {
+    fn open_sessions_strict_unreadable_store_errors() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = TempDir::new().expect("test");
@@ -1837,10 +1748,7 @@ mod tests {
         std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let readable_anyway = std::fs::read_dir(&sessions).is_ok();
-        let result = try_open_sessions_for_project(dir.path(), PROJECT_A);
-        // The tolerant wrapper must degrade to empty (not panic/propagate) while
-        // the store is still unreadable — check before restoring permissions.
-        let tolerant_empty = open_sessions_for_project(dir.path(), PROJECT_A).is_empty();
+        let result = open_sessions_strict(dir.path(), PROJECT_A);
 
         std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
         if readable_anyway {
@@ -1850,7 +1758,6 @@ mod tests {
             result.is_err(),
             "an unreadable sessions dir must be a genuine error, not 'no sessions open': {result:?}"
         );
-        assert!(tolerant_empty);
     }
 
     #[test]
@@ -1991,7 +1898,12 @@ mod tests {
         assert_ne!(session.id, first.id);
         assert_eq!(abandoned.len(), 1);
         assert_eq!(abandoned[0].id, first.id);
-        assert_eq!(open_sessions_for_project(dir.path(), PROJECT_A).len(), 1);
+        assert_eq!(
+            open_sessions_strict(dir.path(), PROJECT_A)
+                .expect("test")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -2057,7 +1969,7 @@ mod tests {
             panic!("expected Created");
         };
         assert_ne!(first.id, second.id);
-        let open = open_sessions_for_project(dir.path(), PROJECT_A);
+        let open = open_sessions_strict(dir.path(), PROJECT_A).expect("test");
         assert_eq!(open.len(), 2, "both sessions must remain open");
     }
 
@@ -2075,7 +1987,8 @@ mod tests {
             panic!("expected Created");
         };
         assert_eq!(session.description.as_deref(), Some("dev-sprint issue 493"));
-        let reloaded = list_sessions(dir.path())
+        let reloaded = list_sessions_strict(dir.path())
+            .expect("test")
             .into_iter()
             .find(|s| s.id == session.id)
             .expect("test");
@@ -2100,7 +2013,8 @@ mod tests {
         };
         let original = session.last_activity.clone();
         touch_last_activity(dir.path(), &session.id).expect("test");
-        let reloaded = list_sessions(dir.path())
+        let reloaded = list_sessions_strict(dir.path())
+            .expect("test")
             .into_iter()
             .find(|s| s.id == session.id)
             .expect("test");
@@ -2137,7 +2051,11 @@ mod tests {
         finish_session(dir.path(), &session.id, false).expect("test");
         touch_last_activity(dir.path(), &session.id).expect("test");
         // Still closed — the touch is a no-op on a non-open session.
-        assert!(open_sessions_for_project(dir.path(), PROJECT_A).is_empty());
+        assert!(
+            open_sessions_strict(dir.path(), PROJECT_A)
+                .expect("test")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2182,7 +2100,11 @@ mod tests {
         };
         let finished = finish_session(dir.path(), &session.id, false).expect("test");
         assert!(finished.session.finished_at.is_some());
-        assert!(open_sessions_for_project(dir.path(), PROJECT_A).is_empty());
+        assert!(
+            open_sessions_strict(dir.path(), PROJECT_A)
+                .expect("test")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2366,7 +2288,7 @@ mod tests {
         finish_session(dir.path(), &a.id, false).expect("test");
         start_session(dir.path(), Some("c"), None, PROJECT_A, StartDecision::Auto).expect("test");
 
-        let open = open_sessions_for_project(dir.path(), PROJECT_A);
+        let open = open_sessions_strict(dir.path(), PROJECT_A).expect("test");
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].name.as_deref(), Some("c"));
     }
@@ -2384,7 +2306,7 @@ mod tests {
         start_session(dir.path(), Some("b"), None, PROJECT_A, StartDecision::New).expect("test");
         start_session(dir.path(), Some("c"), None, PROJECT_B, StartDecision::Auto).expect("test");
 
-        let ids = session_ids_for_project(dir.path(), PROJECT_A);
+        let ids = try_session_ids_for_project(dir.path(), PROJECT_A).expect("test");
         assert_eq!(
             ids.len(),
             2,
