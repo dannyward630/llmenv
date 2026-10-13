@@ -649,12 +649,12 @@ fn resolve_session_for_add(
 ) -> anyhow::Result<String> {
     let owner = match session {
         SessionChoice::Named(id) => {
-            // Fallible `try_list_sessions` rather than the tolerant `list_sessions`:
-            // an unreadable store must error out here rather than be misread as "no
-            // such session" (#1112) — this is the same resolution step `TaskCreate`
+            // Strict `list_sessions_strict`: an unreadable store or a corrupt session
+            // file must error out here rather than be misread as "no
+            // such session" (#1112, #2665) — this is the same resolution step `TaskCreate`
             // (via `add_task`) runs through, so the hook redirect's own unreadable-
             // store guard in `task_tools::create` would otherwise be undone here.
-            let exists_open = session::try_list_sessions(state_dir)?
+            let exists_open = session::list_sessions_strict(state_dir)?
                 .into_iter()
                 .any(|s| s.id == id && s.is_open());
             if !exists_open {
@@ -664,7 +664,7 @@ fn resolve_session_for_add(
         }
         SessionChoice::Resolve(owner) => owner,
     };
-    let open = session::try_open_sessions_for_project(state_dir, project)?;
+    let open = session::open_sessions_strict(state_dir, project)?;
     match session::pick_open_session(open, owner) {
         Ok(session) => Ok(session.id),
         Err(session::PickError::NoneOpen) => anyhow::bail!(
@@ -1354,7 +1354,7 @@ fn idle_session_reminders(state_dir: &Path, caller: Option<&str>) -> String {
 /// error, and the caller prints its text in place of the reminder. A silent skip would tell the
 /// agent that nothing is open (#2608).
 fn store_for_reminder(state_dir: &Path, project: &str) -> Result<Vec<Task>, String> {
-    let sessions = session::try_open_sessions_for_project(state_dir, project);
+    let sessions = session::open_sessions_strict(state_dir, project);
     match (sessions, list_tasks_strict(state_dir)) {
         (Ok(_), Ok(tasks)) => Ok(tasks),
         (Err(e), _) | (_, Err(e)) => Err(store_warning_text(
@@ -1440,7 +1440,7 @@ pub(crate) fn tracking(state_dir: &Path) -> Tracking {
     };
     // A store that cannot be read is unknown, not empty: a hook never nudges or denies on a guess.
     let (sessions, tasks) = match (
-        session::try_open_sessions_for_project(state_dir, &project),
+        session::open_sessions_strict(state_dir, &project),
         list_tasks_strict(state_dir),
     ) {
         (Ok(sessions), Ok(tasks)) => (sessions, tasks),
@@ -1732,7 +1732,11 @@ fn finish_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) 
     };
     let mut lines = Vec::new();
     for session in open {
-        let (done, total) = session::session_progress(state_dir, &session.id);
+        // A task file that cannot be read must not make a session look finished.
+        let (done, total) = match session::try_session_progress(state_dir, &session.id) {
+            Ok(progress) => progress,
+            Err(e) => return store_warning_text(&e),
+        };
         if total == 0 || done < total {
             continue;
         }
@@ -1763,9 +1767,11 @@ fn for_current_project(reminder: impl FnOnce(&str) -> String) -> String {
 /// Join non-empty reminder strings with a blank line between them; empty
 /// parts are dropped rather than leaving stray blank lines.
 fn combine_reminders(parts: impl IntoIterator<Item = String>) -> String {
+    // One unreadable session file reaches several reminders. Its warning is shown once.
+    let mut seen = HashSet::new();
     parts
         .into_iter()
-        .filter(|p| !p.is_empty())
+        .filter(|p| !p.is_empty() && seen.insert(p.clone()))
         .collect::<Vec<_>>()
         .join("\n\n")
 }

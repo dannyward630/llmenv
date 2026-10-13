@@ -321,16 +321,15 @@ fn todowrite(
 /// `llmenv task session start` first"), which is exactly the cold-start
 /// friction that made the manual fallback unusable (#985).
 ///
-/// Uses the fallible `try_open_sessions_for_project` rather than the tolerant
-/// `open_sessions_for_project`: an unreadable store must deny with the real
-/// error, not be misread as "no sessions open" and auto-start a second session
-/// on top of an existing-but-unreadable one (#1112).
+/// Uses the strict `open_sessions_strict`: an unreadable store or a corrupt session file
+/// must deny with the real error, not be misread as "no sessions open" and auto-start a
+/// second session on top of an existing-but-unreadable one (#1112, #2665).
 fn ensure_session(
     state_dir: &Path,
     project: &str,
     owner: &session::EngineIdentity,
 ) -> Result<(), String> {
-    let open_sessions = match session::try_open_sessions_for_project(state_dir, project) {
+    let open_sessions = match session::open_sessions_strict(state_dir, project) {
         Ok(sessions) => sessions,
         Err(e) => {
             tracing::error!(error = %e, "task redirect: couldn't read existing sessions");

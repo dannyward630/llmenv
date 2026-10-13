@@ -312,69 +312,8 @@ pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Resul
     })
 }
 
-/// Fallible session read. Propagates a genuine read error on
-/// the sessions directory itself instead of collapsing it to an empty `Vec`
-/// indistinguishable from "no sessions yet" (#1112). A missing directory
-/// still resolves to `Ok(vec![])`. Per-entry `DirEntry` errors and corrupt
-/// session files are logged via `tracing::warn!` and skipped, never silently
-/// dropped.
-///
-/// # Errors
-/// Returns an error if the sessions directory exists but can't be read (e.g.
-/// permission denied).
-pub(crate) fn try_list_sessions(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
-    let dir = sessions_dir(state_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("reading sessions dir {}", dir.display()))
-            );
-        }
-    };
-    let mut sessions = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
-                continue;
-            }
-        };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        match std::fs::read_to_string(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|content| Ok(serde_json::from_str::<Session>(&content)?))
-        {
-            Ok(session) => sessions.push(session),
-            // Distinguish a genuine read failure (e.g. permission denied on
-            // this one file) from corrupt JSON content — same reasoning as
-            // `try_list_tasks` (#1112).
-            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
-                tracing::error!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping unreadable session file"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping corrupt session file"
-                );
-            }
-        }
-    }
-    Ok(sessions)
-}
-
-/// Every session in the store, failing on any file that cannot be read or parsed. Unlike
-/// [`try_list_sessions`], a corrupt file is an error that names the file, not a skipped entry.
+/// Every session in the store, failing on any file that cannot be read or parsed. A corrupt
+/// file is an error that names the file, not a skipped entry.
 /// The Stop reminder needs the full set, so a missing task in it must come from a real absence
 /// and not from a corrupt file (#2628).
 ///
@@ -402,32 +341,17 @@ pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Sessi
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("reading session file {}", path.display()))?;
         let session: Session = serde_json::from_str(&content).with_context(|| {
-            format!("session file {} is not valid session JSON", path.display())
+            format!(
+                "session file {} is not valid session JSON. Repair or delete the file, then retry",
+                path.display()
+            )
         })?;
         sessions.push(session);
     }
     Ok(sessions)
 }
 
-/// Fallible open-session read that skips a corrupt file with a warning. Use
-/// [`open_sessions_strict`] where a corrupt file must be reported (#2665). This propagates a genuine
-/// read error on the sessions directory instead of reporting "no open
-/// sessions", which would make `TaskCreate`'s auto-start auto-create a
-/// second session over an existing-but-unreadable store (#1112).
-///
-/// # Errors
-/// Returns an error if the sessions directory exists but can't be read.
-pub(crate) fn try_open_sessions_for_project(
-    state_dir: &Path,
-    project: &str,
-) -> anyhow::Result<Vec<Session>> {
-    Ok(try_list_sessions(state_dir)?
-        .into_iter()
-        .filter(|s| s.is_open() && s.project == project)
-        .collect())
-}
-
-/// Strict [`open_sessions_for_project`]. A corrupt session file is an error that names the file,
+/// Every open session tagged with `project`, read strictly. A corrupt session file is an error that names the file,
 /// so its tasks are not dropped without a word (#2665).
 ///
 /// # Errors
@@ -442,7 +366,7 @@ pub(crate) fn open_sessions_strict(
         .collect())
 }
 
-/// Strict [`open_sessions_visible_to`]. See [`open_sessions_strict`] (#2665).
+/// [`open_sessions_strict`], cut to the sessions that [`Session::visible_to`] `caller` (#2665).
 ///
 /// # Errors
 /// Returns an error if the sessions directory cannot be read or a session file is corrupt.
@@ -456,7 +380,7 @@ pub(crate) fn try_open_sessions_visible_to(
     Ok(sessions)
 }
 
-/// Fallible [`session_ids_for_project`] over [`list_sessions_strict`]. A corrupt session file is
+/// The id of every session ever tagged with `project`, over [`list_sessions_strict`]. A corrupt file is
 /// an error, so the caller can report it instead of losing that file's tasks (#2628).
 ///
 /// # Errors
@@ -493,7 +417,7 @@ pub(crate) fn try_session_ids_visible_to(
 /// session doesn't exist or isn't open — a dangling `task.session` reference
 /// (deleted session file) must never fail the task mutation that triggered
 /// this touch. A present-but-corrupt session file is tolerated the same way,
-/// but warned (matching [`list_sessions`]) rather than swallowed silently.
+/// but warned rather than swallowed silently.
 ///
 /// Runs the read-modify-write under the store lock: it's always called from
 /// outside a held lock (after a task mutation's own lock has been released),
@@ -1747,9 +1671,9 @@ mod tests {
     }
 
     #[test]
-    fn try_list_sessions_missing_store_is_empty_not_error() {
+    fn list_sessions_strict_missing_store_is_empty_not_error() {
         let dir = TempDir::new().expect("test");
-        assert_eq!(try_list_sessions(dir.path()).unwrap(), Vec::new());
+        assert_eq!(list_sessions_strict(dir.path()).unwrap(), Vec::new());
     }
 
     proptest::proptest! {
@@ -1796,7 +1720,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn try_open_sessions_for_project_unreadable_store_errors() {
+    fn open_sessions_strict_unreadable_store_errors() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = TempDir::new().expect("test");
@@ -1805,7 +1729,7 @@ mod tests {
         std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let readable_anyway = std::fs::read_dir(&sessions).is_ok();
-        let result = try_open_sessions_for_project(dir.path(), PROJECT_A);
+        let result = open_sessions_strict(dir.path(), PROJECT_A);
 
         std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
         if readable_anyway {

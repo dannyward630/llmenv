@@ -3518,7 +3518,10 @@ fn render_task_ls_human(
             .into_iter()
             .map(|s| s.id)
             .collect(),
-        Err(_) => Vec::new(),
+        Err(e) => {
+            tracing::error!(error = %e, "cannot resolve the project tag; task ls skips the priority order");
+            Vec::new()
+        }
     };
     let labels: std::collections::HashMap<String, String> =
         crate::task::session::list_sessions_strict(state_dir)?
@@ -4250,7 +4253,7 @@ fn resolve_session_id(
         return Ok(id);
     }
     // Fallible read: an unreadable store must not read as "no open session" (#1112).
-    let open = session::try_open_sessions_for_project(state_dir, project)?;
+    let open = session::open_sessions_strict(state_dir, project)?;
     match session::pick_open_session(open, &EngineIdentity::from_env()?) {
         Ok(session) => Ok(session.id),
         Err(PickError::NoneOpen) => {
