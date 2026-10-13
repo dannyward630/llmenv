@@ -78,34 +78,32 @@ pub(crate) fn stats() -> anyhow::Result<()> {
 
 /// The `icm_memory_recall` arguments for the project that `cwd` belongs to.
 /// ICM's default filter is the ICM server's cwd, which is unrelated to this
-/// process when ICM runs on another host (#2253). No cwd searches all projects.
-pub(crate) fn scope_recall_args(cwd: Option<&std::path::Path>) -> serde_json::Value {
-    let project = cwd
-        .and_then(|dir| match project::session_project(dir) {
-            Ok(name) => name,
-            Err(e) => {
-                eprintln!("warning: {e:#}");
-                None
-            }
-        })
-        .unwrap_or_default();
-    if project.is_empty() {
-        eprintln!(
-            "warning: cannot tell the project of this folder, so memories of all projects are used"
-        );
-    }
-    serde_json::json!({ "query": "", "project": project })
+/// process when ICM runs on another host (#2253). No cwd, passed as `None`,
+/// searches all projects on purpose.
+///
+/// # Errors
+/// The project of `cwd` cannot be named. An unscoped recall would return other projects'
+/// memories, so the command stops instead (#2688).
+pub(crate) fn scope_recall_args(
+    cwd: Option<&std::path::Path>,
+) -> anyhow::Result<serde_json::Value> {
+    let Some(dir) = cwd else {
+        return Ok(serde_json::json!({ "query": "", "project": "" }));
+    };
+    let project = project::session_project(dir)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot tell the project of {}. Run this from a folder with a name, or inside a git repository.",
+            dir.display()
+        )
+    })?;
+    Ok(serde_json::json!({ "query": "", "project": project }))
 }
 
 /// Run the `list` subcommand: list stored memories for the active scope.
 pub(crate) fn list() -> anyhow::Result<()> {
     let client = connect()?;
-    let cwd = std::env::current_dir().ok();
-    let result = call_tool_blocking(
-        client,
-        "icm_memory_recall",
-        scope_recall_args(cwd.as_deref()),
-    )?;
+    let cwd = std::env::current_dir()?;
+    let result = call_tool_blocking(client, "icm_memory_recall", scope_recall_args(Some(&cwd))?)?;
     println!("{result}");
     Ok(())
 }
@@ -139,12 +137,8 @@ pub(crate) fn diff() -> anyhow::Result<()> {
 
     let current = {
         let client = connect()?;
-        let cwd = std::env::current_dir().ok();
-        call_tool_blocking(
-            client,
-            "icm_memory_recall",
-            scope_recall_args(cwd.as_deref()),
-        )?
+        let cwd = std::env::current_dir()?;
+        call_tool_blocking(client, "icm_memory_recall", scope_recall_args(Some(&cwd))?)?
     };
 
     let Some(previous) = read_or_init_snapshot(&snapshot_path, &current)? else {
@@ -201,16 +195,25 @@ mod tests {
         let dir = tmp.path().join("some-project");
         std::fs::create_dir(&dir).unwrap();
         assert_eq!(
-            scope_recall_args(Some(&dir)),
-            serde_json::json!({ "query": "", "project": "some-project" })
+            scope_recall_args(Some(&dir)).ok(),
+            Some(serde_json::json!({ "query": "", "project": "some-project" }))
         );
     }
 
     #[test]
     fn scope_recall_args_search_all_projects_without_a_cwd() {
         assert_eq!(
-            scope_recall_args(None),
-            serde_json::json!({ "query": "", "project": "" })
+            scope_recall_args(None).ok(),
+            Some(serde_json::json!({ "query": "", "project": "" }))
+        );
+    }
+
+    #[test]
+    fn scope_recall_args_refuses_a_folder_it_cannot_name() {
+        let err = scope_recall_args(Some(std::path::Path::new("/"))).err();
+        assert!(
+            err.is_some_and(|e| format!("{e:#}").contains("cannot tell the project")),
+            "the root folder must stop the recall, not search all projects"
         );
     }
 

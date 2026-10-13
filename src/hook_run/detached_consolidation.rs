@@ -68,10 +68,9 @@ fn run_consolidation_at(
     let cwd = std::env::current_dir().map_err(|e| {
         anyhow::anyhow!("cannot read the working directory to name the project: {e}")
     })?;
+    // A lookup that fails leaves the checkpoint unsettled, so the next session runs it again.
     let project = crate::memory::project::session_project(&cwd)
-        .inspect_err(|e| tracing::error!("consolidation-run: {e:#}"))
-        .ok()
-        .flatten();
+        .map_err(|e| anyhow::anyhow!("consolidation-run: cannot name the project: {e:#}"))?;
     let Some(project) = project else {
         tracing::error!(
             "consolidation-run: no project name for {}; consolidation skipped",

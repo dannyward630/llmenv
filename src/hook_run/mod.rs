@@ -513,37 +513,31 @@ fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
 /// stateless `TurnStart` recall (#2253). The project lookup runs git, so only
 /// `SessionStart` and a stateless `TurnStart` pay for it; the adaptive
 /// `TurnStart` reads the project from its session ledger.
+///
+/// # Errors
+/// The project cannot be named. The caller skips the event's memory work, because a recall
+/// without a project scope would return other projects' memories (#2688).
 fn wake_args(
     event: HookEvent,
     settings: Option<MemoryHookSettings>,
     payload: &serde_json::Value,
     cwd: &str,
-) -> (WakeUpArgs, Option<String>) {
+) -> anyhow::Result<WakeUpArgs> {
     let adaptive = settings.is_some_and(|s| s.adaptive_recall);
     let wants_project = match event {
         HookEvent::SessionStart => true,
         HookEvent::TurnStart => !adaptive,
         _ => false,
     };
-    let dir = hook_cwd(payload, cwd);
-    let mut notice = None;
     let project = if wants_project {
-        crate::memory::project::session_project(&dir)
-            .inspect_err(|e| tracing::error!("memory recall project scope: {e:#}"))
-            .unwrap_or_else(|e| {
-                notice = Some(format!(
-                    "llmenv: memory recall is not scoped to a project: {e:#}."
-                ));
-                None
-            })
+        crate::memory::project::session_project(&hook_cwd(payload, cwd))?
     } else {
         None
     };
-    let args = WakeUpArgs {
+    Ok(WakeUpArgs {
         max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
         project,
-    };
-    (args, notice)
+    })
 }
 
 /// Whether `event` writes to the recall ledger without any MCP call (#2249).
@@ -1520,7 +1514,19 @@ fn run_inner(
         // can be top-level or bundle-declared, when the chunk has none of its own.
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
-        let (wake, project_notice) = wake_args(event, settings, stdin_payload, &env.cwd);
+        // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
+        let (wake, memory_notice) = match wake_args(event, settings, stdin_payload, &env.cwd) {
+            Ok(args) => (args, None),
+            Err(e) => {
+                tracing::error!("memory skipped for {event}: {e:#}");
+                let args = WakeUpArgs {
+                    max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
+                    project: None,
+                };
+                (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
+            }
+        };
+        let memory_skipped = memory_notice.is_some();
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
             .inspect_err(
@@ -1620,7 +1626,7 @@ fn run_inner(
         };
         // The project notice applies to every event, because the recall of every event runs
         // without its project scope when the lookup fails (#2688).
-        let health_notice = match (session_notice, project_notice) {
+        let health_notice = match (session_notice, memory_notice) {
             (Some(s), Some(p)) => Some(format!("{s}\n{p}")),
             (s, p) => s.or(p),
         };
@@ -1643,6 +1649,7 @@ fn run_inner(
             // condition; no need to re-check the event here too.
             if let Some(client) = &client
                 && !session_end_unchanged
+                && !memory_skipped
             {
                 let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
                 let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
@@ -2951,7 +2958,9 @@ fn redirect_stderr_to_bounded_log(
             cmd.stderr(std::process::Stdio::from(file));
         }
         Err(e) => {
-            tracing::debug!("{context}: log unavailable ({e:#}), stderr discarded");
+            tracing::warn!(
+                "{context}: log unavailable ({e:#}); the child's stderr is discarded. Check that the log path is a regular file owned by you."
+            );
         }
     }
 }
@@ -2968,7 +2977,9 @@ pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
         Ok(path) => redirect_stderr_to_bounded_log(cmd, &path, true, "detached child"),
         Err(e) => {
             cmd.stderr(std::process::Stdio::null());
-            tracing::debug!("detached child: cannot resolve log path ({e:#}), stderr discarded");
+            tracing::warn!(
+                "detached child: cannot resolve log path ({e:#}); the child's stderr is discarded"
+            );
         }
     }
 }
@@ -7473,29 +7484,35 @@ mod adaptive_routing_tests {
             default_type: None,
             default_importance: None,
         });
-        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/").0;
-        assert_eq!(start.project.as_deref(), Some("wake-repo"));
+        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(start.as_deref(), Some("wake-repo"));
         // #2253: the stateless TurnStart recall is scoped to the session project.
-        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/").0;
-        assert_eq!(stateless.project.as_deref(), Some("wake-repo"));
-        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/").0;
-        assert_eq!(adaptive_turn.project, None, "the ledger holds the project");
-        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/").0;
-        assert_eq!(other.project, None);
+        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(stateless.as_deref(), Some("wake-repo"));
+        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(adaptive_turn, None, "the ledger holds the project");
+        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/")
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(other, None);
     }
 
     #[test]
-    fn wake_args_tells_the_agent_when_git_cannot_name_the_project() {
+    fn wake_args_refuses_to_guess_a_project_when_git_cannot_start() {
         let payload = serde_json::json!({ "cwd": "/no/such/dir/for/llmenv-hook" });
-        let (args, notice) = wake_args(HookEvent::SessionStart, None, &payload, "/");
-        assert_eq!(
-            args.project, None,
-            "no project may be guessed from a failed git start"
-        );
-        let notice = notice.unwrap_or_default();
+        let err = wake_args(HookEvent::SessionStart, None, &payload, "/")
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
         assert!(
-            notice.contains("cannot run git") && notice.contains("/no/such/dir/for/llmenv-hook"),
-            "the agent must see the git failure and the directory: {notice}"
+            err.contains("cannot run git") && err.contains("/no/such/dir/for/llmenv-hook"),
+            "the agent must see the git failure and the directory: {err}"
         );
     }
 
