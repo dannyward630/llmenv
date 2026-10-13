@@ -528,7 +528,16 @@ fn lockfile_path(pid_path: &Path) -> PathBuf {
 fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
     use std::io::Write as _;
     let tmp = pid_path.with_extension(format!("pid.{}.tmp", std::process::id()));
-    // The temp name is predictable, so create_new refuses a file or symlink already there (#2599).
+    // A temp left by a crashed run with the same pid would make create_new fail for good. Remove
+    // it first: remove_file unlinks a symlink and never follows it (#2599).
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("removing stale {}", tmp.display())));
+        }
+    }
+    // create_new is O_EXCL, so it refuses anything that appears at the name after the removal.
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -536,21 +545,24 @@ fn write_pidfile_atomic(pid_path: &Path, pid: u32) -> anyhow::Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    let mut file = crate::paths::refuse_symlink(&mut opts)
+    let mut file = opts
         .open(&tmp)
         .with_context(|| format!("creating {}", tmp.display()))?;
     file.write_all(pid.to_string().as_bytes())
+        .inspect_err(|_| discard_pidfile_temp(&tmp))
         .with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, pid_path)
-        .inspect_err(|_| {
-            // Don't leave the temp file behind on every failed publish. A failed removal is
-            // logged, so a leftover temp file is not silent (#2657).
-            if let Err(e) = std::fs::remove_file(&tmp) {
-                tracing::error!("could not remove pidfile temp {} ({e})", tmp.display());
-            }
-        })
+        .inspect_err(|_| discard_pidfile_temp(&tmp))
         .with_context(|| format!("publishing pidfile {}", pid_path.display()))?;
     Ok(())
+}
+
+/// Removes the pidfile temp after a failed write or publish. A failed removal is logged, so a
+/// leftover temp file is not silent (#2657).
+fn discard_pidfile_temp(tmp: &Path) {
+    if let Err(e) = std::fs::remove_file(tmp) {
+        tracing::error!("could not remove pidfile temp {} ({e})", tmp.display());
+    }
 }
 
 /// Default path for the proxy pidfile — `$XDG_STATE_HOME/llmenv/mcp-proxy.pid`,
@@ -679,18 +691,9 @@ pub(super) fn open_proxy_log(path: &Path) -> anyhow::Result<std::fs::File> {
     open_bounded_log(path, PROXY_LOG_MAX_BYTES, true)
 }
 
-/// Opens `path` for appending as a size-bounded diagnostic log, rotating it to
-/// `<path>.1` first if it has reached `max_bytes`. Shared by the mcp-proxy
-/// stderr log (`open_proxy_log`, fixed to [`PROXY_LOG_MAX_BYTES`]) and other
-/// spawned-child stderr redirection that wants the same "diagnosable but
-/// bounded" treatment (#1091) rather than duplicating the hardening below.
-///
-/// Created `0o600` on Unix: log content can carry details of whatever backend
-/// the child talks to, and the mode is set at creation rather than chmod'd
-/// after so there is no window in which the file is world-readable.
-///
-/// A parent directory that is not hardened can be swapped for a symlink after creation, so the
-/// log would be written outside it. A symlink, or a directory owned by another uid, is refused (#2599).
+/// Refuses a parent directory that is a symlink, or that another uid owns, for a log directory
+/// that llmenv does not harden (#2599). The check is by name, so it narrows the window for a swap
+/// and does not close it: the log open uses `O_NOFOLLOW` on the final component only (#2685).
 #[cfg(unix)]
 fn refuse_untrusted_parent(parent: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
@@ -718,6 +721,16 @@ fn refuse_untrusted_parent(_parent: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Opens `path` for appending as a size-bounded diagnostic log, rotating it to
+/// `<path>.1` first if it has reached `max_bytes`. Shared by the mcp-proxy
+/// stderr log (`open_proxy_log`, fixed to [`PROXY_LOG_MAX_BYTES`]) and other
+/// spawned-child stderr redirection that wants the same "diagnosable but
+/// bounded" treatment (#1091) rather than duplicating the hardening below.
+///
+/// Created `0o600` on Unix: log content can carry details of whatever backend
+/// the child talks to, and the mode is set at creation rather than chmod'd
+/// after so there is no window in which the file is world-readable.
+///
 /// `harden_dir` controls whether the parent directory is forced to `0o700`.
 /// Callers pass `false` for a directory outside llmenv's own state tree (e.g.
 /// a user-configured `codebase_memory.index_path` that may be shared with
@@ -2321,6 +2334,22 @@ mod lock_and_log_safety_tests {
 
     #[cfg(unix)]
     #[test]
+    fn write_pidfile_atomic_replaces_a_symlink_at_the_temp_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_path = tmp.path().join("mcp-proxy.pid");
+        let temp_name = pid_path.with_extension(format!("pid.{}.tmp", std::process::id()));
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, "secret").unwrap();
+        std::os::unix::fs::symlink(&victim, &temp_name).unwrap();
+
+        crate::mcp::proxy::write_pidfile_atomic(&pid_path, 4242).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&pid_path).unwrap(), "4242");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn open_bounded_log_refuses_a_symlinked_parent_when_not_hardened() {
         let tmp = tempfile::tempdir().unwrap();
         let real = tmp.path().join("real");
@@ -2332,6 +2361,7 @@ mod lock_and_log_safety_tests {
         assert!(err.to_string().contains("is a symlink"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_bounded_log_refuses_a_hard_linked_file() {
         let dir = TempDir::new().expect("tempdir");

@@ -96,6 +96,7 @@ impl SessionCache {
     /// `max_age_days`. Runs opportunistically during save().
     pub fn prune_stale_sessions(state_dir: &Path, max_age_days: u64) {
         super::session_state::prune_stale_json_files(&read_once_state_dir(state_dir), max_age_days);
+        super::session_state::prune_orphan_locks(&read_once_state_dir(state_dir), max_age_days);
     }
 }
 

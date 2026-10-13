@@ -104,6 +104,7 @@ fn load_last(path: &Path) -> Option<LastReminder> {
 fn save(path: &Path, last: &LastReminder) {
     if let Some(dir) = path.parent() {
         super::session_state::prune_stale_json_files(dir, STALE_DAYS);
+        super::session_state::prune_orphan_locks(dir, STALE_DAYS);
     }
     let result = serde_json::to_vec(last)
         .map_err(std::io::Error::other)

@@ -159,8 +159,6 @@ pub(crate) fn handle_pre_tool_use(
         // global one would leak across concurrent sessions.
         return String::new();
     };
-    // Held for the read-change-save of the stats file (#2678).
-    let _lock = stats_lock(state_dir, session_id);
     let tool = payload.get("tool_name").and_then(serde_json::Value::as_str);
     let path = payload
         .get("tool_input")
@@ -172,6 +170,8 @@ pub(crate) fn handle_pre_tool_use(
 
     match tool {
         "Read" => {
+            // Held for the read-change-save of the stats file (#2678). A Write only reads it.
+            let _lock = stats_lock(state_dir, session_id);
             let mut stats = load_stats(state_dir, session_id);
             stats.paths.insert(path_key(path));
             save_stats(state_dir, session_id, &stats);
@@ -215,6 +215,7 @@ pub(super) fn path_key(path: &str) -> String {
 /// session forever.
 pub(super) fn save_stats(state_dir: &std::path::Path, session_id: &str, stats: &SessionStats) {
     super::session_state::prune_stale_json_files(&state_dir.join("slippage"), 7);
+    super::session_state::prune_orphan_locks(&state_dir.join("slippage"), 7);
     let Ok(json) = serde_json::to_string(stats) else {
         return;
     };
@@ -247,13 +248,18 @@ pub(crate) fn handle_post_tool_use(
     ) else {
         return;
     };
-    if cfg.read_before_edit && tool == "Bash" {
+    let records_bash_read = cfg.read_before_edit && tool == "Bash";
+    if !records_bash_read && !cfg.metrics {
+        return;
+    }
+    // One lock covers both read-change-save cycles of the stats file (#2678).
+    let _lock = stats_lock(state_dir, session_id);
+    if records_bash_read {
         super::slippage_read::record_bash_read(state_dir, session_id, payload);
     }
     if !cfg.metrics {
         return;
     }
-    let _lock = stats_lock(state_dir, session_id);
     let mut stats = load_stats(state_dir, session_id);
     *stats.tools.entry(tool.to_string()).or_default() += 1;
     save_stats(state_dir, session_id, &stats);

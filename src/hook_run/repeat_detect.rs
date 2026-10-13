@@ -104,6 +104,7 @@ impl SessionState {
         // needs a longer memory than that (the counter resets on any
         // different call, or expires with the session itself).
         super::session_state::prune_stale_json_files(&rd_dir, 7);
+        super::session_state::prune_orphan_locks(&rd_dir, 7);
         let path = session_state_path(state_dir, &self.session_id);
         let json = serde_json::to_string(&self)?;
         crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
