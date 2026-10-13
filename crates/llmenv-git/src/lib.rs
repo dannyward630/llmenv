@@ -151,7 +151,9 @@ pub fn has_unpushed_commits(repo: &Path) -> Result<bool, String> {
         .map_err(|e| format!("cannot run git rev-list in {}: {e}", repo.display()))?;
     if !output.status.success() {
         let detail = git_failure_detail(&output.stderr, &output.stdout, output.status);
-        if is_missing_upstream(&detail) {
+        // Only git's "no upstream configured" text means there is no push target. A gone
+        // remote-tracking ref fails with other text, and that is an error, not "nothing to push".
+        if detail.contains("no upstream configured") {
             return Ok(false);
         }
         return Err(format!(
@@ -162,12 +164,6 @@ pub fn has_unpushed_commits(repo: &Path) -> Result<bool, String> {
     parse_commit_count(&output.stdout)
         .map(|count| count > 0)
         .ok_or_else(|| format!("git rev-list printed no commit count in {}", repo.display()))
-}
-
-/// True when git's failure text says the branch has no upstream. A `@{u}` rev that does not
-/// resolve gives the same error, so both forms count.
-fn is_missing_upstream(detail: &str) -> bool {
-    detail.contains("no upstream") || detail.contains("@{u}")
 }
 
 fn parse_commit_count(output: &[u8]) -> Option<u32> {
@@ -185,13 +181,26 @@ fn parse_commit_count(output: &[u8]) -> Option<u32> {
 mod repo_state_tests {
     use super::*;
 
-    fn git_init(dir: &Path) {
+    /// Runs git in `dir` and asserts success. Identity and signing are set per command, so the
+    /// test does not depend on the developer's global git config.
+    fn git_run(dir: &Path, args: &[&str]) {
         let status = secure_git()
-            .args(["init", "-q"])
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
             .current_dir(dir)
             .status()
-            .expect("spawn git init");
-        assert!(status.success(), "git init failed in {}", dir.display());
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    }
+
+    fn git_init(dir: &Path) {
+        git_run(dir, &["init", "-q"]);
     }
 
     #[test]
@@ -221,25 +230,27 @@ mod repo_state_tests {
         let dir = tempfile::tempdir().unwrap();
         git_init(dir.path());
         // An unborn HEAD reports "no such branch", not a missing upstream, so commit first.
-        let status = secure_git()
-            .args([
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "init",
-            ])
-            .current_dir(dir.path())
-            .status()
-            .expect("spawn git commit");
-        assert!(status.success(), "git commit failed");
+        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "init"]);
         assert_eq!(has_unpushed_commits(dir.path()), Ok(false));
+    }
+
+    #[test]
+    fn has_unpushed_commits_errors_when_the_upstream_ref_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        git_init(dir.path());
+        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "init"]);
+        // The branch names an upstream, but no remote-tracking ref backs it. That is a real
+        // failure, not "no upstream", so it must not read as nothing to push.
+        git_run(dir.path(), &["config", "branch.main.remote", "origin"]);
+        git_run(
+            dir.path(),
+            &["config", "branch.main.merge", "refs/heads/main"],
+        );
+        let err = has_unpushed_commits(dir.path()).unwrap_err();
+        assert!(
+            err.contains("git rev-list failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -250,17 +261,6 @@ mod repo_state_tests {
             err.contains("git rev-list failed"),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn is_missing_upstream_matches_both_git_upstream_messages() {
-        assert!(is_missing_upstream(
-            "fatal: no upstream configured for branch 'x'"
-        ));
-        assert!(is_missing_upstream(
-            "fatal: ambiguous argument '@{u}..HEAD'"
-        ));
-        assert!(!is_missing_upstream("fatal: not a git repository"));
     }
 }
 
