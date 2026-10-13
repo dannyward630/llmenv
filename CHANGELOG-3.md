@@ -42,9 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Hook state files (read-once cache, repeat detection, slippage stats, Stop reminder dedupe, task nudges) are locked for each read-change-save, so two hooks that run at once cannot lose an update (#2678) [fix:hook]
 - A corrupt session file is reported by the task reminders, `llmenv task ls`, `llmenv task session ls`, `llmenv task show current`, and the caller's session lookup, instead of dropping its tasks without a word (#2665) [fix:task]
 - A leading `~` in `codebase_memory` `index_path` is expanded before llmenv starts the indexer or reads the cache folder. Before, a literal `~` could reach the indexer as a directory name (#2689) [fix:hook]
-- A failed `git` start no longer changes the memory project scope or drops the branch from the task resume context. The recall notice and the task redirect name git and the directory (#2688) [fix:memory]
+- A failed `git` start no longer changes the memory project scope or drops the branch from the task resume context. Session start and turn start skip memory recall and tell the agent why, instead of recalling every project's memories. The task redirect denies with the git error (#2688) [fix:memory]
 - The status line shows `tasks: unreadable` when a session or task file cannot be read. Before, it looked like no open session or a lower count (#2687) [fix:statusline]
-- Owner-only writes refuse a symlink at the target, so the throttle cache, skill files, and adapter outputs no longer write through one. A generated output path that is a symlink now fails with an error. The transcripts marker and the upgrade temp and backup files refuse a symlink too (#2686) [fix:paths]
+- Owner-only writes refuse a symlink at the target, so the throttle cache, the statusline caches, the doctor probe, skill files, and adapter outputs no longer write through one. A generated output path that is a symlink now fails with an error. The transcripts marker and the upgrade temp and backup files refuse a symlink too (#2686) [fix:paths]
 - The MCP proxy and hook log directory is opened once and checked by its file descriptor. This closes a race where the parent directory could be swapped for a symlink during log rotation (#2685) [fix:mcp]
 
 ## [3.12.2] - 2026-10-10
