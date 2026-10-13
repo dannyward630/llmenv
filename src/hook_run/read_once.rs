@@ -229,6 +229,12 @@ pub(crate) fn handle_pre_tool_use(
         .unwrap_or_else(|_| path.to_path_buf());
     let path_key = canonical.to_string_lossy().to_string();
     // Load session cache
+    // Held from the load to the save, so a concurrent Read hook cannot overwrite the cache (#2678).
+    let _lock = super::session_state::lock_state_file(
+        &read_once_state_dir(state_dir),
+        session_id,
+        "read-once cache",
+    );
     let mut cache = SessionCache::load(state_dir, session_id, config.ttl_seconds);
     let now = unix_now();
     let tokens_saved = (file_size / 4) as u64;

@@ -102,6 +102,14 @@ pub(super) fn stats_path(state_dir: &std::path::Path, session_id: &str) -> std::
         .join(format!("{session_id}.json"))
 }
 
+/// Lock for one read-change-save of the session's stats file (#2678). When the lock fails,
+/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+fn stats_lock(state_dir: &std::path::Path, session_id: &str) -> Option<std::fs::File> {
+    stats_path(state_dir, session_id)
+        .parent()
+        .and_then(|dir| super::session_state::lock_state_file(dir, session_id, "slippage stats"))
+}
+
 pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> SessionStats {
     // An unreadable or corrupt log means "nothing known to have been read". The
     // write guard then denies a Write to an existing file until the next Read
@@ -151,6 +159,8 @@ pub(crate) fn handle_pre_tool_use(
         // global one would leak across concurrent sessions.
         return String::new();
     };
+    // Held for the read-change-save of the stats file (#2678).
+    let _lock = stats_lock(state_dir, session_id);
     let tool = payload.get("tool_name").and_then(serde_json::Value::as_str);
     let path = payload
         .get("tool_input")
@@ -243,6 +253,7 @@ pub(crate) fn handle_post_tool_use(
     if !cfg.metrics {
         return;
     }
+    let _lock = stats_lock(state_dir, session_id);
     let mut stats = load_stats(state_dir, session_id);
     *stats.tools.entry(tool.to_string()).or_default() += 1;
     save_stats(state_dir, session_id, &stats);

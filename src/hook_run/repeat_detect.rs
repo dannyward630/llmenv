@@ -115,6 +115,16 @@ fn repeat_detect_state_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("repeat_detect")
 }
 
+/// Lock for one read-change-save of the session's counter file (#2678). When the lock fails,
+/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+fn counter_lock(state_dir: &Path, session_id: &str) -> Option<std::fs::File> {
+    super::session_state::lock_state_file(
+        &repeat_detect_state_dir(state_dir),
+        session_id,
+        "repeat detect",
+    )
+}
+
 pub(super) fn session_state_path(state_dir: &Path, session_id: &str) -> PathBuf {
     repeat_detect_state_dir(state_dir).join(format!("{session_id}.json"))
 }
@@ -168,6 +178,7 @@ pub(crate) fn handle_pre_tool_use(
         .unwrap_or(serde_json::Value::Null);
     let signature = format!("{tool_name}:{tool_input}");
 
+    let _lock = counter_lock(state_dir, session_id);
     let mut state = SessionState::load(state_dir, session_id);
     if state.last_signature.as_deref() == Some(signature.as_str()) {
         state.consecutive = state.consecutive.saturating_add(1);
@@ -223,6 +234,7 @@ pub fn handle_stop(
         return reminder.to_string();
     }
 
+    let _lock = counter_lock(state_dir, session_id);
     let mut state = SessionState::load(state_dir, session_id);
     if state.last_stop_signature.as_deref() == Some(reminder) {
         state.stop_consecutive = state.stop_consecutive.saturating_add(1);
