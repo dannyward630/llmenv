@@ -1739,7 +1739,7 @@ fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
         let fm = match serde_yaml::from_str(fm_raw) {
             Ok(v) => Some(v),
             Err(e) => {
-                tracing::warn!("failed to parse frontmatter YAML (treated as absent): {e}");
+                tracing::error!("failed to parse frontmatter YAML (treated as absent): {e}");
                 None
             }
         };

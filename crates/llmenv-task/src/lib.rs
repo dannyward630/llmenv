@@ -240,7 +240,7 @@ pub fn list_tasks(state_dir: &Path) -> Vec<Task> {
     match try_list_tasks(state_dir) {
         Ok(tasks) => tasks,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to read tasks dir; treating as empty");
+            tracing::error!(error = %e, "failed to read tasks dir; treating as empty");
             Vec::new()
         }
     }
@@ -318,13 +318,17 @@ fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<
                 if policy == UnreadablePolicy::Fail {
                     return Err(e.context(format!("reading task file {}", path.display())));
                 }
-                tracing::warn!(error = %e, path = %path.display(), "skipping unreadable task file");
+                tracing::error!(
+                    error = %e,
+                    path = %path.display(),
+                    "skipping unreadable task file"
+                );
             }
             Err(e) if policy == UnreadablePolicy::Fail => {
                 return Err(e.context(format!("parsing task file {}", path.display())));
             }
             Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "skipping corrupt task file");
+                tracing::error!(error = %e, path = %path.display(), "skipping corrupt task file");
             }
         }
     }

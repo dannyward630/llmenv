@@ -41,7 +41,7 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
         return;
     }
     if let Err(e) = std::fs::remove_file(log_path) {
-        tracing::warn!("session_log reaper: failed to remove {log_path:?}: {e}");
+        tracing::error!("session_log reaper: failed to remove {log_path:?}: {e}");
         return;
     }
     tracing::info!(

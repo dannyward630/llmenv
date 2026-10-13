@@ -89,7 +89,7 @@ fn load_last(path: &Path) -> Option<LastReminder> {
         }
     };
     serde_json::from_str(&text)
-        .map_err(|e| tracing::warn!("malformed stop_dedupe state {}: {e}", path.display()))
+        .map_err(|e| tracing::error!("malformed stop_dedupe state {}: {e}", path.display()))
         .ok()
 }
 
@@ -101,7 +101,7 @@ fn save(path: &Path, last: &LastReminder) {
         .map_err(std::io::Error::other)
         .and_then(|json| crate::paths::write_owner_only_atomic(path, &json));
     if let Err(e) = result {
-        tracing::warn!("cannot save stop_dedupe state {}: {e}", path.display());
+        tracing::error!("cannot save stop_dedupe state {}: {e}", path.display());
     }
 }
 
@@ -109,7 +109,7 @@ fn clear_last(path: &Path) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!("cannot clear stop_dedupe state {}: {e}", path.display()),
+        Err(e) => tracing::error!("cannot clear stop_dedupe state {}: {e}", path.display()),
     }
 }
 
