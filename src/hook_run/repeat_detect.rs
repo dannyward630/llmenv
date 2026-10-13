@@ -104,6 +104,7 @@ impl SessionState {
         // needs a longer memory than that (the counter resets on any
         // different call, or expires with the session itself).
         super::session_state::prune_stale_json_files(&rd_dir, 7);
+        super::session_state::prune_orphan_locks(&rd_dir, 7);
         let path = session_state_path(state_dir, &self.session_id);
         let json = serde_json::to_string(&self)?;
         crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
@@ -113,6 +114,16 @@ impl SessionState {
 
 fn repeat_detect_state_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("repeat_detect")
+}
+
+/// Lock for one read-change-save of the session's counter file (#2678). When the lock fails,
+/// `lock_state_file` logs it and the update runs unlocked, as it did before the lock existed.
+fn counter_lock(state_dir: &Path, session_id: &str) -> Option<std::fs::File> {
+    super::session_state::lock_state_file(
+        &repeat_detect_state_dir(state_dir),
+        session_id,
+        "repeat detect",
+    )
 }
 
 pub(super) fn session_state_path(state_dir: &Path, session_id: &str) -> PathBuf {
@@ -168,6 +179,7 @@ pub(crate) fn handle_pre_tool_use(
         .unwrap_or(serde_json::Value::Null);
     let signature = format!("{tool_name}:{tool_input}");
 
+    let _lock = counter_lock(state_dir, session_id);
     let mut state = SessionState::load(state_dir, session_id);
     if state.last_signature.as_deref() == Some(signature.as_str()) {
         state.consecutive = state.consecutive.saturating_add(1);
@@ -223,6 +235,7 @@ pub fn handle_stop(
         return reminder.to_string();
     }
 
+    let _lock = counter_lock(state_dir, session_id);
     let mut state = SessionState::load(state_dir, session_id);
     if state.last_stop_signature.as_deref() == Some(reminder) {
         state.stop_consecutive = state.stop_consecutive.saturating_add(1);
@@ -265,6 +278,18 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn the_counter_lock_is_taken_once_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = counter_lock(dir.path(), "s1");
+        assert!(held.is_some(), "a free lock must be taken");
+        assert!(
+            counter_lock(dir.path(), "s1").is_none(),
+            "a held lock must not be taken twice"
+        );
+        drop(held);
+    }
 
     fn config(threshold: u32) -> RepeatDetectConfig {
         RepeatDetectConfig {
