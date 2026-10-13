@@ -2858,7 +2858,7 @@ fn handle_web_fetch_in(
         payload["session_id"].as_str(),
     );
     let mut cmd = icm_store_command(exe, checkpoint.as_deref());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::error!("icm-store: failed to spawn detached store child");
@@ -2922,7 +2922,7 @@ const BOUNDED_LOG_MAX_BYTES: u64 = 1 << 19; // 512 KiB
 ///
 /// # Errors
 /// Propagates `state_dir()` resolution failure.
-fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
+pub(crate) fn detached_child_log_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(crate::paths::state_dir()?.join("detached-hook.log"))
 }
 
@@ -2965,19 +2965,12 @@ fn redirect_stderr_to_bounded_log(
     }
 }
 
-/// Send a detached child's stderr to the shared bounded log instead of
-/// discarding it (#1133, the same remedy as #1091).
+/// Send a detached child's stderr to the shared bounded log instead of discarding it (#1133, the
+/// same remedy as #1091). `log` is the resolved [`detached_child_log_path`].
 ///
-/// `Stdio::null()` leaves such a child with no report channel whatsoever: its
-/// own `tracing` events go to a fmt layer writing to that same null stderr, so
-/// a failure is discarded twice over.
-pub(crate) fn redirect_stderr_to_detached_log(cmd: &mut std::process::Command) {
-    redirect_stderr_to_resolved_log(cmd, detached_child_log_path());
-}
-
-/// [`redirect_stderr_to_detached_log`] with the log path already resolved, so a test can name a
-/// temporary log without changing the state directory.
-fn redirect_stderr_to_resolved_log(
+/// `Stdio::null()` leaves such a child with no report channel whatsoever: its own `tracing`
+/// events go to a fmt layer writing to that same null stderr, so a failure is discarded twice over.
+pub(crate) fn redirect_stderr_to_detached_log(
     cmd: &mut std::process::Command,
     log: anyhow::Result<std::path::PathBuf>,
 ) {
@@ -3323,7 +3316,7 @@ fn spawn_detached(
     cwd: &std::path::Path,
 ) -> anyhow::Result<()> {
     cmd.current_dir(cwd);
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let mut child = cmd.spawn()?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
@@ -3420,7 +3413,7 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
         None,
     );
     let mut cmd = consolidation_run_command(exe, checkpoint.as_deref());
-    redirect_stderr_to_detached_log(&mut cmd);
+    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::error!(
@@ -4444,7 +4437,7 @@ mod tests {
         let log = dir.path().join("detached-hook.log");
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "echo child-stderr-marker >&2"]);
-        redirect_stderr_to_resolved_log(&mut cmd, Ok(log.clone()));
+        redirect_stderr_to_detached_log(&mut cmd, Ok(log.clone()));
         anyhow::ensure!(cmd.status()?.success(), "the child must run");
         let text = std::fs::read_to_string(&log)?;
         anyhow::ensure!(
@@ -4459,7 +4452,7 @@ mod tests {
     fn an_unresolvable_log_path_still_runs_the_detached_child() -> anyhow::Result<()> {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "echo discarded >&2"]);
-        redirect_stderr_to_resolved_log(&mut cmd, Err(anyhow::anyhow!("no state dir")));
+        redirect_stderr_to_detached_log(&mut cmd, Err(anyhow::anyhow!("no state dir")));
         anyhow::ensure!(cmd.status()?.success(), "the child must run without a log");
         Ok(())
     }

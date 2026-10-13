@@ -108,7 +108,10 @@ fn spawn_record_in(
         Some(session_id),
     );
     let mut cmd = record_command(exe, checkpoint.as_deref());
-    crate::hook_run::redirect_stderr_to_detached_log(&mut cmd);
+    crate::hook_run::redirect_stderr_to_detached_log(
+        &mut cmd,
+        crate::hook_run::detached_child_log_path(),
+    );
     crate::mcp::proxy::detach_process_group(&mut cmd);
     let Ok(mut child) = cmd.spawn() else {
         tracing::error!("session_log: failed to spawn detached record child");
