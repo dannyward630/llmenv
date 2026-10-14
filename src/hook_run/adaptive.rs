@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::agent_notice;
 use crate::hook_run::HookEvent;
 use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
@@ -65,6 +66,9 @@ impl Outcome {
             Err(e) => {
                 self.failed += 1;
                 tracing::error!("adaptive recall call failed, its records are skipped: {e}");
+                agent_notice::record(
+                    "llmenv: a memory recall call failed, so its records were not sent.",
+                );
             }
         }
     }
@@ -218,6 +222,10 @@ pub(super) async fn session_start(
             "recall ledger not reset after {}: the lock or the file failed",
             ctx.payload["source"].as_str().unwrap_or("a context reset")
         );
+        agent_notice::record(
+            "llmenv: the recall ledger was not reset after a context reset. \
+             Records seen before the reset may stay filtered from recall.",
+        );
     }
     let sent = updated.unwrap_or_default();
     let wake = if super::continues_session(ctx.payload) {
@@ -246,18 +254,40 @@ pub(super) async fn session_start(
     };
     let complete = outcome.failed == 0;
     let kept = budget.kept_hashes();
-    ctx.store.update(ctx.session_id, |l| {
-        l.mark_sent(MAIN_AGENT, kept);
-        if complete {
-            l.set_scope_sent(MAIN_AGENT);
-        }
-    });
+    if ctx
+        .store
+        .update(ctx.session_id, |l| {
+            l.mark_sent(MAIN_AGENT, kept);
+            if complete {
+                l.set_scope_sent(MAIN_AGENT);
+            }
+        })
+        .is_none()
+    {
+        note_unsaved("session_start");
+    }
     let passthrough = if wake.is_empty() {
         Vec::new()
     } else {
         vec![wake]
     };
     Ok(budget.render(passthrough))
+}
+
+/// Tells the agent that recall state was not saved. The next recall may repeat records that the
+/// agent already has (#2729).
+fn note_unsaved(hook: &str) {
+    agent_notice::record(format!(
+        "llmenv: recall state for {hook} was not saved, so some records may repeat."
+    ));
+}
+
+/// Tells the agent that recall was skipped for this hook, so it is not mistaken for "nothing
+/// relevant" (#2664).
+fn note_skipped(hook: &str) {
+    agent_notice::record(format!(
+        "llmenv: recall was skipped for {hook}: the recall ledger cannot be read or updated."
+    ));
 }
 
 /// The session's recall ledger, or a logged reason to skip recall. An empty default would forget
@@ -269,6 +299,7 @@ fn ledger_or_skip(store: &LedgerStore, session_id: &str, hook: &str) -> Option<L
             "{hook}: recall skipped, the recall ledger cannot be read \
              (unsafe session id, busy lock, or unreadable file)"
         );
+        note_skipped(hook);
     }
     ledger
 }
@@ -313,17 +344,23 @@ pub(super) async fn turn_start(
     report("turn_start", &outcome, &budget);
     let kept = budget.kept_hashes();
     let now = unix_now();
-    ctx.store.update(ctx.session_id, |l| {
-        l.mark_sent(MAIN_AGENT, kept);
-        l.last_turn_at = now;
-        // A failed recall is not a finished query; the skip rule must not reuse it.
-        if main_ok {
-            l.last_query_hash = Some(query_hash);
-        }
-        if scope_complete {
-            l.set_scope_sent(MAIN_AGENT);
-        }
-    });
+    if ctx
+        .store
+        .update(ctx.session_id, |l| {
+            l.mark_sent(MAIN_AGENT, kept);
+            l.last_turn_at = now;
+            // A failed recall is not a finished query; the skip rule must not reuse it.
+            if main_ok {
+                l.last_query_hash = Some(query_hash);
+            }
+            if scope_complete {
+                l.set_scope_sent(MAIN_AGENT);
+            }
+        })
+        .is_none()
+    {
+        note_unsaved("turn_start");
+    }
     Ok(budget.render(Vec::new()))
 }
 
@@ -353,6 +390,7 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
              the recall ledger cannot be updated (unsafe session id, busy lock, or unreadable file)",
             ctx.session_id
         );
+        note_skipped("tool_failure");
         return Ok(String::new());
     };
     let (key, record) = agent_key(ctx.payload);
@@ -374,8 +412,13 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
     report("post_tool_use_failure", &outcome, &budget);
     if record {
         let kept = budget.kept_hashes();
-        ctx.store
-            .update(ctx.session_id, |l| l.mark_sent(&key, kept));
+        if ctx
+            .store
+            .update(ctx.session_id, |l| l.mark_sent(&key, kept))
+            .is_none()
+        {
+            note_unsaved("tool_failure");
+        }
     }
     Ok(budget.render(Vec::new()))
 }
@@ -423,8 +466,13 @@ pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<Stri
     }
     report("subagent_start", &outcome, &budget);
     let kept = budget.kept_hashes();
-    ctx.store
-        .update(ctx.session_id, |l| l.mark_sent(&key, kept));
+    if ctx
+        .store
+        .update(ctx.session_id, |l| l.mark_sent(&key, kept))
+        .is_none()
+    {
+        note_unsaved("subagent_start");
+    }
     Ok(budget.render(Vec::new()))
 }
 
@@ -440,28 +488,38 @@ pub(super) fn record_local(
         HookEvent::PostToolBatch => {
             let empty = Vec::new();
             let calls = payload["tool_calls"].as_array().unwrap_or(&empty);
-            store.update(session_id, |l| {
-                for call in calls {
-                    let tool = call["tool_name"].as_str().unwrap_or_default();
-                    if tool == "Agent"
-                        && let Some(id) = call["tool_use_id"].as_str()
-                    {
-                        l.drop_subagent(id);
+            if store
+                .update(session_id, |l| {
+                    for call in calls {
+                        let tool = call["tool_name"].as_str().unwrap_or_default();
+                        if tool == "Agent"
+                            && let Some(id) = call["tool_use_id"].as_str()
+                        {
+                            l.drop_subagent(id);
+                        }
+                        l.push_activity(relevance::activity_from_tool_call(
+                            tool,
+                            &call["tool_input"],
+                            now,
+                        ));
                     }
-                    l.push_activity(relevance::activity_from_tool_call(
-                        tool,
-                        &call["tool_input"],
-                        now,
-                    ));
-                }
-            });
+                })
+                .is_none()
+            {
+                note_unsaved("record_local");
+            }
         }
         HookEvent::SubagentTask if payload["tool_name"].as_str() == Some("Agent") => {
             let input = &payload["tool_input"];
             let id = payload["tool_use_id"].as_str().unwrap_or_default();
             let kind = input["subagent_type"].as_str().unwrap_or("general-purpose");
             let prompt = input["prompt"].as_str().unwrap_or_default();
-            store.update(session_id, |l| l.queue_subagent(id, kind, prompt, now));
+            if store
+                .update(session_id, |l| l.queue_subagent(id, kind, prompt, now))
+                .is_none()
+            {
+                note_unsaved("record_local");
+            }
         }
         _ => {}
     }
@@ -1170,5 +1228,23 @@ mod tests {
         let payload = json!({"prompt": "work on it"});
         let out = turn_start(&ctx(&f, &payload), Vec::new()).await.unwrap();
         assert!(out.contains("keyword fact"), "{out}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod skip_notice_tests {
+    use super::{LedgerStore, ledger_or_skip};
+
+    #[test]
+    fn a_skipped_recall_tells_the_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LedgerStore::new(dir.path());
+        assert!(ledger_or_skip(&store, "../unsafe", "turn_start").is_none());
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            text.contains("recall was skipped for turn_start"),
+            "got: {text}"
+        );
     }
 }

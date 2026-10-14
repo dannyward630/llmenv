@@ -275,6 +275,10 @@ impl LedgerStore {
                     "recall ledger {} is corrupt, starting a fresh epoch: {e}",
                     path.display()
                 );
+                crate::agent_notice::record(
+                    "llmenv: the recall ledger is corrupt, so it started fresh. Records already \
+                     sent may repeat.",
+                );
                 Ledger::default()
             })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Ledger::default()),
@@ -631,5 +635,26 @@ mod tests {
             "a session in its first update keeps its lock"
         );
         assert!(dir.path().join("recall_session").join("s1.lock").exists());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod corrupt_notice_tests {
+    use super::{LedgerStore, MAIN_AGENT};
+
+    #[test]
+    fn a_corrupt_ledger_tells_the_agent_that_records_may_repeat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LedgerStore::new(dir.path());
+        store.update("s1", |l| l.mark_sent(MAIN_AGENT, ["keep".to_string()]));
+        let path = dir.path().join("recall_session").join("s1.json");
+        std::fs::write(&path, "not json").expect("corrupt the ledger");
+        assert!(
+            store.load("s1").is_some(),
+            "a corrupt ledger still loads as a fresh one"
+        );
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("recall ledger is corrupt"), "got: {text}");
     }
 }

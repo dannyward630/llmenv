@@ -733,7 +733,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         &claude_code_version,
     );
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
-    let notice = features_scope::take_unresolved_notice();
+    let notice = crate::agent_notice::current();
     match result {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
@@ -785,7 +785,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             eprintln!("llmenv: memory {event} skipped: {e}");
             // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
             if let Some(notice) = notice {
-                let out = adapter.emit_hook_context(hook_event_name, notice);
+                let out = adapter.emit_hook_context(hook_event_name, &notice);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -1575,7 +1575,10 @@ fn run_inner(
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
             let prev = std::fs::read_to_string(dedup_path)
                 .inspect_err(|e| {
-                    tracing::error!("failed to read dedup cache {}: {e}", dedup_path.display())
+                    // A missing file is the normal first run, so it is not an error.
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::error!("failed to read dedup cache {}: {e}", dedup_path.display());
+                    }
                 })
                 .ok();
             let is_unchanged = chunk_unchanged(prev.as_deref(), &storage_chunk);

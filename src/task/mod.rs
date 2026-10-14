@@ -1538,6 +1538,9 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> anyhow::Resu
         Ok(project) => project,
         Err(e) => {
             tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
+            crate::agent_notice::record(
+                "llmenv: the task reminder was skipped: the project tag cannot be resolved.",
+            );
             return Ok(Vec::new());
         }
     };
@@ -1767,6 +1770,9 @@ fn for_current_project(reminder: impl FnOnce(&str) -> String) -> String {
         Ok(project) => reminder(&project),
         Err(e) => {
             tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
+            crate::agent_notice::record(
+                "llmenv: the task reminder was skipped: the project tag cannot be resolved.",
+            );
             String::new()
         }
     }

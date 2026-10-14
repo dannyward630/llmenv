@@ -13,6 +13,7 @@
 //! external boundary hawk is told not to narrow.
 
 pub mod adapter;
+pub(crate) mod agent_notice;
 pub mod auth;
 pub(crate) mod cache_trace;
 pub mod cli;

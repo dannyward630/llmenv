@@ -47,22 +47,9 @@ pub(crate) fn resolve(config: Config, config_path: &Path) -> Config {
     resolve_with(config, config_dir, &active)
 }
 
-/// Set when bundle features were skipped in this hook process. The hook output reads it, so the
-/// agent sees the skip. A log line alone reaches no one, because the engine drops hook stderr.
-static UNRESOLVED_NOTICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-/// The notice for the agent, if bundle features were skipped in this hook process.
-/// Reads the value and leaves it set, so every call returns the same notice.
-pub(crate) fn take_unresolved_notice() -> Option<&'static str> {
-    UNRESOLVED_NOTICE.get().map(String::as_str)
-}
-
-/// Store the notice for `err`. The first notice wins, because the agent gets one notice per
-/// hook run. A later cause is logged so that it is not lost.
+/// Record the notice for `err`. The hook output carries it to the agent (see `agent_notice`).
 fn record_unresolved(err: &anyhow::Error) {
-    if UNRESOLVED_NOTICE.set(unresolved_notice(err)).is_err() {
-        tracing::error!("another bundle feature failure is not in the agent notice: {err:#}");
-    }
+    crate::agent_notice::record(unresolved_notice(err));
 }
 
 /// The text that tells the agent which features were skipped, and why.
@@ -341,9 +328,9 @@ mod tests {
             &active("user", "rust"),
         );
         assert_eq!(tracker_enabled(&out), None);
-        // The skip must reach the agent. The slot is set once per process, so only its presence
+        // The skip must reach the agent. The notice list is process-wide, so only its presence
         // is asserted.
-        assert!(take_unresolved_notice().is_some());
+        assert!(crate::agent_notice::current().is_some());
     }
 
     proptest::proptest! {
@@ -377,10 +364,12 @@ mod tests {
     fn a_config_path_with_no_parent_sets_the_notice_for_the_agent() {
         // `Path::new("")` has no parent, so bundle features are skipped.
         resolve(config_with_bundles(&["a"], "rust"), Path::new(""));
-        // The slot is set once per process, so only the shared text is asserted.
-        let notice = take_unresolved_notice();
+        // The notice list is process-wide, so only the shared text is asserted.
+        let notice = crate::agent_notice::current();
         assert!(
-            notice.is_some_and(|n| n.contains("Fix the cause")),
+            notice
+                .as_deref()
+                .is_some_and(|n| n.contains("Fix the cause")),
             "the skip must reach the agent: {notice:?}"
         );
     }

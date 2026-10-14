@@ -303,7 +303,17 @@ fn apply_model_switch(
     else {
         return;
     };
-    let mut doc = load(state_dir, session_id).unwrap_or_else(fallback);
+    let mut doc = match read(state_dir, session_id) {
+        Stored::Doc(doc) => *doc,
+        Stored::Missing => fallback(),
+        // The unreadable document is replaced by the save below, so its model history is lost.
+        Stored::Unreadable => {
+            crate::agent_notice::record(
+                "llmenv: the agent config could not be read, so its model history was reset.",
+            );
+            fallback()
+        }
+    };
     doc.model = Some(switch.to_model.clone());
     if effort.is_some() {
         doc.effort = effort;
