@@ -93,6 +93,7 @@ pub fn collect_status_data(
             cache: collect_cache(cache_root, hashing),
             session_log: collect_session_log(),
             tasks: Some(collect_tasks()),
+            unreadable: false,
         },
     }
 }
