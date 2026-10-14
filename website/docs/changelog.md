@@ -153,9 +153,17 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - The MCP proxy and hook log directory is opened once and checked by its file descriptor. This closes a race where the parent directory could be swapped for a symlink during log rotation (#2685) [fix:mcp]
 - A failed git read no longer looks like a clean tree or like no unpushed commits. `llmenv sync` reports the git error instead (#2700) [fix:sync]
 - A session activity update that cannot load its session now returns an error. The task change is already saved, so the command still succeeds (#2699) [fix:task]
-- A throttle that cannot be resolved, for example two entries active at once, shows `throttle unreadable` in the status line. Before, it showed throttling as off (#2698) [fix:statusline]
+- A throttle that cannot be resolved no longer shows throttling as off. Two entries active at once show `throttle conflict` (#2698, #2708) [fix:statusline]
 - A codebase-memory index skipped because `index_path` cannot be expanded now tells the agent at session start. Before, only the error log recorded the skip (#2697) [fix:hook]
 - A set `origin` URL with no readable repo name is an error that names the URL, with credentials masked. Before, the session fell back to the folder name with no message (#2701) [fix:memory]
+- The codebase-memory index checkpoint opens only when the `llmenv` executable path is known. Before, an unknown path left the checkpoint open, and every SessionStart ran the index again (#2696) [fix:hook]
+- A bad tag fails the hook before the session-start notices are built. Before, it dropped the codebase-memory notices (#2709) [fix:hook]
+- Recall logs the reason and injects nothing when the session recall ledger cannot be read. Before, an unreadable ledger or a busy lock read as empty, and recall repeated records already sent (#2711) [fix:hook]
+- An invalid or unreadable `llmenv-status.json`, and an unreadable entry during stale-session pruning, are logged at error level. Before, both were silent (#2712) [fix:statusline]
+
+### Security
+
+- Update `rustls` to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and RUSTSEC-2026-0349. They cover TLS secrets in `Debug` output, application data sent after an ECH rejection, unbounded Brotli certificate decompression, and a key-exchange downgrade [fix:deps]
 
 ## [3.12.2] - 2026-10-10
 
