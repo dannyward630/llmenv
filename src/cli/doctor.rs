@@ -1328,9 +1328,20 @@ pub(super) fn run_doctor(
     if skew_relevant {
         for adapter in crate::adapter::registered_adapters() {
             let adapter_cache = cache_dir.join(adapter.name());
-            if let Ok(entries) = std::fs::read_dir(&adapter_cache) {
+            if let Ok(entries) = std::fs::read_dir(&adapter_cache).inspect_err(|e| {
+                // A missing cache is normal for an adapter that never ran.
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::error!(
+                        "cannot read {} for the version skew check: {e}",
+                        adapter_cache.display()
+                    );
+                }
+            }) {
                 let mut cached_versions: Vec<String> = Vec::new();
-                for entry in entries.flatten() {
+                let readable = entries.filter_map(|entry| {
+                    crate::paths::readable_entry(&adapter_cache, "the version skew check", entry)
+                });
+                for entry in readable {
                     let path = entry.path();
                     if !path.is_dir() {
                         continue;
@@ -1372,7 +1383,7 @@ pub(super) fn run_doctor(
         }
     }
 
-    // Check git remote is reachable
+    // The remote is read from the config only. No network call is made.
     let in_git_repo = super::is_git_repo(&config_dir).unwrap_or_else(|e| {
         eprintln!("{warn} Git repository check failed: {e:#}");
         false
@@ -1381,7 +1392,7 @@ pub(super) fn run_doctor(
         match super::check_git_remote(&config_dir) {
             Ok(remote) => {
                 let safe_url = crate::git::sanitize_git_url(&remote);
-                eprintln!("{pass} Git remote reachable: {}", safe_url);
+                eprintln!("{pass} Git remote configured: {}", safe_url);
             }
             Err(e) => eprintln!("{warn} Git remote check failed: {}", e),
         }
@@ -1867,18 +1878,26 @@ pub(super) fn run_doctor(
         if !mkt_path.join(".git").exists() {
             continue;
         }
-        let Some(head) = cache::git_head(&mkt_path) else {
-            // Clone exists but HEAD can't be resolved — let the `plugin-sync`
-            // / materialize paths report the broken clone.
-            continue;
+        let head = match cache::git_head(&mkt_path) {
+            Ok(head) => head,
+            Err(e) => {
+                eprintln!(
+                    "{warn} marketplace '{}': cannot read HEAD in its local clone: {e}",
+                    m.name,
+                );
+                continue;
+            }
         };
-        let Some(pinned_sha) = cache::git_peeled_ref(&mkt_path, pinned_ref) else {
-            eprintln!(
-                "{warn} marketplace '{}' pinned to '{}' but that ref cannot be \
-                 resolved in the local clone — run `llmenv plugin-sync` to repair",
-                m.name, pinned_ref,
-            );
-            continue;
+        let pinned_sha = match cache::git_peeled_ref(&mkt_path, pinned_ref) {
+            Ok(sha) => sha,
+            Err(e) => {
+                eprintln!(
+                    "{warn} marketplace '{}' pinned to '{}' cannot be resolved in the local \
+                     clone: {e} — run `llmenv plugin-sync` to repair",
+                    m.name, pinned_ref,
+                );
+                continue;
+            }
         };
         if head != pinned_sha {
             eprintln!(

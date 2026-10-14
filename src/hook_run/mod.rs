@@ -732,8 +732,12 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         adapter.name(),
         &claude_code_version,
     );
+    // A failed memory step must not read as "nothing to recall" to the agent.
+    if let Err(e) = &result {
+        crate::agent_notice::record(memory_skipped_notice(event, e));
+    }
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
-    let notice = features_scope::take_unresolved_notice();
+    let notice = crate::agent_notice::current();
     match result {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
@@ -785,7 +789,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             eprintln!("llmenv: memory {event} skipped: {e}");
             // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
             if let Some(notice) = notice {
-                let out = adapter.emit_hook_context(hook_event_name, notice);
+                let out = adapter.emit_hook_context(hook_event_name, &notice);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -1361,8 +1365,12 @@ fn run_inner(
     // enabling task_tracker would silently drop Stop-event session logging
     // (that early-return shape was tried and reverted; see the git history).
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
-        let state_dir = crate::paths::state_dir()?;
-        let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload);
+        // A missing state dir skips the reminder and logs why. A `?` here would drop the Stop
+        // output with it (#2719).
+        let reminder =
+            state_dir_or_log("stop reminder skipped").map_or_else(String::new, |state_dir| {
+                resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload)
+            });
         emit_trace_timing(t0, t_config, None, None, None);
         return Ok(reminder);
     }
@@ -1569,11 +1577,7 @@ fn run_inner(
         // would drop the notices built above (#2719).
         let session_end_dedup_path = dedup_snapshot_path(event, crate::paths::state_dir);
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
-            let prev = std::fs::read_to_string(dedup_path)
-                .inspect_err(|e| {
-                    tracing::error!("failed to read dedup cache {}: {e}", dedup_path.display())
-                })
-                .ok();
+            let prev = read_dedup_snapshot(dedup_path);
             let is_unchanged = chunk_unchanged(prev.as_deref(), &storage_chunk);
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
@@ -1827,33 +1831,76 @@ fn run_inner(
     match pipeline_result {
         Ok(out) => Ok(out),
         Err(e) => {
-            // #867: an already-computed PreToolUse decision (read-once or the
-            // #985 task-tool redirect) must not be lost to an unrelated pipeline
-            // error — recover it instead of letting `?` propagate the error past
-            // the point where it was decided. Still surfaced via the same
-            // `eprintln!` convention `run()`'s Err arm uses (pre-pr-review
-            // finding: a bare `warn!` is invisible with the default `RUST_LOG`,
-            // silently hiding the diagnostic even though the result is preserved).
-            if let Some(text) = pre_tool_text {
-                eprintln!("llmenv: memory {event} skipped: {e}");
-                warn!(
-                    error = %e,
-                    "hook-run: pipeline failed after a PreToolUse decision was \
-                     already computed; returning it instead of silently dropping it"
-                );
-                // #1128: this is also a return point, though in practice the
-                // memory-client/network failures this branch was written for
-                // (#867) are caught fail-soft inside the pipeline itself and
-                // never reach here — this covers the rarer errors that do
-                // (e.g. a tag/bundle validation failure). t_scope/t_chunk/
-                // t_end are lost along with the closure that computed them.
-                emit_trace_timing(t0, t_config, None, None, None);
-                Ok(text)
-            } else {
-                Err(e)
-            }
+            // #1128: this is also a return point. The memory-client and network failures
+            // (#867) are caught fail-soft inside the pipeline, so this covers the rarer errors
+            // that reach here, such as a tag or bundle validation failure. t_scope, t_chunk,
+            // and t_end are lost with the closure that computed them.
+            let text =
+                recover_from_pipeline_error(event, e, [pre_tool_text, turn_text, nudge_text])?;
+            emit_trace_timing(t0, t_config, None, None, None);
+            Ok(text)
         }
     }
+}
+
+/// Keeps the hook text that was computed before the pipeline failed.
+///
+/// A pipeline error must not drop a PreToolUse decision (#867), the turn digest, or a nudge.
+/// A nudge is recorded as delivered when it is computed, so dropping it here would lose it
+/// for good (#2730). Without any computed text, the error is returned unchanged.
+fn recover_from_pipeline_error(
+    event: HookEvent,
+    error: anyhow::Error,
+    precomputed: [Option<String>; 3],
+) -> anyhow::Result<String> {
+    let Some(recovered) = join_precomputed(precomputed) else {
+        return Err(error);
+    };
+    // The default `RUST_LOG` hides `warn!`, so the error also goes to stderr. The agent gets it
+    // as a notice, so the kept text does not hide the skipped memory step.
+    eprintln!("llmenv: memory {event} skipped: {error}");
+    crate::agent_notice::record(memory_skipped_notice(event, &error));
+    warn!(
+        error = %error,
+        "hook-run: pipeline failed after hook text was already computed; \
+         returning it instead of silently dropping it"
+    );
+    Ok(recovered)
+}
+
+/// The last stored SessionEnd chunk, or `None`. A missing file is the normal first run, so only
+/// another read error is logged.
+fn read_dedup_snapshot(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .inspect_err(|e| {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!("failed to read dedup cache {}: {e}", path.display());
+            }
+        })
+        .ok()
+}
+
+/// The agent notice for a hook run whose memory step failed.
+fn memory_skipped_notice(event: impl std::fmt::Display, err: &anyhow::Error) -> String {
+    format!(
+        "llmenv: memory {event} skipped: {}",
+        mcp_health::tidy_reason(&format!("{err:#}"))
+    )
+}
+
+/// Joins the precomputed hook texts in the order the success path appends them.
+///
+/// Returns `None` when no text was computed, so the caller can tell "nothing to keep" from
+/// "a text that is empty".
+fn join_precomputed(precomputed: [Option<String>; 3]) -> Option<String> {
+    if precomputed.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut out = String::new();
+    for text in precomputed.into_iter().flatten().filter(|t| !t.is_empty()) {
+        append_read_once_result(&mut out, &text);
+    }
+    Some(out)
 }
 
 /// Run one event's ordered memory actions and concatenate their text output.
@@ -3169,6 +3216,104 @@ fn append_section(out: &mut String, section: &str) {
         out.push('\n');
     }
     out.push_str(section);
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod pipeline_recovery_tests {
+    use super::{HookEvent, join_precomputed, recover_from_pipeline_error};
+    use proptest::strategy::Strategy as _;
+
+    fn failure() -> anyhow::Error {
+        anyhow::anyhow!("tag `bad tag` is not valid")
+    }
+
+    #[test]
+    fn a_failed_pipeline_keeps_a_computed_nudge() {
+        // #2730: the nudge is recorded as delivered when it is computed, so it must reach the agent.
+        let text = recover_from_pipeline_error(
+            HookEvent::PostToolUse,
+            failure(),
+            [None, None, Some("nudge: wait for the user".to_string())],
+        )
+        .expect("a computed nudge must survive the pipeline error");
+        assert_eq!(text, "nudge: wait for the user");
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("llmenv: memory") && notice.contains("bad tag"),
+            "the skipped memory step must reach the agent: {notice}"
+        );
+        assert!(
+            notice.contains("memory PostToolUse skipped") || notice.contains("skipped: tag"),
+            "the skipped memory step must reach the agent: {notice}"
+        );
+    }
+
+    #[test]
+    fn a_failed_pipeline_with_no_computed_text_returns_the_error() {
+        let err =
+            recover_from_pipeline_error(HookEvent::PostToolUse, failure(), [None, None, None])
+                .expect_err("nothing to keep, so the error must propagate");
+        assert!(err.to_string().contains("bad tag"), "got: {err}");
+    }
+
+    #[test]
+    fn precomputed_texts_join_in_success_path_order() {
+        let joined = join_precomputed([
+            Some("pre".to_string()),
+            Some("turn".to_string()),
+            Some("nudge".to_string()),
+        ]);
+        assert_eq!(joined.as_deref(), Some("pre\nturn\nnudge"));
+    }
+
+    #[test]
+    fn an_empty_precomputed_text_adds_no_separator() {
+        let joined = join_precomputed([Some(String::new()), None, Some("nudge".to_string())]);
+        assert_eq!(joined.as_deref(), Some("nudge"));
+    }
+
+    #[test]
+    fn a_deny_precomputed_text_keeps_its_prefix() {
+        // Matches the success path: the deny marker stays first, and later text appends after it.
+        let joined = join_precomputed([
+            Some("__DENY__:already read".to_string()),
+            Some("turn".to_string()),
+            None,
+        ]);
+        assert_eq!(joined.as_deref(), Some("__DENY__:already read\nturn"));
+    }
+
+    /// A slot value: absent, empty, plain text, or a deny marker.
+    fn slot() -> impl proptest::strategy::Strategy<Value = Option<String>> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(None),
+            proptest::strategy::Just(Some(String::new())),
+            "[a-z]{1,8}".prop_map(Some),
+            "[a-z]{1,8}".prop_map(|t| Some(format!("__DENY__:{t}"))),
+        ]
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn joined_output_follows_the_success_path_rules(a in slot(), b in slot(), c in slot()) {
+            let slots = [a, b, c];
+            let joined = join_precomputed(slots.clone());
+            proptest::prop_assert_eq!(joined.is_none(), slots.iter().all(Option::is_none));
+            let texts: Vec<&str> = slots
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .filter(|t| !t.is_empty())
+                .collect();
+            let joined = joined.unwrap_or_default();
+            match texts.iter().rposition(|t| t.starts_with("__DENY__:")) {
+                // The last deny replaces what came before it; later texts append after it.
+                Some(last_deny) => proptest::prop_assert_eq!(joined, texts[last_deny..].join("\n")),
+                None => proptest::prop_assert_eq!(joined, texts.join("\n")),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

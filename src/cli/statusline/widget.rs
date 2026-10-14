@@ -469,17 +469,19 @@ fn render_cache_usage(
 /// Shared by [`render_branch`] and the `pr` widget's self-resolving fallback
 /// ([`resolve_pr`]) — both need "what branch is this" before they can do
 /// anything engine-independent.
-fn resolve_branch_name(data: &EngineData) -> Option<String> {
-    data.branch
+fn resolve_branch_name(data: &EngineData) -> Result<Option<String>, String> {
+    let named = data
+        .branch
         .as_ref()
         .and_then(|b| b.name.clone())
-        .or_else(|| data.worktree.as_ref().and_then(|w| w.branch.clone()))
-        .or_else(|| {
-            data.workspace
-                .as_ref()
-                .and_then(|w| w.current_dir.as_deref())
-                .and_then(|dir| git_branch(Path::new(dir)))
-        })
+        .or_else(|| data.worktree.as_ref().and_then(|w| w.branch.clone()));
+    if named.is_some() {
+        return Ok(named);
+    }
+    data.workspace
+        .as_ref()
+        .and_then(|w| w.current_dir.as_deref())
+        .map_or(Ok(None), |dir| git_branch(Path::new(dir)))
 }
 
 fn render_branch(
@@ -496,8 +498,11 @@ fn render_branch_with(
     use_color: bool,
     gh: GhPrCmd<'_>,
 ) -> String {
-    let Some(name) = resolve_branch_name(data) else {
-        return String::new();
+    let name = match resolve_branch_name(data) {
+        Ok(Some(name)) => name,
+        Ok(None) => return String::new(),
+        // Same label as the other unreadable widgets. The segment is never hidden silently.
+        Err(_) => return "branch: unreadable".to_string(),
     };
     let name = super::sanitize(&name); // untrusted (stdin / git ref)
     let format = cfg
@@ -519,14 +524,26 @@ fn render_branch_with(
 
 /// Current branch by reading `.git/HEAD` directly (no `git` subprocess — the
 /// statusline re-renders on every UI tick, and the codebase already avoids
-/// per-render forks). Returns `None` for a detached HEAD or when no repository
+/// per-render forks). Returns `Ok(None)` for a detached HEAD or when no repository
 /// encloses `dir`.
-fn git_branch(dir: &Path) -> Option<String> {
-    let git_dir = find_git_dir(dir)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    head.trim()
+///
+/// # Errors
+/// `HEAD` exists in a repository but cannot be read (#2710).
+fn git_branch(dir: &Path) -> Result<Option<String>, String> {
+    let Some(git_dir) = find_git_dir(dir) else {
+        return Ok(None);
+    };
+    let head_path = git_dir.join("HEAD");
+    let head = match std::fs::read_to_string(&head_path) {
+        Ok(head) => head,
+        // A pruned worktree points at a gitdir that is gone. That is no branch, not a read error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", head_path.display())),
+    };
+    Ok(head
+        .trim()
         .strip_prefix("ref: refs/heads/")
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// Locate the git directory enclosing `start`, walking up its ancestors.
@@ -544,7 +561,9 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
         // `.git` file: `gitdir: <path>` pointer (worktree/submodule).
         let content = std::fs::read_to_string(&dot_git).ok()?;
         let gitdir = content.trim().strip_prefix("gitdir: ")?;
-        return Some(PathBuf::from(gitdir));
+        // A submodule pointer is relative to the `.git` file, not to the process cwd. `join`
+        // keeps an absolute pointer as it is.
+        return Some(dir.join(gitdir));
     }
     None
 }
@@ -670,7 +689,7 @@ fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Option<PrInfo> {
         .workspace
         .as_ref()
         .and_then(|w| w.current_dir.as_deref())?;
-    let branch = resolve_branch_name(data)?;
+    let branch = resolve_branch_name(data).ok().flatten()?;
     derive_pr(
         gh,
         Path::new(dir),
@@ -1548,7 +1567,15 @@ mod tests {
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
         )
         .unwrap();
-        assert_eq!(git_branch(dir.path()), None);
+        assert_eq!(git_branch(dir.path()), Ok(None));
+    }
+
+    #[test]
+    fn git_branch_reports_an_unreadable_head_instead_of_hiding_it() {
+        // A directory where HEAD should be cannot be read as a file (#2710).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git").join("HEAD")).unwrap();
+        assert!(git_branch(dir.path()).is_err());
     }
 
     #[test]
@@ -1565,6 +1592,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(find_git_dir(&work), Some(real_gitdir));
+    }
+
+    #[test]
+    fn find_git_dir_resolves_a_relative_pointer_against_the_git_file() {
+        // A submodule's `.git` file holds a relative pointer such as `../.git/modules/x`.
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join(".git"), "gitdir: ../real-gitdir\n").unwrap();
+        assert_eq!(find_git_dir(&work), Some(work.join("../real-gitdir")));
+    }
+
+    #[test]
+    fn git_branch_reads_a_missing_head_as_no_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".git"), "gitdir: pruned-gitdir\n").unwrap();
+        assert_eq!(git_branch(dir.path()), Ok(None));
+    }
+
+    /// A checkout whose `.git/HEAD` holds `content`.
+    fn checkout_with_head(content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("HEAD"), content).unwrap();
+        dir
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn git_branch_reads_any_branch_name_from_head(name in "[a-z0-9][a-z0-9/_.-]{0,30}") {
+            let dir = checkout_with_head(&format!("ref: refs/heads/{name}\n"));
+            proptest::prop_assert_eq!(git_branch(dir.path()), Ok(Some(name)));
+        }
+
+        #[test]
+        fn git_branch_reads_a_detached_head_as_no_branch(sha in "[0-9a-f]{40}") {
+            let dir = checkout_with_head(&format!("{sha}\n"));
+            proptest::prop_assert_eq!(git_branch(dir.path()), Ok(None));
+        }
     }
 
     #[test]
