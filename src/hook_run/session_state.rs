@@ -66,7 +66,17 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
             return;
         }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::error!(
+                    "stale-session pruning skipped an entry in {}: {e}",
+                    dir.display()
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -154,12 +164,32 @@ pub(crate) fn removal_error_to_log(result: std::io::Result<()>) -> Option<std::i
     }
 }
 
+/// The entries of `dir`, or `None` after a log line that names why they cannot be read. A missing
+/// directory is normal, so it returns `None` with no log.
+fn read_dir_logged(dir: &Path, purpose: &str) -> Option<std::fs::ReadDir> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            tracing::error!("cannot read {} for {purpose}: {e}", dir.display());
+            None
+        }
+    }
+}
+
 pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Some(entries) = read_dir_logged(dir, "stale lock pruning") else {
         return;
     };
     let max_age = Duration::from_secs(max_age_days * 86_400);
-    for path in entries.flatten().map(|e| e.path()) {
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                tracing::error!("lock pruning skipped an entry in {}: {e}", dir.display());
+                continue;
+            }
+        };
         let stale = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()
