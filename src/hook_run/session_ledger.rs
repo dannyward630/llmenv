@@ -233,11 +233,12 @@ impl LedgerStore {
         }
     }
 
-    /// Read the ledger. `None` only for an unsafe `session_id` or a busy lock.
-    /// An unreadable file reads as empty here, because nothing is written back.
+    /// Read the ledger. `None` for an unsafe `session_id`, a busy lock, or a file that exists
+    /// but cannot be read. An empty default would make the caller forget what the session
+    /// already received and repeat it (#2711).
     pub(crate) fn load(&self, session_id: &str) -> Option<Ledger> {
         let _lock = self.lock(session_id)?;
-        Some(self.read(session_id).unwrap_or_default())
+        self.read(session_id)
     }
 
     /// Apply `f` under the lock and save. `None` for an unsafe `session_id`, a
@@ -400,6 +401,19 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(result, None, "an unreadable ledger must skip the write");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn load_gives_no_ledger_for_an_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, store) = store();
+        store.update("s1", |l| l.mark_sent(MAIN_AGENT, ["keep".to_string()]));
+        let path = dir.path().join("recall_session").join("s1.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let loaded = store.load("s1");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // An empty default would make the caller forget "keep" and send it again.
+        assert_eq!(loaded, None, "an unreadable ledger must not read as empty");
     }
 
     #[test]

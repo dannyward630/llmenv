@@ -39,4 +39,8 @@ exclude_re = [
   # and a warning log line. The returned value is the same either way.
   "replace match guard e.kind\\(\\) == std::io::ErrorKind::NotFound with (true|false) in (load_last|clear_last)",
   "replace == with != in (load_last|clear_last)",
+  # The NotFound guard in read_dir_logged only chooses between a silent None and a logged None.
+  # The returned value is the same either way.
+  "replace match guard e.kind\\(\\) == std::io::ErrorKind::NotFound with (true|false) in read_dir_logged",
+  "replace == with != in read_dir_logged",
 ]
