@@ -478,14 +478,10 @@ fn resolve_branch_name(data: &EngineData) -> Result<Option<String>, String> {
     if named.is_some() {
         return Ok(named);
     }
-    match data
-        .workspace
+    data.workspace
         .as_ref()
         .and_then(|w| w.current_dir.as_deref())
-    {
-        Some(dir) => git_branch(Path::new(dir)),
-        None => Ok(None),
-    }
+        .map_or(Ok(None), |dir| git_branch(Path::new(dir)))
 }
 
 fn render_branch(
@@ -538,8 +534,12 @@ fn git_branch(dir: &Path) -> Result<Option<String>, String> {
         return Ok(None);
     };
     let head_path = git_dir.join("HEAD");
-    let head = std::fs::read_to_string(&head_path)
-        .map_err(|e| format!("cannot read {}: {e}", head_path.display()))?;
+    let head = match std::fs::read_to_string(&head_path) {
+        Ok(head) => head,
+        // A pruned worktree points at a gitdir that is gone. That is no branch, not a read error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", head_path.display())),
+    };
     Ok(head
         .trim()
         .strip_prefix("ref: refs/heads/")
@@ -561,7 +561,9 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
         // `.git` file: `gitdir: <path>` pointer (worktree/submodule).
         let content = std::fs::read_to_string(&dot_git).ok()?;
         let gitdir = content.trim().strip_prefix("gitdir: ")?;
-        return Some(PathBuf::from(gitdir));
+        // A submodule pointer is relative to the `.git` file, not to the process cwd. `join`
+        // keeps an absolute pointer as it is.
+        return Some(dir.join(gitdir));
     }
     None
 }
@@ -1590,6 +1592,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(find_git_dir(&work), Some(real_gitdir));
+    }
+
+    #[test]
+    fn find_git_dir_resolves_a_relative_pointer_against_the_git_file() {
+        // A submodule's `.git` file holds a relative pointer such as `../.git/modules/x`.
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join(".git"), "gitdir: ../real-gitdir\n").unwrap();
+        assert_eq!(find_git_dir(&work), Some(work.join("../real-gitdir")));
+    }
+
+    #[test]
+    fn git_branch_reads_a_missing_head_as_no_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".git"), "gitdir: pruned-gitdir\n").unwrap();
+        assert_eq!(git_branch(dir.path()), Ok(None));
+    }
+
+    /// A checkout whose `.git/HEAD` holds `content`.
+    fn checkout_with_head(content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("HEAD"), content).unwrap();
+        dir
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn git_branch_reads_any_branch_name_from_head(name in "[a-z0-9][a-z0-9/_.-]{0,30}") {
+            let dir = checkout_with_head(&format!("ref: refs/heads/{name}\n"));
+            proptest::prop_assert_eq!(git_branch(dir.path()), Ok(Some(name)));
+        }
+
+        #[test]
+        fn git_branch_reads_a_detached_head_as_no_branch(sha in "[0-9a-f]{40}") {
+            let dir = checkout_with_head(&format!("{sha}\n"));
+            proptest::prop_assert_eq!(git_branch(dir.path()), Ok(None));
+        }
     }
 
     #[test]
