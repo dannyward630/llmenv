@@ -2271,8 +2271,27 @@ const PLUGIN_INSTALL_PATHS_SIDECAR_FILE: &str = ".llmenv-plugin-paths.json";
 /// Read the previously-rendered hooks sidecar. Returns `None` when absent or
 /// unparseable — reconcile then falls back to union-only behavior.
 fn read_hooks_sidecar(path: &Path) -> Option<serde_json::Value> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    // A missing sidecar is the normal first-run case. Any other failure makes reconcile
+    // union-only, so it is logged for the user (#2721).
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::error!(
+                "cannot read hooks sidecar {}, hooks are not reconciled: {e}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .inspect_err(|e| {
+            tracing::error!(
+                "hooks sidecar {} is not valid JSON, hooks are not reconciled: {e}",
+                path.display()
+            );
+        })
+        .ok()
 }
 
 /// Build the `{"<plugin>@<marketplace>": "<install_path>"}` sidecar body for
@@ -3065,6 +3084,37 @@ fn apply_mcp_tier_permissions(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn a_hooks_sidecar_reads_back_what_the_writer_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidecar.json");
+        for value in [
+            serde_json::json!({"p@m": "/install/path"}),
+            serde_json::json!({}),
+            serde_json::json!(null),
+            serde_json::json!([1, 2]),
+        ] {
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(super::read_hooks_sidecar(&path), Some(value));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_hooks_sidecar_is_logged_and_read_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.json");
+        assert!(super::read_hooks_sidecar(&missing).is_none());
+        // A directory where the sidecar file belongs makes the read fail, not miss.
+        let unreadable = dir.path().join("unreadable.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        let mut result = None;
+        let logs = crate::test_log_capture::capture_logs(|| {
+            result = super::read_hooks_sidecar(&unreadable);
+        });
+        assert!(result.is_none());
+        assert!(logs.contains("cannot read hooks sidecar"), "{logs}");
+    }
+
     use super::super::AgentAdapter;
     use super::{
         CBM_DESTRUCTIVE, CBM_MCP_PREFIX, CBM_MUTATION, CBM_READ_ONLY, CLAUDE_JSON_FILE,
