@@ -3217,6 +3217,7 @@ fn append_section(out: &mut String, section: &str) {
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod pipeline_recovery_tests {
     use super::{HookEvent, join_precomputed, recover_from_pipeline_error};
+    use proptest::strategy::Strategy as _;
 
     fn failure() -> anyhow::Error {
         anyhow::anyhow!("tag `bad tag` is not valid")
@@ -3276,6 +3277,37 @@ mod pipeline_recovery_tests {
             None,
         ]);
         assert_eq!(joined.as_deref(), Some("__DENY__:already read\nturn"));
+    }
+
+    /// A slot value: absent, empty, plain text, or a deny marker.
+    fn slot() -> impl proptest::strategy::Strategy<Value = Option<String>> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(None),
+            proptest::strategy::Just(Some(String::new())),
+            "[a-z]{1,8}".prop_map(Some),
+            "[a-z]{1,8}".prop_map(|t| Some(format!("__DENY__:{t}"))),
+        ]
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn joined_output_follows_the_success_path_rules(a in slot(), b in slot(), c in slot()) {
+            let slots = [a, b, c];
+            let joined = join_precomputed(slots.clone());
+            proptest::prop_assert_eq!(joined.is_none(), slots.iter().all(Option::is_none));
+            let texts: Vec<&str> = slots
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .filter(|t| !t.is_empty())
+                .collect();
+            let joined = joined.unwrap_or_default();
+            match texts.iter().rposition(|t| t.starts_with("__DENY__:")) {
+                // The last deny replaces what came before it; later texts append after it.
+                Some(last_deny) => proptest::prop_assert_eq!(joined, texts[last_deny..].join("\n")),
+                None => proptest::prop_assert_eq!(joined, texts.join("\n")),
+            }
+        }
     }
 }
 
