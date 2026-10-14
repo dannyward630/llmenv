@@ -1577,14 +1577,7 @@ fn run_inner(
         // would drop the notices built above (#2719).
         let session_end_dedup_path = dedup_snapshot_path(event, crate::paths::state_dir);
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
-            let prev = std::fs::read_to_string(dedup_path)
-                .inspect_err(|e| {
-                    // A missing file is the normal first run, so it is not an error.
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        tracing::error!("failed to read dedup cache {}: {e}", dedup_path.display());
-                    }
-                })
-                .ok();
+            let prev = read_dedup_snapshot(dedup_path);
             let is_unchanged = chunk_unchanged(prev.as_deref(), &storage_chunk);
             if is_unchanged {
                 debug!("chunk unchanged since last store, skipping");
@@ -1873,6 +1866,18 @@ fn recover_from_pipeline_error(
          returning it instead of silently dropping it"
     );
     Ok(recovered)
+}
+
+/// The last stored SessionEnd chunk, or `None`. A missing file is the normal first run, so only
+/// another read error is logged.
+fn read_dedup_snapshot(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .inspect_err(|e| {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::error!("failed to read dedup cache {}: {e}", path.display());
+            }
+        })
+        .ok()
 }
 
 /// The agent notice for a hook run whose memory step failed.
