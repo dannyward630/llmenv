@@ -1043,7 +1043,15 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
         .context("failed to get git remote")?;
 
     if !output.status.success() {
-        anyhow::bail!("no remote configured");
+        // `git config --get` exits 1 when the key is unset. Any other exit is a git failure, and
+        // it must not read as "no remote" (#2710).
+        if output.status.code() == Some(1) {
+            anyhow::bail!("no remote configured");
+        }
+        anyhow::bail!(
+            "git could not read the remote: {}",
+            git::git_failure_detail(&output.stderr, &output.stdout, output.status)
+        );
     }
 
     let remote = String::from_utf8(output.stdout)?.trim().to_string();
@@ -7231,5 +7239,27 @@ mod config_guard_tests {
             // Should never panic, even on malformed paths
             let _ = is_within_cache(path, path_str);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod git_remote_tests {
+    use super::check_git_remote;
+
+    #[test]
+    fn a_git_failure_is_not_reported_as_no_remote() {
+        // A `.git` file that names a missing gitdir makes git exit 128 (#2710).
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(".git"),
+            "gitdir: /nonexistent/llmenv-2710\n",
+        )
+        .expect("write");
+        let err = check_git_remote(dir.path()).expect_err("a broken checkout has no remote");
+        assert!(
+            !err.to_string().contains("no remote configured"),
+            "got: {err}"
+        );
     }
 }

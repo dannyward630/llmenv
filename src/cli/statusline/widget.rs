@@ -469,17 +469,23 @@ fn render_cache_usage(
 /// Shared by [`render_branch`] and the `pr` widget's self-resolving fallback
 /// ([`resolve_pr`]) — both need "what branch is this" before they can do
 /// anything engine-independent.
-fn resolve_branch_name(data: &EngineData) -> Option<String> {
-    data.branch
+fn resolve_branch_name(data: &EngineData) -> Result<Option<String>, String> {
+    let named = data
+        .branch
         .as_ref()
         .and_then(|b| b.name.clone())
-        .or_else(|| data.worktree.as_ref().and_then(|w| w.branch.clone()))
-        .or_else(|| {
-            data.workspace
-                .as_ref()
-                .and_then(|w| w.current_dir.as_deref())
-                .and_then(|dir| git_branch(Path::new(dir)))
-        })
+        .or_else(|| data.worktree.as_ref().and_then(|w| w.branch.clone()));
+    if named.is_some() {
+        return Ok(named);
+    }
+    match data
+        .workspace
+        .as_ref()
+        .and_then(|w| w.current_dir.as_deref())
+    {
+        Some(dir) => git_branch(Path::new(dir)),
+        None => Ok(None),
+    }
 }
 
 fn render_branch(
@@ -496,8 +502,11 @@ fn render_branch_with(
     use_color: bool,
     gh: GhPrCmd<'_>,
 ) -> String {
-    let Some(name) = resolve_branch_name(data) else {
-        return String::new();
+    let name = match resolve_branch_name(data) {
+        Ok(Some(name)) => name,
+        Ok(None) => return String::new(),
+        // Same label as the other unreadable widgets. The segment is never hidden silently.
+        Err(_) => return "branch: unreadable".to_string(),
     };
     let name = super::sanitize(&name); // untrusted (stdin / git ref)
     let format = cfg
@@ -519,14 +528,22 @@ fn render_branch_with(
 
 /// Current branch by reading `.git/HEAD` directly (no `git` subprocess — the
 /// statusline re-renders on every UI tick, and the codebase already avoids
-/// per-render forks). Returns `None` for a detached HEAD or when no repository
+/// per-render forks). Returns `Ok(None)` for a detached HEAD or when no repository
 /// encloses `dir`.
-fn git_branch(dir: &Path) -> Option<String> {
-    let git_dir = find_git_dir(dir)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    head.trim()
+///
+/// # Errors
+/// `HEAD` exists in a repository but cannot be read (#2710).
+fn git_branch(dir: &Path) -> Result<Option<String>, String> {
+    let Some(git_dir) = find_git_dir(dir) else {
+        return Ok(None);
+    };
+    let head_path = git_dir.join("HEAD");
+    let head = std::fs::read_to_string(&head_path)
+        .map_err(|e| format!("cannot read {}: {e}", head_path.display()))?;
+    Ok(head
+        .trim()
         .strip_prefix("ref: refs/heads/")
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// Locate the git directory enclosing `start`, walking up its ancestors.
@@ -670,7 +687,7 @@ fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Option<PrInfo> {
         .workspace
         .as_ref()
         .and_then(|w| w.current_dir.as_deref())?;
-    let branch = resolve_branch_name(data)?;
+    let branch = resolve_branch_name(data).ok().flatten()?;
     derive_pr(
         gh,
         Path::new(dir),
@@ -1548,7 +1565,15 @@ mod tests {
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
         )
         .unwrap();
-        assert_eq!(git_branch(dir.path()), None);
+        assert_eq!(git_branch(dir.path()), Ok(None));
+    }
+
+    #[test]
+    fn git_branch_reports_an_unreadable_head_instead_of_hiding_it() {
+        // A directory where HEAD should be cannot be read as a file (#2710).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git").join("HEAD")).unwrap();
+        assert!(git_branch(dir.path()).is_err());
     }
 
     #[test]

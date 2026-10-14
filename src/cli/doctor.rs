@@ -1867,18 +1867,26 @@ pub(super) fn run_doctor(
         if !mkt_path.join(".git").exists() {
             continue;
         }
-        let Some(head) = cache::git_head(&mkt_path) else {
-            // Clone exists but HEAD can't be resolved — let the `plugin-sync`
-            // / materialize paths report the broken clone.
-            continue;
+        let head = match cache::git_head(&mkt_path) {
+            Ok(head) => head,
+            Err(e) => {
+                eprintln!(
+                    "{warn} marketplace '{}': cannot read HEAD in its local clone: {e}",
+                    m.name,
+                );
+                continue;
+            }
         };
-        let Some(pinned_sha) = cache::git_peeled_ref(&mkt_path, pinned_ref) else {
-            eprintln!(
-                "{warn} marketplace '{}' pinned to '{}' but that ref cannot be \
-                 resolved in the local clone — run `llmenv plugin-sync` to repair",
-                m.name, pinned_ref,
-            );
-            continue;
+        let pinned_sha = match cache::git_peeled_ref(&mkt_path, pinned_ref) {
+            Ok(sha) => sha,
+            Err(e) => {
+                eprintln!(
+                    "{warn} marketplace '{}' pinned to '{}' cannot be resolved in the local \
+                     clone: {e} — run `llmenv plugin-sync` to repair",
+                    m.name, pinned_ref,
+                );
+                continue;
+            }
         };
         if head != pinned_sha {
             eprintln!(
