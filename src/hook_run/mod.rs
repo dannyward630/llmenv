@@ -1361,8 +1361,12 @@ fn run_inner(
     // enabling task_tracker would silently drop Stop-event session logging
     // (that early-return shape was tried and reverted; see the git history).
     if event == HookEvent::Stop && task_tracker_enabled && !log_cfg.any_sink_enabled() {
-        let state_dir = crate::paths::state_dir()?;
-        let reminder = resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload);
+        // A missing state dir skips the reminder and logs why. A `?` here would drop the Stop
+        // output with it (#2719).
+        let reminder =
+            state_dir_or_log("stop reminder skipped").map_or_else(String::new, |state_dir| {
+                resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload)
+            });
         emit_trace_timing(t0, t_config, None, None, None);
         return Ok(reminder);
     }
@@ -1827,33 +1831,55 @@ fn run_inner(
     match pipeline_result {
         Ok(out) => Ok(out),
         Err(e) => {
-            // #867: an already-computed PreToolUse decision (read-once or the
-            // #985 task-tool redirect) must not be lost to an unrelated pipeline
-            // error — recover it instead of letting `?` propagate the error past
-            // the point where it was decided. Still surfaced via the same
-            // `eprintln!` convention `run()`'s Err arm uses (pre-pr-review
-            // finding: a bare `warn!` is invisible with the default `RUST_LOG`,
-            // silently hiding the diagnostic even though the result is preserved).
-            if let Some(text) = pre_tool_text {
-                eprintln!("llmenv: memory {event} skipped: {e}");
-                warn!(
-                    error = %e,
-                    "hook-run: pipeline failed after a PreToolUse decision was \
-                     already computed; returning it instead of silently dropping it"
-                );
-                // #1128: this is also a return point, though in practice the
-                // memory-client/network failures this branch was written for
-                // (#867) are caught fail-soft inside the pipeline itself and
-                // never reach here — this covers the rarer errors that do
-                // (e.g. a tag/bundle validation failure). t_scope/t_chunk/
-                // t_end are lost along with the closure that computed them.
-                emit_trace_timing(t0, t_config, None, None, None);
-                Ok(text)
-            } else {
-                Err(e)
-            }
+            // #1128: this is also a return point. The memory-client and network failures
+            // (#867) are caught fail-soft inside the pipeline, so this covers the rarer errors
+            // that reach here, such as a tag or bundle validation failure. t_scope, t_chunk,
+            // and t_end are lost with the closure that computed them.
+            let text =
+                recover_from_pipeline_error(event, e, [pre_tool_text, turn_text, nudge_text])?;
+            emit_trace_timing(t0, t_config, None, None, None);
+            Ok(text)
         }
     }
+}
+
+/// Keeps the hook text that was computed before the pipeline failed.
+///
+/// A pipeline error must not drop a PreToolUse decision (#867), the turn digest, or a nudge.
+/// A nudge is recorded as delivered when it is computed, so dropping it here would lose it
+/// for good (#2730). Without any computed text, the error is returned unchanged.
+fn recover_from_pipeline_error(
+    event: HookEvent,
+    error: anyhow::Error,
+    precomputed: [Option<String>; 3],
+) -> anyhow::Result<String> {
+    let Some(recovered) = join_precomputed(precomputed) else {
+        return Err(error);
+    };
+    // Still surfaced via the same `eprintln!` convention `run()`'s Err arm uses. A bare
+    // `warn!` is invisible with the default `RUST_LOG` (pre-pr-review finding).
+    eprintln!("llmenv: memory {event} skipped: {error}");
+    warn!(
+        error = %error,
+        "hook-run: pipeline failed after hook text was already computed; \
+         returning it instead of silently dropping it"
+    );
+    Ok(recovered)
+}
+
+/// Joins the precomputed hook texts in the order the success path appends them.
+///
+/// Returns `None` when no text was computed, so the caller can tell "nothing to keep" from
+/// "a text that is empty".
+fn join_precomputed(precomputed: [Option<String>; 3]) -> Option<String> {
+    if precomputed.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut out = String::new();
+    for text in precomputed.into_iter().flatten().filter(|t| !t.is_empty()) {
+        append_read_once_result(&mut out, &text);
+    }
+    Some(out)
 }
 
 /// Run one event's ordered memory actions and concatenate their text output.
@@ -3169,6 +3195,63 @@ fn append_section(out: &mut String, section: &str) {
         out.push('\n');
     }
     out.push_str(section);
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod pipeline_recovery_tests {
+    use super::{HookEvent, join_precomputed, recover_from_pipeline_error};
+
+    fn failure() -> anyhow::Error {
+        anyhow::anyhow!("tag `bad tag` is not valid")
+    }
+
+    #[test]
+    fn a_failed_pipeline_keeps_a_computed_nudge() {
+        // #2730: the nudge is recorded as delivered when it is computed, so it must reach the agent.
+        let text = recover_from_pipeline_error(
+            HookEvent::PostToolUse,
+            failure(),
+            [None, None, Some("nudge: wait for the user".to_string())],
+        )
+        .expect("a computed nudge must survive the pipeline error");
+        assert_eq!(text, "nudge: wait for the user");
+    }
+
+    #[test]
+    fn a_failed_pipeline_with_no_computed_text_returns_the_error() {
+        let err =
+            recover_from_pipeline_error(HookEvent::PostToolUse, failure(), [None, None, None])
+                .expect_err("nothing to keep, so the error must propagate");
+        assert!(err.to_string().contains("bad tag"), "got: {err}");
+    }
+
+    #[test]
+    fn precomputed_texts_join_in_success_path_order() {
+        let joined = join_precomputed([
+            Some("pre".to_string()),
+            Some("turn".to_string()),
+            Some("nudge".to_string()),
+        ]);
+        assert_eq!(joined.as_deref(), Some("pre\nturn\nnudge"));
+    }
+
+    #[test]
+    fn an_empty_precomputed_text_adds_no_separator() {
+        let joined = join_precomputed([Some(String::new()), None, Some("nudge".to_string())]);
+        assert_eq!(joined.as_deref(), Some("nudge"));
+    }
+
+    #[test]
+    fn a_deny_precomputed_text_keeps_its_prefix() {
+        // Matches the success path: the deny marker stays first, and later text appends after it.
+        let joined = join_precomputed([
+            Some("__DENY__:already read".to_string()),
+            Some("turn".to_string()),
+            None,
+        ]);
+        assert_eq!(joined.as_deref(), Some("__DENY__:already read\nturn"));
+    }
 }
 
 #[cfg(test)]
