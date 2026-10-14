@@ -21,6 +21,10 @@ pub struct StatusData {
     /// widget shows this instead of reporting throttling as off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throttle_error: Option<String>,
+    /// Set when more than one throttle entry is active at once. This is a config conflict, not an
+    /// unreadable state file, so the widget labels it apart from `throttle_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle_conflict: Option<String>,
     pub config_stale: Option<bool>,
     pub cache: Option<CacheData>,
     pub session_log: Option<u64>,
@@ -168,6 +172,7 @@ mod tests {
                 icm: None,
                 throttle: None,
                 throttle_error: None,
+                throttle_conflict: None,
                 config_stale,
                 cache: None,
                 session_log,
