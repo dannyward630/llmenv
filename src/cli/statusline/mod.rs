@@ -215,6 +215,16 @@ pub fn run_statusline(
     let icons = resolve_icons(cfg.style.icon_set, &cfg.icons);
 
     let mut out = String::new();
+    // A status file that exists but cannot be read is not "no data". Blank widgets would
+    // look the same, so the marker goes on its own line before the rows (#2722).
+    if status_data.unreadable {
+        out.push_str(&crate::cli::style::apply_style(
+            "status unreadable",
+            "yellow",
+            use_color,
+        ));
+        out.push('\n');
+    }
     for row in &rows {
         let tokens = parse_template(row);
         let mut rendered_any = false;
@@ -794,6 +804,45 @@ mod tests {
             !out.contains('\u{1b}'),
             "global color off must emit no ANSI: {out:?}"
         );
+    }
+
+    #[test]
+    fn an_unreadable_status_file_shows_a_marker_not_blank_widgets() {
+        let config = llmenv_config::Config {
+            statusline: Some(StatuslineConfig {
+                rows: vec!["{branch}".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        std::fs::write(&data_path, b"{not json").unwrap();
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &b"{}"[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(out.starts_with("status unreadable\n"), "{out:?}");
+    }
+
+    #[test]
+    fn a_missing_status_file_shows_no_marker() {
+        let config = llmenv_config::Config::default();
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("llmenv-status.json");
+        let out = run_statusline(
+            &config,
+            &data_path,
+            &mut &b"{}"[..],
+            false,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(!out.contains("status unreadable"), "{out:?}");
     }
 
     #[test]

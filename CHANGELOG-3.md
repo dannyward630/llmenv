@@ -55,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A bad tag fails the hook before the session-start notices are built. Before, it dropped the codebase-memory notices (#2709) [fix:hook]
 - Recall logs the reason and injects nothing when the session recall ledger cannot be read. Before, an unreadable ledger or a busy lock read as empty, and recall repeated records already sent (#2711) [fix:hook]
 - An invalid or unreadable `llmenv-status.json`, and an unreadable entry during stale-session pruning, are logged at error level. Before, both were silent (#2712) [fix:statusline]
+- A tool error that cannot be written to the recall ledger is logged. Before, the error record was dropped with no message [fix:hook]
+- The statusline prints `status unreadable` when `llmenv-status.json` exists but cannot be read or parsed. Before, its widgets were blank, the same as no data [fix:statusline]
+- The read-once cache and repeat-detect state are not overwritten after a read error. Before, an unreadable file was replaced with an empty state [fix:hook]
+- A resumed background job whose `llmenv` executable path cannot be resolved is logged and gives up after the attempt cap. Before, it retried on every session [fix:hook]
+- Hook notices are kept when a state directory, config path, tokio runtime, or dedup snapshot lookup fails. Before, the failure dropped the notices [fix:hook]
 
 ### Security
 
