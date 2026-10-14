@@ -164,14 +164,22 @@ pub(crate) fn removal_error_to_log(result: std::io::Result<()>) -> Option<std::i
     }
 }
 
-pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+/// The entries of `dir`, or `None` after a log line that names why they cannot be read. A missing
+/// directory is normal, so it returns `None` with no log.
+fn read_dir_logged(dir: &Path, purpose: &str) -> Option<std::fs::ReadDir> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            tracing::error!("cannot read {} to prune stale locks: {e}", dir.display());
-            return;
+            tracing::error!("cannot read {} for {purpose}: {e}", dir.display());
+            None
         }
+    }
+}
+
+pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
+    let Some(entries) = read_dir_logged(dir, "stale lock pruning") else {
+        return;
     };
     let max_age = Duration::from_secs(max_age_days * 86_400);
     for entry in entries {
