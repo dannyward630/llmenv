@@ -700,6 +700,7 @@ mod tests {
                 current: Some("Do the thing".to_string()),
                 unreadable: false,
             }),
+            unreadable: false,
         }
     }
 

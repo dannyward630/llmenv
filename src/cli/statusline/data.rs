@@ -29,6 +29,10 @@ pub struct StatusData {
     pub cache: Option<CacheData>,
     pub session_log: Option<u64>,
     pub tasks: Option<TasksData>,
+    /// Set by [`StatusData::load`] when the file exists but cannot be read or parsed. It is
+    /// never written to the file, so a file cannot set it.
+    #[serde(skip)]
+    pub unreadable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -93,13 +97,21 @@ impl StatusData {
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 tracing::error!("status file {} is not valid JSON: {e}", path.display());
-                Self::default()
+                Self::unreadable()
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => {
                 tracing::error!("cannot read status file {}: {e}", path.display());
-                Self::default()
+                Self::unreadable()
             }
+        }
+    }
+
+    /// The default data with [`StatusData::unreadable`] set, for a file that exists but fails.
+    fn unreadable() -> Self {
+        Self {
+            unreadable: true,
+            ..Self::default()
         }
     }
 }
@@ -145,12 +157,26 @@ mod tests {
     }
 
     #[test]
-    fn load_corrupt_file_returns_default() {
+    fn a_status_file_cannot_set_the_unreadable_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llmenv-status.json");
+        std::fs::write(&path, br#"{"unreadable": true}"#).unwrap();
+        assert!(!StatusData::load(&path).unreadable);
+    }
+
+    #[test]
+    fn load_corrupt_file_returns_default_marked_unreadable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("llmenv-status.json");
         std::fs::write(&path, b"{ not valid json").unwrap();
         let data = StatusData::load(&path);
-        assert_eq!(data, StatusData::default());
+        assert_eq!(
+            data,
+            StatusData {
+                unreadable: true,
+                ..StatusData::default()
+            }
+        );
     }
 
     #[test]
@@ -214,6 +240,7 @@ mod tests {
                     cache: None,
                     session_log,
                     tasks: None,
+                    unreadable: false,
                 },
             )
     }
