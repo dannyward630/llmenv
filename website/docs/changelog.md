@@ -69,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The read-once cache and repeat-detect state are not overwritten after a read error. Before, an unreadable file was replaced with an empty state [fix:hook]
 - A resumed background job whose `llmenv` executable path cannot be resolved is logged and gives up after the attempt cap. Before, it retried on every session [fix:hook]
 - Hook notices are kept when a state directory, config path, tokio runtime, or dedup snapshot lookup fails. Before, the failure dropped the notices [fix:hook]
+- A hook step that fails no longer drops the turn digest or a post-tool nudge. A nudge counts as delivered only when the agent receives it. The Stop reminder logs and skips a missing state directory instead of dropping the Stop output (#2730) [fix:hook]
+- Unreadable entries in project config discovery, the ReadOnce status, cache cleanup, and the status size estimate are logged with their directory path. The ReadOnce status counts them as skipped (#2718) [fix:cli]
+- A git read failure shows git's error text instead of "no remote" or "ref cannot be resolved". `llmenv doctor` reports an unreadable HEAD in a marketplace clone instead of skipping the pin check. The statusline shows "branch: unreadable" when HEAD cannot be read, instead of hiding the branch (#2710) [fix:cli]
+- Hook output tells the agent when recall state is lost: a failed recall call, a failed ledger reset, a skipped recall, an unsaved ledger write, a corrupt ledger, a skipped task reminder, and an unreadable agent config that is rebuilt. Bundle-feature notices use the same channel (#2664, #2729) [fix:hook]
 
 ### Security
 
