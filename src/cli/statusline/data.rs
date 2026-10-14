@@ -83,13 +83,12 @@ pub struct SessionProgress {
 }
 
 impl StatusData {
-    /// Load and parse `llmenv-status.json` at `path`. Never fails: a missing
-    /// file, unreadable file, or parse error all yield `StatusData::default()`
-    /// (every field `None`) so the renderer's llmenv-sourced widgets simply
-    /// render empty rather than aborting the whole statusline.
+    /// Load and parse `llmenv-status.json` at `path`. Never fails: every problem yields
+    /// `StatusData::default()` (every field `None`), so the renderer's llmenv-sourced widgets
+    /// render empty rather than aborting the whole statusline. A missing file is the normal
+    /// empty case. Any other failure is also logged at error level, which the default log
+    /// filter shows, so an unreadable status file does not pass as no data (#2712).
     #[must_use]
-    /// A missing file is the empty case. Any other failure is logged at error level, which the
-    /// default log filter shows, so an unreadable status file does not look like no data (#2712).
     pub fn load(path: &std::path::Path) -> Self {
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
@@ -165,6 +164,20 @@ mod tests {
         assert!(data.plugins.is_none());
     }
 
+    #[test]
+    fn load_reads_a_file_that_has_no_throttle_conflict_key() {
+        // A status file written before `throttle_conflict` existed must still load.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llmenv-status.json");
+        std::fs::write(&path, r#"{"throttle_error": "parsing throttle state: /x"}"#).unwrap();
+        let data = StatusData::load(&path);
+        assert_eq!(
+            data.throttle_error.as_deref(),
+            Some("parsing throttle state: /x")
+        );
+        assert_eq!(data.throttle_conflict, None);
+    }
+
     use proptest::prelude::*;
 
     fn arb_status_data() -> impl Strategy<Value = StatusData> {
@@ -173,20 +186,36 @@ mod tests {
             proptest::option::of((any::<u64>(), any::<u64>())),
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<u64>()),
+            proptest::option::of(("[a-z]{1,8}", any::<u64>())),
+            proptest::option::of("[ -~]{0,20}"),
+            proptest::option::of("[ -~]{0,20}"),
         )
-            .prop_map(|(tags, plugins, config_stale, session_log)| StatusData {
-                scopes: tags.map(|tags| ScopesData { tags }),
-                plugins: plugins.map(|(total, errors)| CountData { total, errors }),
-                mcps: None,
-                icm: None,
-                throttle: None,
-                throttle_error: None,
-                throttle_conflict: None,
-                config_stale,
-                cache: None,
-                session_log,
-                tasks: None,
-            })
+            .prop_map(
+                |(
+                    tags,
+                    plugins,
+                    config_stale,
+                    session_log,
+                    throttle,
+                    throttle_error,
+                    throttle_conflict,
+                )| StatusData {
+                    scopes: tags.map(|tags| ScopesData { tags }),
+                    plugins: plugins.map(|(total, errors)| CountData { total, errors }),
+                    mcps: None,
+                    icm: None,
+                    throttle: throttle.map(|(backend, cooldown_secs)| ThrottleData {
+                        backend,
+                        cooldown_secs,
+                    }),
+                    throttle_error,
+                    throttle_conflict,
+                    config_stale,
+                    cache: None,
+                    session_log,
+                    tasks: None,
+                },
+            )
     }
 
     proptest! {
