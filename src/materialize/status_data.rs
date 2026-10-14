@@ -423,10 +423,23 @@ fn dir_size(path: &Path) -> u64 {
         return meta.len();
     }
     let Ok(entries) = std::fs::read_dir(path) else {
+        tracing::error!(
+            "cannot list {} for the size estimate; it counts as its own length",
+            path.display()
+        );
         return meta.len();
     };
     entries
-        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .inspect_err(|e| {
+                    tracing::error!(
+                        "cannot read an entry in {} for the size estimate: {e}",
+                        path.display()
+                    );
+                })
+                .ok()
+        })
         .map(|entry| dir_size(&entry.path()))
         .sum()
 }
