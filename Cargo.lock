@@ -1414,7 +1414,7 @@ name = "llmenv-git"
 version = "5.0.0-alpha.1"
 dependencies = [
  "proptest",
- "tracing",
+ "tempfile",
 ]
 
 [[package]]

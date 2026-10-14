@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The status line shows `tasks: unreadable` when a session or task file cannot be read. Before, it looked like no open session or a lower count (#2687) [fix:statusline]
 - Owner-only writes refuse a symlink at the target, so the throttle cache, the statusline caches, the doctor probe, skill files, and adapter outputs no longer write through one. A generated output path that is a symlink now fails with an error. The transcripts marker and the upgrade temp and backup files refuse a symlink too (#2686) [fix:paths]
 - The MCP proxy and hook log directory is opened once and checked by its file descriptor. This closes a race where the parent directory could be swapped for a symlink during log rotation (#2685) [fix:mcp]
+- A failed git read no longer looks like a clean tree or like no unpushed commits. `llmenv sync` reports the git error instead (#2700) [fix:sync]
+- A session activity update that cannot load its session now returns an error. The task change is already saved, so the command still succeeds (#2699) [fix:task]
+- A throttle that cannot be resolved, for example two entries active at once, shows `throttle unreadable` in the status line. Before, it showed throttling as off (#2698) [fix:statusline]
+- A codebase-memory index skipped because `index_path` cannot be expanded now tells the agent at session start. Before, only the error log recorded the skip (#2697) [fix:hook]
+- A set `origin` URL with no readable repo name is an error that names the URL, with credentials masked. Before, the session fell back to the folder name with no message (#2701) [fix:memory]
 
 ## [3.12.2] - 2026-10-10
 

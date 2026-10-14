@@ -4,18 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing;
 
-/// True if the repo's working tree has staged or unstaged changes.
-fn working_tree_dirty(repo: &Path) -> bool {
-    git::working_tree_dirty(repo)
-}
-
-/// True if the current branch has commits not yet pushed to its upstream.
-/// Returns false if there's no upstream or git fails — we only want to nudge
-/// the user when we're certain.
-fn has_unpushed_commits(repo: &Path) -> bool {
-    git::has_unpushed_commits(repo)
-}
-
 /// Result of [`commit_and_push`]: whether a commit was actually pushed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncOutcome {
@@ -79,7 +67,7 @@ pub fn commit_and_push(repo: &Path, message: &str, push: PushMode) -> Result<Syn
 
     // After staging, an empty `status --porcelain` means there is genuinely
     // nothing to commit — distinct from `git commit` failing for another reason.
-    if !working_tree_dirty(repo) {
+    if !git::working_tree_dirty(repo).map_err(anyhow::Error::msg)? {
         return Ok(SyncOutcome::NothingToCommit);
     }
 
@@ -160,13 +148,26 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
     // a fast-forward could clobber uncommitted edits anyway). Surface a
     // one-line nudge and return early; treat this as success so we don't
     // retry every shell prompt.
-    if working_tree_dirty(repo) {
-        eprintln!(
-            "llmenv: config in {} has uncommitted changes — run `llmenv sync` to commit and push",
-            repo.display()
-        );
-        write_state(state_dir, now)?;
-        return Ok(());
+    // A git status that cannot run is not a clean tree. Record the attempt and say why, so the
+    // next prompt does not retry the pull on every call (#386).
+    match git::working_tree_dirty(repo) {
+        Ok(false) => {}
+        Ok(true) => {
+            eprintln!(
+                "llmenv: config in {} has uncommitted changes — run `llmenv sync` to commit and push",
+                repo.display()
+            );
+            write_state(state_dir, now)?;
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!(
+                "llmenv: cannot read the git state of {}: {e}",
+                repo.display()
+            );
+            write_state(state_dir, now)?;
+            return Ok(());
+        }
     }
 
     // Attempt fetch — silent on failure (network issues are transient and
@@ -197,23 +198,27 @@ pub fn maybe_pull(repo: &Path, state_dir: &Path, interval: Duration) -> Result<(
 
     if pull_status.success() {
         write_state(state_dir, now)?;
-    } else if has_unpushed_commits(repo) {
-        eprintln!(
-            "llmenv: config in {} has unpushed commits — run `llmenv sync` to push",
-            repo.display()
-        );
-        write_state(state_dir, now)?;
     } else {
-        // Some other pull failure (non-fast-forward, diverged, conflict, auth).
-        // Update state so a clock-skew event followed by a pull failure doesn't
-        // leave the timestamp stuck and trigger a pull attempt on every shell
-        // prompt forever — the nudge below is the user's cue to intervene (#386).
+        // Every failed pull updates the state, so a clock-skew event followed by a pull failure
+        // does not leave the timestamp stuck and retry on every shell prompt forever (#386).
+        // The nudge below is the user's cue to intervene.
         write_state(state_dir, now)?;
-        eprintln!(
-            "llmenv: config in {} could not fast-forward (diverged or network error) — \
-             run `llmenv sync` for details",
-            repo.display()
-        );
+        match git::has_unpushed_commits(repo) {
+            Ok(true) => eprintln!(
+                "llmenv: config in {} has unpushed commits — run `llmenv sync` to push",
+                repo.display()
+            ),
+            Ok(false) => eprintln!(
+                "llmenv: config in {} could not fast-forward (diverged or network error) — \
+                 run `llmenv sync` for details",
+                repo.display()
+            ),
+            Err(e) => eprintln!(
+                "llmenv: config in {} could not fast-forward, and git could not report \
+                 unpushed commits: {e}",
+                repo.display()
+            ),
+        }
     }
 
     Ok(())
