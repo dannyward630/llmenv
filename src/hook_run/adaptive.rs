@@ -266,8 +266,8 @@ fn ledger_or_skip(store: &LedgerStore, session_id: &str, hook: &str) -> Option<L
     let ledger = store.load(session_id);
     if ledger.is_none() {
         tracing::error!(
-            "{hook}: recall skipped, the recall ledger for session {session_id} cannot be read \
-             (busy lock or unreadable file)"
+            "{hook}: recall skipped, the recall ledger cannot be read \
+             (unsafe session id, busy lock, or unreadable file)"
         );
     }
     ledger
@@ -381,6 +381,11 @@ pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<Stri
     }
     let agent_type = ctx.payload["agent_type"].as_str().unwrap_or_default();
     let now = unix_now();
+    // Checked before the take below, which consumes the pending task for good. A failed read
+    // after the take would lose that task, and SubagentStart does not fire again.
+    if ledger_or_skip(ctx.store, ctx.session_id, "subagent_start").is_none() {
+        return Ok(String::new());
+    }
     // A resumed subagent already has an entry; its task was taken at launch, and
     // the queue now holds tasks for new siblings only.
     let task = ctx
@@ -1081,6 +1086,32 @@ mod tests {
             agent_key(&json!({"agent_id": "../x"})),
             (MAIN_AGENT.to_string(), false)
         );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_ledger_keeps_the_pending_subagent_task() {
+        use std::os::unix::fs::PermissionsExt;
+        let server = server_with(&[("\"limit\":10", "")]).await;
+        let f = fixture(&server);
+        record_local(
+            HookEvent::SubagentTask,
+            &f.store,
+            "s1",
+            &json!({"tool_name": "Agent", "tool_use_id": "u3",
+                    "tool_input": {"subagent_type": "Explore", "prompt": "queued task"}}),
+        );
+        let path = f._dir.path().join("recall_session").join("s1.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let payload = json!({"agent_id": "agent-1", "agent_type": "Explore"});
+        let out = subagent_start(&ctx(&f, &payload)).await.unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(out, "", "recall is skipped when the ledger cannot be read");
+        // The skipped call must not consume the task, because SubagentStart does not fire again.
+        let task = f
+            .store
+            .update("s1", |l| l.take_subagent("Explore", unix_now()))
+            .flatten();
+        assert!(task.is_some(), "the pending task must stay queued");
     }
 
     #[tokio::test]
