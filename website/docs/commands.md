@@ -308,7 +308,8 @@ recall events also need `adaptive_recall` on):
   tags, plus one project-unfiltered recall per active tag keyed on
   `llmenv-tag:<tag>` and one per active bundle keyed on `llmenv-bundle:<bundle>`
 - `post_tool_batch` (added in v3.12.0) — records the tools, files, and commands
-  of a batch in the per-session recall state; no output
+  of a batch in the per-session recall state; no output, except a notice when that state
+  cannot be saved (changed in v3.13.0, see [llmenv notices](troubleshooting.md#the-agent-sees-an-llmenv-notice))
 - `post_tool_use_failure` (added in v3.12.0) — records the error and injects
   memories about it
 - `subagent_start` (added in v3.12.0) — injects memories that match the

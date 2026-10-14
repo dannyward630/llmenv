@@ -291,6 +291,36 @@ See [`memory`](commands.md#memory).
 
 See [MCP & Memory](mcp.md) for the full topology and security model.
 
+## The agent sees an llmenv notice
+
+(added in v3.13.0)
+
+A hook's stderr never reaches the agent, so llmenv puts a short notice in the hook output when
+it drops something the agent depends on.
+Each notice starts with `llmenv:` and appears once per hook run.
+
+- `memory <event> skipped: <reason>` — the memory step of the hook failed, for example a bad tag
+  or an MCP error. Read the reason, then run `llmenv doctor` for MCP health.
+- `a memory recall call failed, so its records were not sent.` — one recall call to the memory
+  server failed. Run `llmenv doctor` and check the memory backend.
+- `recall was skipped: the recall ledger cannot be read or updated.` — the per-session recall
+  state has an unsafe session id, a busy lock, or an unreadable file. Check the files under
+  `recall_session/` in the state directory.
+- `recall state was not saved, so some records may repeat.` — a recall state update did not run.
+  Repeated records are the only effect.
+- `the recall ledger could not be saved, so some records may repeat.` — the recall state file could
+  not be written, for example on a full disk. Free disk space, or fix the state directory permissions.
+- `the recall ledger is corrupt, so it started fresh.` — the recall state file did not parse. The
+  next save replaces it.
+- `the recall ledger was not reset after a context reset.` — a compaction or clear could not reset
+  the recall state. Records seen before the reset can stay filtered from recall.
+- `recent tool activity was not saved, so later recall may miss it.` — a `post_tool_batch` or
+  subagent record could not be saved. Check the state directory.
+- `the task reminder was skipped: the project tag cannot be resolved.` — llmenv cannot resolve the
+  project for the task tracker. Run `llmenv task` in the project to see the error.
+- `the agent config could not be read, so its model history was reset.` — the per-session agent
+  config file could not be read and was replaced. The model history starts again.
+
 ## Profiling hook-run latency
 
 Lifecycle hooks run on the agent's hot path, so a slow `hook-run` shows up as
