@@ -1340,11 +1340,11 @@ fn session_start_shows_the_memory_error_when_another_server_needs_a_notice() {
         .stdout(predicate::str::contains("memory session_start failed"));
 }
 
-// #2358 review: with no health notice, a failing memory call stays a stderr warning and adds
-// nothing to stdout. Only a notice for another server brings the memory error into the output.
+// A failing memory call reaches the agent as a notice, so a session does not run without memory
+// and without a sign of it (#2358). The stderr warning stays for a terminal reader.
 #[cfg(unix)]
 #[test]
-fn session_start_prints_nothing_when_only_the_memory_call_fails() {
+fn session_start_reports_a_failing_memory_call_to_the_agent() {
     let port = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
@@ -1369,6 +1369,8 @@ fn session_start_prints_nothing_when_only_the_memory_call_fails() {
         .timeout(Duration::from_secs(25))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty())
+        .stdout(predicate::str::contains(
+            "llmenv: memory session_start skipped",
+        ))
         .stderr(predicate::str::contains("session_start skipped"));
 }

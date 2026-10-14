@@ -732,6 +732,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         adapter.name(),
         &claude_code_version,
     );
+    // A failed memory step must not read as "nothing to recall" to the agent.
+    if let Err(e) = &result {
+        crate::agent_notice::record(memory_skipped_notice(event, e));
+    }
     // Read after `run_inner`, so every output path below carries it to the agent (#2658).
     let notice = crate::agent_notice::current();
     match result {
@@ -1859,15 +1863,24 @@ fn recover_from_pipeline_error(
     let Some(recovered) = join_precomputed(precomputed) else {
         return Err(error);
     };
-    // Still surfaced via the same `eprintln!` convention `run()`'s Err arm uses. A bare
-    // `warn!` is invisible with the default `RUST_LOG` (pre-pr-review finding).
+    // The default `RUST_LOG` hides `warn!`, so the error also goes to stderr. The agent gets it
+    // as a notice, so the kept text does not hide the skipped memory step.
     eprintln!("llmenv: memory {event} skipped: {error}");
+    crate::agent_notice::record(memory_skipped_notice(event, &error));
     warn!(
         error = %error,
         "hook-run: pipeline failed after hook text was already computed; \
          returning it instead of silently dropping it"
     );
     Ok(recovered)
+}
+
+/// The agent notice for a hook run whose memory step failed.
+fn memory_skipped_notice(event: impl std::fmt::Display, err: &anyhow::Error) -> String {
+    format!(
+        "llmenv: memory {event} skipped: {}",
+        mcp_health::tidy_reason(&format!("{err:#}"))
+    )
 }
 
 /// Joins the precomputed hook texts in the order the success path appends them.
@@ -3219,6 +3232,15 @@ mod pipeline_recovery_tests {
         )
         .expect("a computed nudge must survive the pipeline error");
         assert_eq!(text, "nudge: wait for the user");
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("llmenv: memory") && notice.contains("bad tag"),
+            "the skipped memory step must reach the agent: {notice}"
+        );
+        assert!(
+            notice.contains("memory PostToolUse skipped") || notice.contains("skipped: tag"),
+            "the skipped memory step must reach the agent: {notice}"
+        );
     }
 
     #[test]
