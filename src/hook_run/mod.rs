@@ -5465,6 +5465,20 @@ mod tests {
     }
 
     #[test]
+    fn index_checkpoint_is_opened_when_the_executable_is_known() {
+        let state = tempfile::tempdir().expect("test");
+        let inputs = detached_cbm::IndexInputs {
+            project_root: "/repos/proj".to_string(),
+            index_path: None,
+            mem_budget_mb: None,
+            result_path: None,
+        };
+        let path = begin_index_checkpoint(state.path(), &inputs, true)
+            .expect("a checkpoint opens when the executable is known");
+        assert!(path.exists(), "the checkpoint file must be written");
+    }
+
+    #[test]
     fn index_skipped_notice_names_the_skip_and_its_cause() {
         let notice = index_skipped_notice("cannot expand index_path: HOME is not set");
         assert!(
