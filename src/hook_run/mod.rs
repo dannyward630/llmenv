@@ -1202,6 +1202,10 @@ fn run_inner(
     let config = load_cached_config(&config_path)?;
     // #2460: a feature that only a bundle sets must read as set here, as it does in the adapter.
     let config = features_scope::resolve(config, &config_path);
+    // Resolved before any notice is built. A later `?` would drop the notices (#2719).
+    let config_dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
     let t_config = std::time::Instant::now();
     let log_cfg = config.session_log_resolved();
 
@@ -1481,10 +1485,6 @@ fn run_inner(
             }
         }
 
-        let config_dir = config_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-
         // Recall query: the sorted active tags. Store content: the llmenv context
         // chunk (tags/bundles/project). `active.tags` is a BTreeSet, so this
         // iteration order is already sorted ascending — no separate sort needed.
@@ -1565,11 +1565,19 @@ fn run_inner(
         // the #864/#231 fix for the same early-return-drops-logging bug class.
         // Resolved once here (rather than again at the write-back below) since
         // it's the same target path for both the read-check and the rewrite.
-        let session_end_dedup_path = if event == HookEvent::SessionEnd {
-            Some(crate::paths::state_dir()?.join(crate::paths::HOOK_STORE_CHUNK))
-        } else {
-            None
-        };
+        // A missing state directory skips the dedup snapshot. It does not end the hook, which
+        // would drop the notices built above (#2719).
+        let session_end_dedup_path =
+            match (event == HookEvent::SessionEnd).then(crate::paths::state_dir) {
+                Some(Ok(dir)) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
+                Some(Err(e)) => {
+                    tracing::error!(
+                        "session-end dedup skipped, the state directory is unavailable: {e}"
+                    );
+                    None
+                }
+                None => None,
+            };
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
             let prev = std::fs::read_to_string(dedup_path)
                 .inspect_err(|e| {
@@ -1612,7 +1620,14 @@ fn run_inner(
         });
         let rt = match rt {
             Ok(rt) => rt,
-            Err(e) => return Err(anyhow::anyhow!("failed to build tokio runtime: {e}")),
+            Err(e) => {
+                // Return the notices built so far with the failure, so none is lost (#2719).
+                let failure =
+                    format!("llmenv: {event} skipped, the tokio runtime cannot start: {e}");
+                tracing::error!("{failure}");
+                let notices = [roots_notice, memory_notice, Some(failure)];
+                return Ok(notices.into_iter().flatten().collect::<Vec<_>>().join("\n"));
+            }
         };
         let session_log = SessionLogCall {
             log_cfg: &log_cfg,
@@ -1734,15 +1749,34 @@ fn run_inner(
             if let Some(dedup_path) = &session_end_dedup_path
                 && !session_end_unchanged
             {
-                crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())?;
+                // Logged, not returned: a `?` here would drop the notices and the memory
+                // output built above (#2719). The next SessionEnd may store the chunk again.
+                if let Err(e) =
+                    crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())
+                {
+                    tracing::error!("session-end dedup snapshot not saved: {e:#}");
+                }
             }
 
             // #231: append the task-tracker Stop reminder. Only reached here when
             // session-log also wants Stop (the log_cfg.any_sink_enabled() case
             // above already short-circuited before this point otherwise) — so
             // this never displaces run_session_log, it just adds to `out`.
-            if event == HookEvent::Stop && task_tracker_enabled {
-                let state_dir = crate::paths::state_dir()?;
+            // A missing state directory drops only this reminder, logged. The `?` form would
+            // drop the output built above (#2719).
+            let stop_state_dir = match (event == HookEvent::Stop && task_tracker_enabled)
+                .then(crate::paths::state_dir)
+            {
+                Some(Ok(dir)) => Some(dir),
+                Some(Err(e)) => {
+                    tracing::error!(
+                        "stop reminder skipped, the state directory is unavailable: {e}"
+                    );
+                    None
+                }
+                None => None,
+            };
+            if let Some(state_dir) = stop_state_dir {
                 let reminder =
                     resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload);
                 if !reminder.is_empty() {
@@ -3318,6 +3352,15 @@ fn resume_checkpoints_with(
 /// first run. The memory backend and the project come from that directory, so a checkpoint whose
 /// directory is gone is not run: it would store into the project of the session that resumes it.
 fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::Result<()> {
+    respawn_job_with_exe(cp, path, std::env::current_exe)
+}
+
+/// [`respawn_job`] with the image lookup passed in, so a test can make it fail.
+fn respawn_job_with_exe(
+    cp: &checkpoint::Checkpoint,
+    path: &std::path::Path,
+    current_exe: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     use checkpoint::JobKind;
     let cwd = cp
         .cwd
@@ -3332,7 +3375,18 @@ fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::R
         })?;
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
-    let exe = std::env::current_exe()?;
+    let exe = match current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            // Returning Ok keeps the bumped attempt count. A restore would retry this job on every
+            // session and never reach MAX_ATTEMPTS (#2720).
+            tracing::error!(
+                "background job {} not resumed, cannot resolve current_exe: {e}",
+                path.display()
+            );
+            return Ok(());
+        }
+    };
     let stdin = cp.inputs.to_string();
     match cp.kind {
         JobKind::IcmStore => spawn_detached(icm_store_command(exe, Some(path)), Some(&stdin), cwd),
@@ -3762,6 +3816,26 @@ mod tests {
         cp.cwd = None;
         let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
         assert!(err.to_string().contains("not recorded"), "{err}");
+    }
+
+    #[test]
+    fn a_job_whose_image_cannot_be_resolved_is_logged_and_not_spawned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        cp.cwd = Some(dir.path().display().to_string());
+        let mut result = None;
+        let logs = crate::test_log_capture::capture_logs(|| {
+            result = Some(respawn_job_with_exe(
+                &cp,
+                std::path::Path::new("/s/x.json"),
+                || Err(std::io::Error::other("no image")),
+            ));
+        });
+        assert!(
+            result.is_some_and(|r| r.is_ok()),
+            "a failed lookup settles as Ok"
+        );
+        assert!(logs.contains("cannot resolve current_exe"), "{logs}");
     }
 
     #[test]
