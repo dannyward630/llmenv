@@ -846,7 +846,9 @@ fn touch_task_session(state_dir: &Path, task: &Task) {
     if let Some(session_id) = &task.session
         && let Err(e) = session::touch_last_activity(state_dir, session_id)
     {
-        tracing::warn!(
+        // error level, because the default log filter drops warnings. A session that cannot load
+        // is a real fault, even though the task change is already saved.
+        tracing::error!(
             error = %e, session_id = %session_id,
             "failed to update last_activity after a task change (task change itself is already saved)"
         );
