@@ -157,6 +157,14 @@ mod tests {
     }
 
     #[test]
+    fn a_status_file_cannot_set_the_unreadable_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llmenv-status.json");
+        std::fs::write(&path, br#"{"unreadable": true}"#).unwrap();
+        assert!(!StatusData::load(&path).unreadable);
+    }
+
+    #[test]
     fn load_corrupt_file_returns_default_marked_unreadable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("llmenv-status.json");

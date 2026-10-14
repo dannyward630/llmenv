@@ -62,7 +62,10 @@ impl SessionCache {
         let path = session_cache_path(state_dir, session_id);
         let mut cache: Self = match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                tracing::error!("failed to parse read-once cache, starting empty: {e}");
+                tracing::error!(
+                    "failed to parse read-once cache {}, starting empty: {e}",
+                    path.display()
+                );
                 Self::new(session_id)
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
@@ -672,6 +675,19 @@ mod tests {
         // Second read beyond TTL (0 seconds) — passes through
         let result2 = handle_pre_tool_use(&payload, Some("test-ttl"), &config, dir.path());
         assert!(result2.is_empty(), "expired TTL should pass through");
+    }
+
+    #[test]
+    fn a_cache_file_cannot_set_the_read_failed_flag() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let path = session_cache_path(state_dir.path(), "forged");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"session_id":"forged","entries":{},"read_failed":true}"#,
+        )
+        .unwrap();
+        assert!(!SessionCache::load(state_dir.path(), "forged", 3600).read_failed);
     }
 
     #[test]

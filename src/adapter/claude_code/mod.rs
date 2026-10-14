@@ -2984,6 +2984,21 @@ fn apply_mcp_tier_permissions(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     #[test]
+    fn a_hooks_sidecar_reads_back_what_the_writer_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidecar.json");
+        for value in [
+            serde_json::json!({"p@m": "/install/path"}),
+            serde_json::json!({}),
+            serde_json::json!(null),
+            serde_json::json!([1, 2]),
+        ] {
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(super::read_hooks_sidecar(&path), Some(value));
+        }
+    }
+
+    #[test]
     fn an_unreadable_hooks_sidecar_is_logged_and_read_as_none() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.json");

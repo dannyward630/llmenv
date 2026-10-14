@@ -349,8 +349,9 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
         l.clone()
     }) else {
         tracing::error!(
-            "tool_failure: error not recorded and recall skipped, \
-             the recall ledger cannot be updated (busy lock or unreadable file)"
+            "tool_failure: session {} tool {tool}: error not recorded and recall skipped, \
+             the recall ledger cannot be updated (unsafe session id, busy lock, or unreadable file)",
+            ctx.session_id
         );
         return Ok(String::new());
     };

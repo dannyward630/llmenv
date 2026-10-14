@@ -89,7 +89,10 @@ impl SessionState {
         let path = session_state_path(state_dir, session_id);
         match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                tracing::error!("failed to parse repeat-detect state, starting fresh: {e}");
+                tracing::error!(
+                    "failed to parse repeat-detect state {}, starting fresh: {e}",
+                    path.display()
+                );
                 Self::new(session_id)
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
@@ -609,6 +612,19 @@ mod tests {
     // #1196: save() must create its state directory owner-only, even though
     // it no longer calls create_dir_all itself -- write_owner_only_atomic's
     // own parent-directory creation must be the one and only path.
+    #[test]
+    fn a_state_file_cannot_set_the_read_failed_flag() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let path = session_state_path(state_dir.path(), "forged");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"session_id":"forged","last_signature":null,"consecutive":0,"read_failed":true}"#,
+        )
+        .unwrap();
+        assert!(!SessionState::load(state_dir.path(), "forged").read_failed);
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_keeps_a_state_file_it_could_not_read() {

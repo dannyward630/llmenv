@@ -1567,17 +1567,18 @@ fn run_inner(
         // it's the same target path for both the read-check and the rewrite.
         // A missing state directory skips the dedup snapshot. It does not end the hook, which
         // would drop the notices built above (#2719).
-        let session_end_dedup_path =
-            match (event == HookEvent::SessionEnd).then(crate::paths::state_dir) {
-                Some(Ok(dir)) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
-                Some(Err(e)) => {
-                    tracing::error!(
-                        "session-end dedup skipped, the state directory is unavailable: {e}"
-                    );
-                    None
-                }
-                None => None,
-            };
+        let session_end_dedup_path = match (event == HookEvent::SessionEnd)
+            .then(crate::paths::state_dir)
+        {
+            Some(Ok(dir)) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
+            Some(Err(e)) => {
+                tracing::error!(
+                    "session-end dedup skipped, the state directory is unavailable, so the chunk is stored again: {e}"
+                );
+                None
+            }
+            None => None,
+        };
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
             let prev = std::fs::read_to_string(dedup_path)
                 .inspect_err(|e| {
@@ -1618,15 +1619,15 @@ fn run_inner(
                 .enable_all()
                 .build()
         });
-        let rt = match rt {
-            Ok(rt) => rt,
+        // Without a runtime only the runtime-bound work is skipped. The notices and the
+        // nudge and pre-tool texts built above still reach the agent (#2719).
+        let (rt, runtime_failure) = match rt {
+            Ok(rt) => (Some(rt), None),
             Err(e) => {
-                // Return the notices built so far with the failure, so none is lost (#2719).
                 let failure =
-                    format!("llmenv: {event} skipped, the tokio runtime cannot start: {e}");
+                    format!("llmenv: {event} memory skipped, the tokio runtime cannot start: {e}");
                 tracing::error!("{failure}");
-                let notices = [roots_notice, memory_notice, Some(failure)];
-                return Ok(notices.into_iter().flatten().collect::<Vec<_>>().join("\n"));
+                (None, Some(failure))
             }
         };
         let session_log = SessionLogCall {
@@ -1645,7 +1646,8 @@ fn run_inner(
             crate::paths::state_dir(),
         );
         let session_notice = if event == HookEvent::SessionStart {
-            let health = mcp_health::session_start_notice(rt, &config, config_dir, &active);
+            let health = rt
+                .and_then(|rt| mcp_health::session_start_notice(rt, &config, config_dir, &active));
             match (health, roots_notice) {
                 (Some(h), Some(r)) => Some(format!("{h}{r}")),
                 (h, r) => h.or(r),
@@ -1655,10 +1657,10 @@ fn run_inner(
         };
         // The project notice applies to every event, because the recall of every event runs
         // without its project scope when the lookup fails (#2688).
-        let health_notice = match (session_notice, memory_notice) {
-            (Some(s), Some(p)) => Some(format!("{s}\n{p}")),
-            (s, p) => s.or(p),
-        };
+        let health_notice = [session_notice, memory_notice, runtime_failure]
+            .into_iter()
+            .flatten()
+            .reduce(|acc, next| format!("{acc}\n{next}"));
         if resumes_checkpoints(
             event,
             stdin_payload,
@@ -1668,148 +1670,159 @@ fn run_inner(
             resume_checkpoints(checkpoint::spawner_state_dir().as_deref());
         }
         let t_chunk = std::time::Instant::now();
-        let out = rt.block_on(async {
-            let mut out = String::new();
-            // #866: skip the Store action (and its dedup-snapshot rewrite,
-            // below) when SessionEnd's chunk is unchanged — but still run the
-            // rest of this block (session-log capture) unconditionally.
-            // `session_end_unchanged` is only ever `true` for `SessionEnd`
-            // (see its computation above), so it alone is the store-skip
-            // condition; no need to re-check the event here too.
-            if let Some(client) = &client
-                && !session_end_unchanged
-                && !memory_skipped
-            {
-                let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
-                let actions = dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
-                // Use minimal chunk for storage to avoid duplication. (#1792)
-                let store_content = store_content_for_event(event, &chunk, &storage_chunk);
-                out = match run_event_memory(MemoryCall {
-                    event,
-                    client,
-                    settings,
-                    session_id: claude_session_id,
-                    state_dir: crate::paths::state_dir()
-                        .inspect_err(|e| {
-                            tracing::error!("no state dir, adaptive recall falls back: {e}");
-                        })
-                        .ok(),
-                    payload: stdin_payload,
-                    actions,
-                    scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
-                    wake: wake.clone(),
-                    query: &query,
-                    store_content,
-                })
-                .await
+        let out = match rt {
+            Some(rt) => rt.block_on(async {
+                let mut out = String::new();
+                // #866: skip the Store action (and its dedup-snapshot rewrite,
+                // below) when SessionEnd's chunk is unchanged — but still run the
+                // rest of this block (session-log capture) unconditionally.
+                // `session_end_unchanged` is only ever `true` for `SessionEnd`
+                // (see its computation above), so it alone is the store-skip
+                // condition; no need to re-check the event here too.
+                if let Some(client) = &client
+                    && !session_end_unchanged
+                    && !memory_skipped
                 {
-                    Ok(text) => text,
-                    // The health notice below still has to reach the agent. So does this error:
-                    // the notice may be about another server, and the agent would otherwise
-                    // read an empty memory block as "nothing to recall".
-                    Err(e) if health_notice.is_some() => {
-                        eprintln!("llmenv: memory {event} skipped: {e}");
-                        format!(
-                            "llmenv: memory {event} failed: {}\n",
-                            mcp_health::tidy_reason(&format!("{e:#}"))
-                        )
+                    let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
+                    let actions =
+                        dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
+                    // Use minimal chunk for storage to avoid duplication. (#1792)
+                    let store_content = store_content_for_event(event, &chunk, &storage_chunk);
+                    out = match run_event_memory(MemoryCall {
+                        event,
+                        client,
+                        settings,
+                        session_id: claude_session_id,
+                        state_dir: crate::paths::state_dir()
+                            .inspect_err(|e| {
+                                tracing::error!("no state dir, adaptive recall falls back: {e}");
+                            })
+                            .ok(),
+                        payload: stdin_payload,
+                        actions,
+                        scope: scope_recall_actions(&tag_queries, &bundle_queries, &tag_ranks),
+                        wake: wake.clone(),
+                        query: &query,
+                        store_content,
+                    })
+                    .await
+                    {
+                        Ok(text) => text,
+                        // The health notice below still has to reach the agent. So does this error:
+                        // the notice may be about another server, and the agent would otherwise
+                        // read an empty memory block as "nothing to recall".
+                        Err(e) if health_notice.is_some() => {
+                            eprintln!("llmenv: memory {event} skipped: {e}");
+                            format!(
+                                "llmenv: memory {event} failed: {}\n",
+                                mcp_health::tidy_reason(&format!("{e:#}"))
+                            )
+                        }
+                        Err(e) => return Err(e),
+                    };
+
+                    // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
+                    // with fast-falloff memory (topic: web-fetch, importance: low) so it
+                    // survives session compactions but decays quickly. (#579)
+                    if event == HookEvent::PostToolUse {
+                        // Detached: process-group-detached and outlives us regardless.
+                        let _detached_child = handle_web_fetch_post_tool_use(stdin_payload);
                     }
-                    Err(e) => return Err(e),
-                };
-
-                // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
-                // with fast-falloff memory (topic: web-fetch, importance: low) so it
-                // survives session compactions but decays quickly. (#579)
-                if event == HookEvent::PostToolUse {
-                    // Detached: process-group-detached and outlives us regardless.
-                    let _detached_child = handle_web_fetch_post_tool_use(stdin_payload);
                 }
-            }
-            if let Some(notice) = &health_notice {
-                out = if out.is_empty() {
-                    notice.clone()
-                } else {
-                    format!("{notice}\n{out}")
-                };
-            }
-            if let Some(line) = &agent_line {
-                out = if out.is_empty() {
-                    line.clone()
-                } else {
-                    format!("{line}\n{out}")
-                };
-            }
-            run_session_log(event, &session_log, stdin_payload).await;
+                if let Some(notice) = &health_notice {
+                    out = if out.is_empty() {
+                        notice.clone()
+                    } else {
+                        format!("{notice}\n{out}")
+                    };
+                }
+                if let Some(line) = &agent_line {
+                    out = if out.is_empty() {
+                        line.clone()
+                    } else {
+                        format!("{line}\n{out}")
+                    };
+                }
+                run_session_log(event, &session_log, stdin_payload).await;
 
-            // Update dedup snapshot *after* the store succeeds (R3). Writing before
-            // the store call means a transient MCP failure leaves the snapshot ahead
-            // of reality — the next SessionEnd sees the chunk as unchanged and skips
-            // the store, permanently losing the memory. (#594 code review)
-            // Store the minimal chunk in the dedup snapshot to match what was stored. (#1792)
-            if let Some(dedup_path) = &session_end_dedup_path
-                && !session_end_unchanged
-            {
-                // Logged, not returned: a `?` here would drop the notices and the memory
-                // output built above (#2719). The next SessionEnd may store the chunk again.
-                if let Err(e) =
-                    crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())
+                // Update dedup snapshot *after* the store succeeds (R3). Writing before
+                // the store call means a transient MCP failure leaves the snapshot ahead
+                // of reality — the next SessionEnd sees the chunk as unchanged and skips
+                // the store, permanently losing the memory. (#594 code review)
+                // Store the minimal chunk in the dedup snapshot to match what was stored. (#1792)
+                if let Some(dedup_path) = &session_end_dedup_path
+                    && !session_end_unchanged
                 {
-                    tracing::error!("session-end dedup snapshot not saved: {e:#}");
+                    // Logged, not returned: a `?` here would drop the notices and the memory
+                    // output built above (#2719). The next SessionEnd may store the chunk again.
+                    if let Err(e) =
+                        crate::paths::write_owner_only_atomic(dedup_path, storage_chunk.as_bytes())
+                    {
+                        tracing::error!(
+                            "session-end dedup snapshot not saved to {}, the next SessionEnd may store the chunk again: {e:#}",
+                            dedup_path.display()
+                        );
+                    }
                 }
-            }
 
-            // #231: append the task-tracker Stop reminder. Only reached here when
-            // session-log also wants Stop (the log_cfg.any_sink_enabled() case
-            // above already short-circuited before this point otherwise) — so
-            // this never displaces run_session_log, it just adds to `out`.
-            // A missing state directory drops only this reminder, logged. The `?` form would
-            // drop the output built above (#2719).
-            let stop_state_dir = match (event == HookEvent::Stop && task_tracker_enabled)
-                .then(crate::paths::state_dir)
-            {
-                Some(Ok(dir)) => Some(dir),
-                Some(Err(e)) => {
-                    tracing::error!(
-                        "stop reminder skipped, the state directory is unavailable: {e}"
+                // #231: append the task-tracker Stop reminder. Only reached here when
+                // session-log also wants Stop (the log_cfg.any_sink_enabled() case
+                // above already short-circuited before this point otherwise) — so
+                // this never displaces run_session_log, it just adds to `out`.
+                // A missing state directory drops only this reminder, logged. The `?` form would
+                // drop the output built above (#2719).
+                let stop_state_dir = match (event == HookEvent::Stop && task_tracker_enabled)
+                    .then(crate::paths::state_dir)
+                {
+                    Some(Ok(dir)) => Some(dir),
+                    Some(Err(e)) => {
+                        tracing::error!(
+                            "stop reminder skipped, the state directory is unavailable: {e}"
+                        );
+                        None
+                    }
+                    None => None,
+                };
+                if let Some(state_dir) = stop_state_dir {
+                    let reminder = resolve_stop_reminder(
+                        &state_dir,
+                        claude_session_id,
+                        &config,
+                        stdin_payload,
                     );
-                    None
-                }
-                None => None,
-            };
-            if let Some(state_dir) = stop_state_dir {
-                let reminder =
-                    resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload);
-                if !reminder.is_empty() {
-                    if !out.is_empty() {
-                        out.push('\n');
+                    if !reminder.is_empty() {
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&reminder);
                     }
-                    out.push_str(&reminder);
                 }
-            }
 
-            // #864/#985: append the PreToolUse decision text (read-once or the
-            // task-tool redirect). Only reached here when session-log also wants
-            // PreToolUse at Debug level (the early-return above already short-
-            // circuited otherwise) — so this never displaces run_session_log, it
-            // just adds to `out` (a deny replaces it via append_read_once_result).
-            if let Some(text) = &pre_tool_text
-                && !text.is_empty()
-            {
-                append_read_once_result(&mut out, text);
-            }
-            // No emptiness check: `turn_text` is `None` rather than
-            // `Some("")` when the layer produces nothing, so testing it again
-            // here is dead — and a dead condition is one a future edit can
-            // silently invert.
-            if let Some(text) = &turn_text {
-                append_read_once_result(&mut out, text);
-            }
-            if let Some(text) = &nudge_text {
-                append_read_once_result(&mut out, text);
-            }
+                // #864/#985: append the PreToolUse decision text (read-once or the
+                // task-tool redirect). Only reached here when session-log also wants
+                // PreToolUse at Debug level (the early-return above already short-
+                // circuited otherwise) — so this never displaces run_session_log, it
+                // just adds to `out` (a deny replaces it via append_read_once_result).
+                if let Some(text) = &pre_tool_text
+                    && !text.is_empty()
+                {
+                    append_read_once_result(&mut out, text);
+                }
+                // No emptiness check: `turn_text` is `None` rather than
+                // `Some("")` when the layer produces nothing, so testing it again
+                // here is dead — and a dead condition is one a future edit can
+                // silently invert.
+                if let Some(text) = &turn_text {
+                    append_read_once_result(&mut out, text);
+                }
+                if let Some(text) = &nudge_text {
+                    append_read_once_result(&mut out, text);
+                }
 
-            Ok::<String, anyhow::Error>(out)
-        });
+                Ok::<String, anyhow::Error>(out)
+            }),
+            None => Ok(String::new()),
+        };
         // After the store, so the child's recall can see this session's chunk,
         // and before `?`, so a failed dedup write or log step does not skip it.
         if client.is_some() {
