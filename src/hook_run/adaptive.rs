@@ -342,12 +342,20 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
     let tool = ctx.payload["tool_name"].as_str().unwrap_or_default();
     let error = ctx.payload["error"].as_str().unwrap_or_default();
     let now = unix_now();
-    ctx.store
-        .update(ctx.session_id, |l| l.push_error(tool, error, now));
-    let (key, record) = agent_key(ctx.payload);
-    let Some(ledger) = ledger_or_skip(ctx.store, ctx.session_id, "tool_failure") else {
+    // One lock covers the error record and the read. Without the read, a busy or
+    // unreadable ledger would drop the record with no log (#2723).
+    let Some(ledger) = ctx.store.update(ctx.session_id, |l| {
+        l.push_error(tool, error, now);
+        l.clone()
+    }) else {
+        tracing::error!(
+            "tool_failure: session {} tool {tool}: error not recorded and recall skipped, \
+             the recall ledger cannot be updated (unsafe session id, busy lock, or unreadable file)",
+            ctx.session_id
+        );
         return Ok(String::new());
     };
+    let (key, record) = agent_key(ctx.payload);
     let sent = ledger.sent_for(&key);
     let text = relevance::error_query(tool, error);
     let resolved = RecallQuery {
@@ -930,6 +938,26 @@ mod tests {
         assert_eq!(f.store.load("s1").unwrap().errors().len(), 1);
         let second = tool_failure(&ctx(&f, &payload)).await.unwrap();
         assert!(!second.contains("pin mcp<2"), "already sent: {second}");
+    }
+
+    #[test]
+    fn tool_failure_logs_when_the_error_cannot_be_recorded() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let logs = crate::test_log_capture::capture_logs(|| {
+            rt.block_on(async {
+                let server = server_with(&[]).await;
+                let f = fixture(&server);
+                // A directory where the ledger file belongs makes the read fail, not miss.
+                std::fs::create_dir_all(f._dir.path().join("recall_session/s1.json")).unwrap();
+                let payload = json!({"tool_name": "Bash", "error": "boom"});
+                let out = tool_failure(&ctx(&f, &payload)).await.unwrap();
+                assert!(out.is_empty(), "{out}");
+            });
+        });
+        assert!(logs.contains("error not recorded"), "{logs}");
     }
 
     #[tokio::test]

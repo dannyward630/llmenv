@@ -40,6 +40,10 @@ pub struct SessionCache {
     pub session_id: String,
     /// Entries keyed by canonicalized file path.
     pub entries: HashMap<String, ReadEntry>,
+    /// Set when the cache file exists but cannot be read. A save then would replace the
+    /// unread file with an empty cache, so `save` skips the write (#2721).
+    #[serde(skip)]
+    read_failed: bool,
 }
 
 impl SessionCache {
@@ -48,34 +52,48 @@ impl SessionCache {
         Self {
             session_id: session_id.to_string(),
             entries: HashMap::new(),
+            read_failed: false,
         }
     }
 
     /// Load the session cache from disk. Returns an empty cache on any IO or
-    /// parse error (fail-soft).
+    /// parse error (fail-soft). A read error also marks the cache so `save` leaves the file alone.
     pub fn load(state_dir: &Path, session_id: &str, ttl_seconds: u64) -> Self {
         let path = session_cache_path(state_dir, session_id);
         let mut cache: Self = match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                eprintln!("llmenv: failed to parse read-once cache: {e}");
+                tracing::error!(
+                    "failed to parse read-once cache {}, starting empty: {e}",
+                    path.display()
+                );
                 Self::new(session_id)
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
             Err(e) => {
-                eprintln!(
-                    "llmenv: failed to read read-once cache {}: {e}",
+                tracing::error!(
+                    "failed to read read-once cache {}, saves are skipped: {e}",
                     path.display()
                 );
-                Self::new(session_id)
+                Self {
+                    read_failed: true,
+                    ..Self::new(session_id)
+                }
             }
         };
         cache.prune(ttl_seconds);
         cache
     }
 
-    /// Save the session cache atomically to disk. Logs errors to stderr
-    /// (fail-soft). Opportunistically prunes stale session files before writing.
+    /// Save the session cache atomically to disk. A cache that failed to load is not
+    /// written (#2721). Opportunistically prunes stale session files before writing.
     pub fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
+        if self.read_failed {
+            tracing::error!(
+                "read-once cache for session {} not saved, the file could not be read",
+                self.session_id
+            );
+            return Ok(());
+        }
         Self::prune_stale_sessions(state_dir, 7);
         let path = session_cache_path(state_dir, &self.session_id);
         let json = serde_json::to_string(&self)?;
@@ -660,6 +678,37 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_file_cannot_set_the_read_failed_flag() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let path = session_cache_path(state_dir.path(), "forged");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"session_id":"forged","entries":{},"read_failed":true}"#,
+        )
+        .unwrap();
+        assert!(!SessionCache::load(state_dir.path(), "forged", 3600).read_failed);
+    }
+
+    #[test]
+    fn save_keeps_a_cache_file_it_could_not_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let state_dir = tempfile::tempdir().unwrap();
+        let path = session_cache_path(state_dir.path(), "unread");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{ "session_id": "unread", "entries": {} }"#;
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let cache = SessionCache::load(state_dir.path(), "unread", 3600);
+            cache.save(state_dir.path()).unwrap();
+        });
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(logs.contains("not saved"), "{logs}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
     fn corrupt_cache_file_fail_soft() {
         let dir = TempDir::new().expect("test");
         let state_dir = dir.path();
@@ -796,6 +845,7 @@ mod tests {
                 .prop_map(|(session_id, entries)| SessionCache {
                     session_id,
                     entries,
+                    read_failed: false,
                 })
         }
 
