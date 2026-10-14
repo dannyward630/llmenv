@@ -284,6 +284,9 @@ fn all_events_fail_soft_without_backend() {
     }
 }
 
+/// The agent-visible notice for a failed recall call (#2664).
+const RECALL_FAILED_NOTICE: &str = "a memory recall call failed, so its records were not sent";
+
 #[test]
 fn adaptive_events_fail_soft_with_an_unreachable_backend() {
     // #2249: with a session id, these events take the adaptive flow and write
@@ -316,12 +319,13 @@ fn adaptive_events_fail_soft_with_an_unreachable_backend() {
             .timeout(Duration::from_secs(25))
             .assert()
             .success();
-        // Only session start prints on a dead backend: the health notice (#2358).
-        if event == "session_start" {
-            assert.stdout(predicate::str::contains("MCP health check failed"));
-        } else {
-            assert.stdout(predicate::str::is_empty());
-        }
+        // Session start prints the health notice on a dead backend (#2358). A failed recall
+        // tells the agent so on stdout (#2664). PostToolBatch only records locally.
+        match event {
+            "session_start" => assert.stdout(predicate::str::contains("MCP health check failed")),
+            "post_tool_batch" => assert.stdout(predicate::str::is_empty()),
+            _ => assert.stdout(predicate::str::contains(RECALL_FAILED_NOTICE)),
+        };
     }
 }
 
@@ -333,7 +337,7 @@ fn an_adaptive_turn_reports_a_dead_backend_on_stderr() {
         .timeout(Duration::from_secs(20))
         .assert()
         .success()
-        .stdout(predicate::str::is_empty())
+        .stdout(predicate::str::contains(RECALL_FAILED_NOTICE))
         .stderr(predicate::str::contains(
             "llmenv: memory turn_start recall skipped: all",
         ));
