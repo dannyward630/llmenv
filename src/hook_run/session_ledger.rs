@@ -300,9 +300,18 @@ impl LedgerStore {
             .map_err(std::io::Error::other)
             .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
         if let Err(e) = result {
-            tracing::error!("cannot save recall ledger {}: {e}", path.display());
+            note_save_failure(&path, &e);
         }
     }
+}
+
+/// Logs a failed ledger save and tells the agent. `update` still returns the result of its
+/// closure, so the caller cannot see this failure (#2729).
+fn note_save_failure(path: &std::path::Path, err: &std::io::Error) {
+    tracing::error!("cannot save recall ledger {}: {err}", path.display());
+    crate::agent_notice::record(
+        "llmenv: the recall ledger could not be saved, so some records may repeat.",
+    );
 }
 
 #[cfg(test)]
@@ -656,5 +665,19 @@ mod corrupt_notice_tests {
         );
         let text = crate::agent_notice::current().unwrap_or_default();
         assert!(text.contains("recall ledger is corrupt"), "got: {text}");
+    }
+
+    #[test]
+    fn a_failed_save_tells_the_agent() {
+        // The atomic writer rebuilds the directory, so a real save failure cannot be forced here.
+        super::note_save_failure(
+            std::path::Path::new("/state/recall_session/s1.json"),
+            &std::io::Error::other("disk full"),
+        );
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            text.contains("recall ledger could not be saved"),
+            "got: {text}"
+        );
     }
 }
