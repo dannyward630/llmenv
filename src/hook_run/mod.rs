@@ -1567,18 +1567,7 @@ fn run_inner(
         // it's the same target path for both the read-check and the rewrite.
         // A missing state directory skips the dedup snapshot. It does not end the hook, which
         // would drop the notices built above (#2719).
-        let session_end_dedup_path = match (event == HookEvent::SessionEnd)
-            .then(crate::paths::state_dir)
-        {
-            Some(Ok(dir)) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
-            Some(Err(e)) => {
-                tracing::error!(
-                    "session-end dedup skipped, the state directory is unavailable, so the chunk is stored again: {e}"
-                );
-                None
-            }
-            None => None,
-        };
+        let session_end_dedup_path = dedup_snapshot_path(event, crate::paths::state_dir);
         let session_end_unchanged = if let Some(dedup_path) = &session_end_dedup_path {
             let prev = std::fs::read_to_string(dedup_path)
                 .inspect_err(|e| {
@@ -1724,7 +1713,7 @@ fn run_inner(
                     // PostToolUse WebFetch/WebSearch: auto-store fetched content in ICM
                     // with fast-falloff memory (topic: web-fetch, importance: low) so it
                     // survives session compactions but decays quickly. (#579)
-                    if event == HookEvent::PostToolUse {
+                    if stores_web_fetch(event) {
                         // Detached: process-group-detached and outlives us regardless.
                         let _detached_child = handle_web_fetch_post_tool_use(stdin_payload);
                     }
@@ -1750,8 +1739,8 @@ fn run_inner(
                 // of reality — the next SessionEnd sees the chunk as unchanged and skips
                 // the store, permanently losing the memory. (#594 code review)
                 // Store the minimal chunk in the dedup snapshot to match what was stored. (#1792)
-                if let Some(dedup_path) = &session_end_dedup_path
-                    && !session_end_unchanged
+                if let Some(dedup_path) =
+                    dedup_write_target(session_end_dedup_path.as_deref(), session_end_unchanged)
                 {
                     // Logged, not returned: a `?` here would drop the notices and the memory
                     // output built above (#2719). The next SessionEnd may store the chunk again.
@@ -1790,12 +1779,7 @@ fn run_inner(
                         &config,
                         stdin_payload,
                     );
-                    if !reminder.is_empty() {
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        out.push_str(&reminder);
-                    }
+                    append_section(&mut out, &reminder);
                 }
 
                 // #864/#985: append the PreToolUse decision text (read-once or the
@@ -3145,6 +3129,48 @@ fn write_hook_line(w: &mut impl std::io::Write, out: &str) -> Option<std::io::Er
     }
 }
 
+/// The SessionEnd dedup snapshot path. Other events have none. A missing state directory skips
+/// the snapshot and logs, because an error return would drop the notices built above (#2719).
+fn dedup_snapshot_path(
+    event: HookEvent,
+    state_dir: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if event != HookEvent::SessionEnd {
+        return None;
+    }
+    match state_dir() {
+        Ok(dir) => Some(dir.join(crate::paths::HOOK_STORE_CHUNK)),
+        Err(e) => {
+            tracing::error!(
+                "session-end dedup skipped, the state directory is unavailable, so the chunk is stored again: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// Whether a PostToolUse event may store fetched web content in ICM (#579).
+fn stores_web_fetch(event: HookEvent) -> bool {
+    event == HookEvent::PostToolUse
+}
+
+/// The dedup snapshot to write after a store. A chunk the store already matched is not written
+/// again, so the snapshot keeps its earlier content.
+fn dedup_write_target(path: Option<&std::path::Path>, unchanged: bool) -> Option<&std::path::Path> {
+    path.filter(|_| !unchanged)
+}
+
+/// Append `section` to `out` on its own line. An empty section adds nothing.
+fn append_section(out: &mut String, section: &str) {
+    if section.is_empty() {
+        return;
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(section);
+}
+
 #[cfg(test)]
 mod write_hook_line_tests {
     use super::write_hook_line;
@@ -3829,6 +3855,42 @@ mod tests {
         cp.cwd = None;
         let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
         assert!(err.to_string().contains("not recorded"), "{err}");
+    }
+
+    #[test]
+    fn the_dedup_snapshot_is_only_for_session_end_with_a_state_dir() {
+        let dir = || Ok(std::path::PathBuf::from("/s"));
+        let skipped = || anyhow::bail!("state dir gone");
+        let never = || -> anyhow::Result<std::path::PathBuf> { anyhow::bail!("not for Stop") };
+        let chunk = std::path::PathBuf::from("/s").join(crate::paths::HOOK_STORE_CHUNK);
+        assert_eq!(dedup_snapshot_path(HookEvent::SessionEnd, dir), Some(chunk));
+        assert_eq!(dedup_snapshot_path(HookEvent::SessionEnd, skipped), None);
+        assert_eq!(dedup_snapshot_path(HookEvent::Stop, never), None);
+    }
+
+    #[test]
+    fn only_post_tool_use_stores_web_fetch() {
+        assert!(stores_web_fetch(HookEvent::PostToolUse));
+        assert!(!stores_web_fetch(HookEvent::PreToolUse));
+    }
+
+    #[test]
+    fn dedup_is_written_only_for_a_changed_chunk_with_a_path() {
+        let path = std::path::Path::new("/s/dedup.txt");
+        assert_eq!(dedup_write_target(Some(path), false), Some(path));
+        assert_eq!(dedup_write_target(Some(path), true), None);
+        assert_eq!(dedup_write_target(None, false), None);
+    }
+
+    #[test]
+    fn a_section_is_appended_on_its_own_line_and_an_empty_one_is_dropped() {
+        let mut out = String::new();
+        append_section(&mut out, "");
+        assert_eq!(out, "");
+        append_section(&mut out, "first");
+        assert_eq!(out, "first");
+        append_section(&mut out, "second");
+        assert_eq!(out, "first\nsecond");
     }
 
     #[test]
