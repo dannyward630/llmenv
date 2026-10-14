@@ -1853,7 +1853,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 - [hyper-rustls 0.27.10](https://github.com/rustls/hyper-rustls)
 - [rustls-native-certs 0.8.4](https://github.com/rustls/rustls-native-certs)
-- [rustls 0.23.45](https://github.com/rustls/rustls)
+- [rustls 0.23.46](https://github.com/rustls/rustls)
 
 ```
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -3242,7 +3242,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv 3.11.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv 3.12.2](https://github.com/phaedrus1992/llmenv)
 
 ```
 Copyright (c) 2026 The llmenv Authors
@@ -3692,10 +3692,10 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [llmenv-config 3.11.2](https://github.com/phaedrus1992/llmenv)
-- [llmenv-git 3.11.2](https://github.com/phaedrus1992/llmenv)
-- [llmenv-paths 3.11.2](https://github.com/phaedrus1992/llmenv)
-- [llmenv-util 3.11.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv-config 3.12.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv-git 3.12.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv-paths 3.12.2](https://github.com/phaedrus1992/llmenv)
+- [llmenv-util 3.12.2](https://github.com/phaedrus1992/llmenv)
 - [anes 0.1.6](https://github.com/zrzka/anes-rs)
 - [difflib 0.4.0](https://github.com/DimaKudosh/difflib)
 - [jni-macros 0.22.4](https://github.com/jni-rs/jni-rs)

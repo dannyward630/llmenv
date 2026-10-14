@@ -918,7 +918,8 @@ delay rather than blocking the session.
 The throttle state file is `throttle.json` in the state directory (changed in v3.12.2).
 A file that cannot be read or removed is reported with its path.
 A `throttle.json` that exists but cannot be parsed shows `throttle unreadable` in the statusline, not throttling off (changed in v3.13.0).
-A throttle that cannot be resolved, for example two entries active at once, shows `throttle unreadable` too (changed in v3.13.0).
+Two throttle entries active at once show `throttle conflict`, a different label from an unreadable state file (changed in v3.13.0).
+A failed read or parse of the statusline data file is logged at error level, and a missing file stays empty (changed in v3.13.0).
 A stale file that cannot be removed fails the export, instead of leaving throttling on.
 A hook failure is also written to the session log, and not to stderr only.
 

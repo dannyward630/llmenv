@@ -68,7 +68,12 @@ pub fn collect_status_data(
     cache_root: &Path,
     hashing: HashingMode,
 ) -> StatusDataJson {
-    let (throttle, throttle_error) = collect_throttle(throttle_configs, &active.tags);
+    let (throttle, throttle_fault) = collect_throttle(throttle_configs, &active.tags);
+    let (throttle_error, throttle_conflict) = match throttle_fault {
+        None => (None, None),
+        Some(ThrottleFault::Unreadable(e)) => (Some(e), None),
+        Some(ThrottleFault::Conflict(e)) => (None, Some(e)),
+    };
     StatusDataJson {
         schema: "llmenv-status-v1",
         v: 1,
@@ -82,6 +87,7 @@ pub fn collect_status_data(
             icm: collect_icm(),
             throttle,
             throttle_error,
+            throttle_conflict,
             config_stale: config_stale
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: collect_cache(cache_root, hashing),
@@ -308,7 +314,7 @@ fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> 
 fn collect_throttle(
     throttle_configs: &[Throttle],
     active_tags: &BTreeSet<String>,
-) -> (Option<ThrottleData>, Option<String>) {
+) -> (Option<ThrottleData>, Option<ThrottleFault>) {
     collect_throttle_with_stored_fallback(
         throttle_configs,
         active_tags,
@@ -321,20 +327,18 @@ fn collect_throttle(
 /// real state dir (mirrors the `_with_state_dir` DI pattern used in
 /// `crate::throttle` and `crate::cli::statusline::icons`).
 ///
-/// The second element is set when the stored state exists but cannot be read.
-/// That case is an error, not "throttling off", so the widget can show it.
+/// The second element is set when the throttle cannot be used. Neither case is "throttling off",
+/// so the widget can show it: a config conflict, or a stored state that cannot be read.
 fn collect_throttle_with_stored_fallback(
     throttle_configs: &[Throttle],
     active_tags: &BTreeSet<String>,
     read_stored: impl FnOnce() -> anyhow::Result<Option<Throttle>>,
-) -> (Option<ThrottleData>, Option<String>) {
-    // A failed resolution is an unreadable state, not "throttling off". Passing the error on
-    // lets the widget say so.
+) -> (Option<ThrottleData>, Option<ThrottleFault>) {
     let resolved = match crate::throttle::resolve_active_throttle(throttle_configs, active_tags) {
         Ok(resolved) => resolved,
         Err(e) => {
             tracing::error!("throttle resolution failed (non-fatal): {e:#}");
-            return (None, Some(format!("{e:#}")));
+            return (None, Some(ThrottleFault::Conflict(format!("{e:#}"))));
         }
     };
     if let Some(t) = resolved {
@@ -342,8 +346,18 @@ fn collect_throttle_with_stored_fallback(
     }
     match read_stored() {
         Ok(stored) => (stored.map(throttle_data), None),
-        Err(e) => (None, Some(format!("{e:#}"))),
+        Err(e) => (None, Some(ThrottleFault::Unreadable(format!("{e:#}")))),
     }
+}
+
+/// Why a throttle cannot be shown. The widget labels the two cases differently: a config conflict
+/// is not an unreadable state file.
+#[derive(Debug, Clone, PartialEq)]
+enum ThrottleFault {
+    /// More than one throttle entry is active at once.
+    Conflict(String),
+    /// The stored throttle state exists but cannot be read.
+    Unreadable(String),
 }
 
 fn throttle_data(t: Throttle) -> ThrottleData {
@@ -876,10 +890,10 @@ mod tests {
                 panic!("stored fallback must not mask a failed resolution")
             });
         assert_eq!(throttle, None);
-        let error = error.expect("a failed resolution must set throttle_error");
+        let fault = error.expect("a failed resolution must set a throttle fault");
         assert!(
-            error.contains("conflicting backends"),
-            "unexpected error: {error}"
+            matches!(&fault, ThrottleFault::Conflict(text) if text.contains("conflicting backends")),
+            "a config conflict is not an unreadable state: {fault:?}"
         );
     }
 
@@ -897,10 +911,10 @@ mod tests {
             ))
         });
         assert_eq!(result.0, None);
-        let error = result.1.expect("unreadable state must surface an error");
+        let fault = result.1.expect("unreadable state must surface a fault");
         assert!(
-            error.contains("/state/throttle.json"),
-            "error names the file: {error}"
+            matches!(&fault, ThrottleFault::Unreadable(text) if text.contains("/state/throttle.json")),
+            "unreadable state names the file: {fault:?}"
         );
     }
 

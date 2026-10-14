@@ -135,13 +135,21 @@ fn render_config_stale(
 }
 
 fn render_throttle(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    // An unreadable state file is not "throttling off". Show it so the user sees it.
-    if data.throttle_error.is_some() {
+    // An unreadable state file or a config conflict is not "throttling off". Show it, with a label
+    // that names the actual problem.
+    let problem = if data.throttle_conflict.is_some() {
+        Some(("throttle conflict", "conflict"))
+    } else if data.throttle_error.is_some() {
+        Some(("throttle unreadable", "unreadable"))
+    } else {
+        None
+    };
+    if let Some((label, reason)) = problem {
         let format = cfg.and_then(|c| c.format.as_deref()).unwrap_or("{raw}");
         return format
-            .replace("{raw}", "throttle unreadable")
+            .replace("{raw}", label)
             .replace("{cooldown_secs}", "")
-            .replace("{reason}", "unreadable");
+            .replace("{reason}", reason);
     }
     let Some(throttle) = &data.throttle else {
         return String::new();
@@ -320,6 +328,16 @@ mod tests {
         };
         let out = render_llmenv_widget("throttle", &data, None, &icons(), false).unwrap();
         assert_eq!(out, "throttle unreadable");
+    }
+
+    #[test]
+    fn renders_throttle_conflict_apart_from_an_unreadable_state() {
+        let data = StatusData {
+            throttle_conflict: Some("throttle: multiple entries active".to_string()),
+            ..Default::default()
+        };
+        let out = render_llmenv_widget("throttle", &data, None, &icons(), false).unwrap();
+        assert_eq!(out, "throttle conflict");
     }
 
     #[test]
@@ -675,6 +693,7 @@ mod tests {
                 cooldown_secs: 45,
             }),
             throttle_error: None,
+            throttle_conflict: None,
             session_log: Some(8),
             tasks: Some(TasksData {
                 session: Some(SessionProgress { done: 2, total: 5 }),
