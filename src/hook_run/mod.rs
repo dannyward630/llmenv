@@ -1434,6 +1434,17 @@ fn run_inner(
         let active = crate::scope::evaluate(&config, &env);
         let t_scope = std::time::Instant::now();
 
+        // Recall queries are validated before the SessionStart notices are built. A `?` after
+        // them would return from the hook and drop the notices (#2709). A bad tag therefore
+        // fails the hook before the codebase-memory block below runs, which is the same
+        // failure the hook already reported, one step earlier.
+        let tags = active.tags.iter().cloned().collect::<Vec<_>>();
+        let bundles = recall_bundle_names(&active);
+        // Build per-tag and per-bundle recall queries. Validation rejects query
+        // injection; these are the single sources of the tag/bundle→keyword encoding.
+        let tag_queries = tag_recall_queries(&tags)?;
+        let bundle_queries = bundle_recall_queries(&bundles)?;
+
         // #365: register the active project with codebase-memory-mcp's own
         // background auto-watch on SessionStart. Deliberately NOT gated on an
         // ICM memory client being configured (unlike PostSession/PostToolUse
@@ -1495,12 +1506,6 @@ fn run_inner(
         // Recall query: the sorted active tags. Store content: the llmenv context
         // chunk (tags/bundles/project). `active.tags` is a BTreeSet, so this
         // iteration order is already sorted ascending — no separate sort needed.
-        let tags = active.tags.iter().cloned().collect::<Vec<_>>();
-        let bundles = recall_bundle_names(&active);
-        // Build per-tag and per-bundle recall queries. Validation rejects query
-        // injection; these are the single sources of the tag/bundle→keyword encoding.
-        let tag_queries = tag_recall_queries(&tags)?;
-        let bundle_queries = bundle_recall_queries(&bundles)?;
         let tag_ranks = recall::tag_specificity(&active);
         let query = tags.join(", ");
         // Generate full chunk for injection into hook context, and minimal chunk
@@ -2728,15 +2733,10 @@ fn trigger_codebase_memory_index(
         mem_budget_mb: cm.mem_budget_mb,
         result_path: Some(result_path.display().to_string()),
     };
-    let checkpoint = checkpoint::begin(
-        Some(state_dir),
-        checkpoint::JobKind::CbmIndex,
-        &inputs,
-        None,
-    );
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
     let exe = std::env::current_exe().ok();
+    let checkpoint = begin_index_checkpoint(state_dir, &inputs, exe.is_some());
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
@@ -2770,6 +2770,24 @@ fn trigger_codebase_memory_index(
         )));
     }
     None
+}
+
+/// Opens the index checkpoint only when the indexer can be wrapped to settle it. Without the
+/// executable path the wrapper cannot run, so the checkpoint would stay open, and every later
+/// SessionStart would run the index again (#2696). The index then runs unchecked, and the error
+/// log says why.
+fn begin_index_checkpoint(
+    state_dir: &std::path::Path,
+    inputs: &detached_cbm::IndexInputs,
+    exe_known: bool,
+) -> Option<std::path::PathBuf> {
+    if !exe_known {
+        tracing::error!(
+            "codebase-memory index runs without a checkpoint: the executable path is unknown"
+        );
+        return None;
+    }
+    checkpoint::begin(Some(state_dir), checkpoint::JobKind::CbmIndex, inputs, None)
 }
 
 /// The session-start line for an index that did not run. `why` names the cause and the fix.
@@ -4924,6 +4942,38 @@ mod tests {
             envs.get("CBM_CACHE_DIR").map(String::as_str),
             Some("/custom/path")
         );
+    }
+
+    #[test]
+    fn index_checkpoint_is_not_opened_when_the_executable_is_unknown() {
+        let state = tempfile::tempdir().expect("test");
+        let inputs = detached_cbm::IndexInputs {
+            project_root: "/repos/proj".to_string(),
+            index_path: None,
+            mem_budget_mb: None,
+            result_path: None,
+        };
+        // Without the executable no wrapper can settle the checkpoint, so none is written.
+        assert_eq!(begin_index_checkpoint(state.path(), &inputs, false), None);
+        assert_eq!(
+            std::fs::read_dir(state.path()).expect("test").count(),
+            0,
+            "no checkpoint file may be written"
+        );
+    }
+
+    #[test]
+    fn index_checkpoint_is_opened_when_the_executable_is_known() {
+        let state = tempfile::tempdir().expect("test");
+        let inputs = detached_cbm::IndexInputs {
+            project_root: "/repos/proj".to_string(),
+            index_path: None,
+            mem_budget_mb: None,
+            result_path: None,
+        };
+        let path = begin_index_checkpoint(state.path(), &inputs, true)
+            .expect("a checkpoint opens when the executable is known");
+        assert!(path.exists(), "the checkpoint file must be written");
     }
 
     #[test]

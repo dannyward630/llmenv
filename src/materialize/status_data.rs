@@ -33,6 +33,10 @@ pub struct StatusData {
     /// widget shows this instead of reporting throttling as off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throttle_error: Option<String>,
+    /// Set when more than one throttle entry is active at once. This is a config conflict, not an
+    /// unreadable state file, so the widget labels it apart from `throttle_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle_conflict: Option<String>,
     pub config_stale: Option<bool>,
     pub cache: Option<CacheData>,
     pub session_log: Option<u64>,
@@ -91,16 +95,24 @@ pub struct SessionProgress {
 }
 
 impl StatusData {
-    /// Load and parse `llmenv-status.json` at `path`. Never fails: a missing
-    /// file, unreadable file, or parse error all yield `StatusData::default()`
-    /// (every field `None`) so the renderer's llmenv-sourced widgets simply
-    /// render empty rather than aborting the whole statusline.
+    /// Load and parse `llmenv-status.json` at `path`. Never fails: every problem yields
+    /// `StatusData::default()` (every field `None`), so the renderer's llmenv-sourced widgets
+    /// render empty rather than aborting the whole statusline. A missing file is the normal
+    /// empty case. Any other failure is also logged at error level, which the default log
+    /// filter shows, so an unreadable status file does not pass as no data (#2712).
     #[must_use]
     pub fn load(path: &std::path::Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                tracing::error!("status file {} is not valid JSON: {e}", path.display());
+                Self::default()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                tracing::error!("cannot read status file {}: {e}", path.display());
+                Self::default()
+            }
+        }
     }
 }
 
@@ -153,7 +165,12 @@ pub fn collect_status_data(
     cache_root: &Path,
     hashing: HashingMode,
 ) -> StatusDataJson {
-    let (throttle, throttle_error) = collect_throttle(throttle_configs, &active.tags);
+    let (throttle, throttle_fault) = collect_throttle(throttle_configs, &active.tags);
+    let (throttle_error, throttle_conflict) = match throttle_fault {
+        None => (None, None),
+        Some(ThrottleFault::Unreadable(e)) => (Some(e), None),
+        Some(ThrottleFault::Conflict(e)) => (None, Some(e)),
+    };
     StatusDataJson {
         schema: "llmenv-status-v1",
         v: 1,
@@ -167,6 +184,7 @@ pub fn collect_status_data(
             icm: collect_icm(),
             throttle,
             throttle_error,
+            throttle_conflict,
             config_stale: config_stale
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
             cache: collect_cache(cache_root, hashing),
@@ -405,7 +423,7 @@ fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> 
 fn collect_throttle(
     throttle_configs: &[Throttle],
     active_tags: &BTreeSet<String>,
-) -> (Option<ThrottleData>, Option<String>) {
+) -> (Option<ThrottleData>, Option<ThrottleFault>) {
     collect_throttle_with_stored_fallback(
         throttle_configs,
         active_tags,
@@ -418,20 +436,18 @@ fn collect_throttle(
 /// real state dir (mirrors the `_with_state_dir` DI pattern used in
 /// `crate::throttle` and `crate::cli::statusline::icons`).
 ///
-/// The second element is set when the stored state exists but cannot be read.
-/// That case is an error, not "throttling off", so the widget can show it.
+/// The second element is set when the throttle cannot be used. Neither case is "throttling off",
+/// so the widget can show it: a config conflict, or a stored state that cannot be read.
 fn collect_throttle_with_stored_fallback(
     throttle_configs: &[Throttle],
     active_tags: &BTreeSet<String>,
     read_stored: impl FnOnce() -> anyhow::Result<Option<Throttle>>,
-) -> (Option<ThrottleData>, Option<String>) {
-    // A failed resolution is an unreadable state, not "throttling off". Passing the error on
-    // lets the widget say so.
+) -> (Option<ThrottleData>, Option<ThrottleFault>) {
     let resolved = match crate::throttle::resolve_active_throttle(throttle_configs, active_tags) {
         Ok(resolved) => resolved,
         Err(e) => {
             tracing::error!("throttle resolution failed (non-fatal): {e:#}");
-            return (None, Some(format!("{e:#}")));
+            return (None, Some(ThrottleFault::Conflict(format!("{e:#}"))));
         }
     };
     if let Some(t) = resolved {
@@ -439,8 +455,18 @@ fn collect_throttle_with_stored_fallback(
     }
     match read_stored() {
         Ok(stored) => (stored.map(throttle_data), None),
-        Err(e) => (None, Some(format!("{e:#}"))),
+        Err(e) => (None, Some(ThrottleFault::Unreadable(format!("{e:#}")))),
     }
+}
+
+/// Why a throttle cannot be shown. The widget labels the two cases differently: a config conflict
+/// is not an unreadable state file.
+#[derive(Debug, Clone, PartialEq)]
+enum ThrottleFault {
+    /// More than one throttle entry is active at once.
+    Conflict(String),
+    /// The stored throttle state exists but cannot be read.
+    Unreadable(String),
 }
 
 fn throttle_data(t: Throttle) -> ThrottleData {
@@ -973,10 +999,10 @@ mod tests {
                 panic!("stored fallback must not mask a failed resolution")
             });
         assert_eq!(throttle, None);
-        let error = error.expect("a failed resolution must set throttle_error");
+        let fault = error.expect("a failed resolution must set a throttle fault");
         assert!(
-            error.contains("conflicting backends"),
-            "unexpected error: {error}"
+            matches!(&fault, ThrottleFault::Conflict(text) if text.contains("conflicting backends")),
+            "a config conflict is not an unreadable state: {fault:?}"
         );
     }
 
@@ -994,10 +1020,10 @@ mod tests {
             ))
         });
         assert_eq!(result.0, None);
-        let error = result.1.expect("unreadable state must surface an error");
+        let fault = result.1.expect("unreadable state must surface a fault");
         assert!(
-            error.contains("/state/throttle.json"),
-            "error names the file: {error}"
+            matches!(&fault, ThrottleFault::Unreadable(text) if text.contains("/state/throttle.json")),
+            "unreadable state names the file: {fault:?}"
         );
     }
 
@@ -1333,25 +1359,56 @@ mod tests {
         assert!(data.plugins.is_none());
     }
 
+    #[test]
+    fn load_reads_a_file_that_has_no_throttle_conflict_key() {
+        // A status file written before `throttle_conflict` existed must still load.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llmenv-status.json");
+        std::fs::write(&path, r#"{"throttle_error": "parsing throttle state: /x"}"#).unwrap();
+        let data = StatusData::load(&path);
+        assert_eq!(
+            data.throttle_error.as_deref(),
+            Some("parsing throttle state: /x")
+        );
+        assert_eq!(data.throttle_conflict, None);
+    }
+
     fn arb_status_data() -> impl Strategy<Value = StatusData> {
         (
             proptest::option::of(proptest::collection::vec("[a-z]{1,8}", 0..4)),
             proptest::option::of((any::<u64>(), any::<u64>())),
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<u64>()),
+            proptest::option::of(("[a-z]{1,8}", any::<u64>())),
+            proptest::option::of("[ -~]{0,20}"),
+            proptest::option::of("[ -~]{0,20}"),
         )
-            .prop_map(|(tags, plugins, config_stale, session_log)| StatusData {
-                scopes: tags.map(|tags| ScopesData { tags }),
-                plugins: plugins.map(|(total, errors)| CountData { total, errors }),
-                mcps: None,
-                icm: None,
-                throttle: None,
-                throttle_error: None,
-                config_stale,
-                cache: None,
-                session_log,
-                tasks: None,
-            })
+            .prop_map(
+                |(
+                    tags,
+                    plugins,
+                    config_stale,
+                    session_log,
+                    throttle,
+                    throttle_error,
+                    throttle_conflict,
+                )| StatusData {
+                    scopes: tags.map(|tags| ScopesData { tags }),
+                    plugins: plugins.map(|(total, errors)| CountData { total, errors }),
+                    mcps: None,
+                    icm: None,
+                    throttle: throttle.map(|(backend, cooldown_secs)| ThrottleData {
+                        backend,
+                        cooldown_secs,
+                    }),
+                    throttle_error,
+                    throttle_conflict,
+                    config_stale,
+                    cache: None,
+                    session_log,
+                    tasks: None,
+                },
+            )
     }
 
     proptest! {
