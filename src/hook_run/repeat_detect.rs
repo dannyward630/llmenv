@@ -67,6 +67,10 @@ struct SessionState {
     last_stop_signature: Option<String>,
     #[serde(default)]
     stop_consecutive: u32,
+    /// Set when the state file exists but cannot be read. A save then would replace the
+    /// unread file with a fresh counter, so `save` skips the write (#2721).
+    #[serde(skip)]
+    read_failed: bool,
 }
 
 impl SessionState {
@@ -77,6 +81,7 @@ impl SessionState {
             consecutive: 0,
             last_stop_signature: None,
             stop_consecutive: 0,
+            read_failed: false,
         }
     }
 
@@ -84,21 +89,31 @@ impl SessionState {
         let path = session_state_path(state_dir, session_id);
         match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                eprintln!("llmenv: failed to parse repeat-detect state: {e}");
+                tracing::error!("failed to parse repeat-detect state, starting fresh: {e}");
                 Self::new(session_id)
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
             Err(e) => {
-                eprintln!(
-                    "llmenv: failed to read repeat-detect state {}: {e}",
+                tracing::error!(
+                    "failed to read repeat-detect state {}, saves are skipped: {e}",
                     path.display()
                 );
-                Self::new(session_id)
+                Self {
+                    read_failed: true,
+                    ..Self::new(session_id)
+                }
             }
         }
     }
 
     fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
+        if self.read_failed {
+            tracing::error!(
+                "repeat-detect state for session {} not saved, the file could not be read",
+                self.session_id
+            );
+            return Ok(());
+        }
         let rd_dir = repeat_detect_state_dir(state_dir);
         // Same 7-day retention as `read_once`'s sibling cache — nothing here
         // needs a longer memory than that (the counter resets on any
@@ -596,6 +611,22 @@ mod tests {
     // own parent-directory creation must be the one and only path.
     #[cfg(unix)]
     #[test]
+    fn save_keeps_a_state_file_it_could_not_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let state_dir = tempfile::tempdir().unwrap();
+        let path = session_state_path(state_dir.path(), "unread");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{ "session_id": "unread", "last_signature": null, "consecutive": 3 }"#;
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let state = SessionState::load(state_dir.path(), "unread");
+        state.save(state_dir.path()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn save_creates_state_dir_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().expect("test");
@@ -653,6 +684,7 @@ mod tests {
                             consecutive,
                             last_stop_signature,
                             stop_consecutive,
+                            read_failed: false,
                         }
                     },
                 )
