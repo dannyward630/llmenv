@@ -72,7 +72,9 @@ fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
             return projects;
         }
     };
-    for entry in entries.filter_map(|entry| log_unreadable_entry(&projects_dir, entry)) {
+    for entry in entries.filter_map(|entry| {
+        crate::paths::readable_entry(&projects_dir, "project config discovery", entry)
+    }) {
         let name = entry.file_name().to_string_lossy().to_string();
         let settings_path = entry.path().join("settings.json");
         let Ok(bytes) = std::fs::read(&settings_path).inspect_err(|e| {
@@ -96,30 +98,27 @@ fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
     projects
 }
 
+/// Counts the readable entries of the project config directory. A read failure is logged and
+/// counts as zero, so an unreadable directory is not silent (#1180, #2718).
+fn count_project_entries(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .inspect_err(|e| {
+            tracing::error!(error = %e, dir = %dir.display(), "failed to read project configs");
+        })
+        .map(|entries| {
+            entries
+                .filter_map(|entry| {
+                    crate::paths::readable_entry(dir, "project config counts", entry)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 /// The user name written into the enumeration. A missing `USER` falls back to
 /// `unknown`, and the warning names the variable and that effect (#2560).
 /// `tracing::warn!` is hidden by the default log filter, so the warning is printed.
 /// Each caller then picks its own placeholder name.
-/// Keeps a readable project directory entry. An unreadable one is logged and skipped, so the
-/// loss is visible (#2718).
-fn log_unreadable_entry(
-    dir: &Path,
-    entry: std::io::Result<std::fs::DirEntry>,
-) -> Option<std::fs::DirEntry> {
-    entry
-        .inspect_err(|e| {
-            tracing::error!(error = %e, dir = %dir.display(), "cannot read a project config entry");
-        })
-        .ok()
-}
-
-/// Counts the readable entries of a project directory. See [`log_unreadable_entry`].
-fn count_project_entries(entries: std::fs::ReadDir, dir: &Path) -> usize {
-    entries
-        .filter_map(|entry| log_unreadable_entry(dir, entry))
-        .count()
-}
-
 fn user_from_var(value: Result<String, std::env::VarError>) -> Option<String> {
     match value {
         Ok(user) => Some(user),
@@ -547,16 +546,7 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
             // a real error (e.g. EACCES), not the ordinary "doesn't exist"
             // case — worth logging rather than silently showing nothing
             // (#1180).
-            let count = std::fs::read_dir(&projects_dir)
-                .inspect_err(|e| {
-                    tracing::error!(
-                        error = %e,
-                        dir = %projects_dir.display(),
-                        "failed to read project configs"
-                    );
-                })
-                .map(|e| count_project_entries(e, &projects_dir))
-                .unwrap_or(0);
+            let count = count_project_entries(&projects_dir);
             if count > 0 {
                 eprintln!("  ✓ Found {count} Claude Code project config(s)");
             }
@@ -663,16 +653,7 @@ pub(super) fn run_setup(
             // a real error (e.g. EACCES), not the ordinary "doesn't exist"
             // case — worth logging rather than silently showing nothing
             // (#1180).
-            let count = std::fs::read_dir(&projects_dir)
-                .inspect_err(|e| {
-                    tracing::error!(
-                        error = %e,
-                        dir = %projects_dir.display(),
-                        "failed to read project configs"
-                    );
-                })
-                .map(|e| count_project_entries(e, &projects_dir))
-                .unwrap_or(0);
+            let count = count_project_entries(&projects_dir);
             if count > 0 {
                 eprintln!("  ✓ Found {count} Claude Code project config(s)");
             }
@@ -1221,26 +1202,19 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod project_entry_tests {
-    use super::{count_project_entries, log_unreadable_entry};
+    use super::count_project_entries;
 
     #[test]
-    fn an_unreadable_entry_is_dropped_and_a_readable_one_is_kept() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(dir.path().join("proj-a")).expect("create entry");
-        let readable = std::fs::read_dir(dir.path())
-            .expect("read dir")
-            .next()
-            .expect("one entry");
-        assert!(log_unreadable_entry(dir.path(), Ok(readable.expect("entry"))).is_some());
-        assert!(log_unreadable_entry(dir.path(), Err(std::io::Error::other("boom"))).is_none());
-    }
-
-    #[test]
-    fn count_counts_only_the_readable_entries_of_a_real_directory() {
+    fn count_counts_the_readable_entries_of_a_real_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(dir.path().join("proj-a")).expect("create a");
         std::fs::create_dir(dir.path().join("proj-b")).expect("create b");
-        let entries = std::fs::read_dir(dir.path()).expect("read dir");
-        assert_eq!(count_project_entries(entries, dir.path()), 2);
+        assert_eq!(count_project_entries(dir.path()), 2);
+    }
+
+    #[test]
+    fn a_missing_project_directory_counts_as_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(count_project_entries(&dir.path().join("missing")), 0);
     }
 }

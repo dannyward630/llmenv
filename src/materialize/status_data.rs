@@ -416,30 +416,30 @@ fn collect_cache(cache_root: &Path, hashing: HashingMode) -> Option<CacheData> {
 /// matching `prune`'s own care not to traverse through them. Unreadable
 /// entries are skipped (best-effort estimate, not exact accounting).
 fn dir_size(path: &Path) -> u64 {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return 0;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        // A missing path (an absent cache root, or an entry removed during the walk) has no size.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => {
+            tracing::error!("cannot stat {} for the size estimate: {e}", path.display());
+            return 0;
+        }
     };
     if !meta.is_dir() {
         return meta.len();
     }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        tracing::error!(
-            "cannot list {} for the size estimate; it counts as its own length",
-            path.display()
-        );
-        return meta.len();
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::error!(
+                "cannot list {} for the size estimate, so it counts as its own length: {e}",
+                path.display()
+            );
+            return meta.len();
+        }
     };
     entries
-        .filter_map(|entry| {
-            entry
-                .inspect_err(|e| {
-                    tracing::error!(
-                        "cannot read an entry in {} for the size estimate: {e}",
-                        path.display()
-                    );
-                })
-                .ok()
-        })
+        .filter_map(|entry| crate::paths::readable_entry(path, "the size estimate", entry))
         .map(|entry| dir_size(&entry.path()))
         .sum()
 }

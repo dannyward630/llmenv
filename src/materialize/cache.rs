@@ -451,16 +451,9 @@ fn restore_dir_write_bits(dir: &Path) {
                 return;
             }
         };
-        for entry in entries.filter_map(|entry| {
-            entry
-                .inspect_err(|e| {
-                    tracing::error!(
-                        "cannot read an entry in {} during cache cleanup: {e}",
-                        dir.display()
-                    );
-                })
-                .ok()
-        }) {
+        let readable =
+            entries.filter_map(|entry| crate::paths::readable_entry(dir, "cache cleanup", entry));
+        for entry in readable {
             // `file_type()` is lstat-equivalent: a symlink reports as a symlink
             // rather than as the directory it points at.
             if entry.file_type().is_ok_and(|ft| ft.is_dir()) {

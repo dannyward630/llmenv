@@ -1328,9 +1328,20 @@ pub(super) fn run_doctor(
     if skew_relevant {
         for adapter in crate::adapter::registered_adapters() {
             let adapter_cache = cache_dir.join(adapter.name());
-            if let Ok(entries) = std::fs::read_dir(&adapter_cache) {
+            if let Ok(entries) = std::fs::read_dir(&adapter_cache).inspect_err(|e| {
+                // A missing cache is normal for an adapter that never ran.
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::error!(
+                        "cannot read {} for the version skew check: {e}",
+                        adapter_cache.display()
+                    );
+                }
+            }) {
                 let mut cached_versions: Vec<String> = Vec::new();
-                for entry in entries.flatten() {
+                let readable = entries.filter_map(|entry| {
+                    crate::paths::readable_entry(&adapter_cache, "the version skew check", entry)
+                });
+                for entry in readable {
                     let path = entry.path();
                     if !path.is_dir() {
                         continue;
