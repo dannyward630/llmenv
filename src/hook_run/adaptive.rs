@@ -1228,7 +1228,7 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod skip_notice_tests {
-    use super::{LedgerStore, ledger_or_skip};
+    use super::{LedgerStore, ledger_or_skip, note_unless_saved};
 
     #[test]
     fn a_skipped_recall_tells_the_agent() {
@@ -1238,6 +1238,21 @@ mod skip_notice_tests {
         let text = crate::agent_notice::current().unwrap_or_default();
         assert!(
             text.contains("recall was skipped: the recall ledger"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn an_update_that_did_not_run_tells_the_agent_and_a_saved_one_does_not() {
+        note_unless_saved(None::<()>, "adaptive test: update did not run");
+        note_unless_saved(Some(()), "adaptive test: update was saved");
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            text.contains("adaptive test: update did not run"),
+            "got: {text}"
+        );
+        assert!(
+            !text.contains("adaptive test: update was saved"),
             "got: {text}"
         );
     }
