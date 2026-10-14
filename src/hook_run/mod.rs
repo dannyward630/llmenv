@@ -1461,14 +1461,23 @@ fn run_inner(
                 [cm] => match crate::mcp::resolve::codebase_memory_paths() {
                     Ok((project_root, state_dir)) => {
                         // Before the index run, so the server accepts the repository (#2406).
-                        roots_notice =
+                        let roots =
                             llmenv_mcp::cbm_roots::session_start_notice(&config, cm, &project_root);
-                        trigger_codebase_memory_index(&project_root, cm, &state_dir);
+                        let index = trigger_codebase_memory_index(&project_root, cm, &state_dir);
+                        roots_notice = match (roots, index) {
+                            (Some(r), Some(i)) => Some(format!("{r}{i}")),
+                            (r, i) => r.or(i),
+                        };
                     }
-                    Err(e) => tracing::error!(
-                        "cannot resolve the codebase-memory paths, so the session-start index \
-                         is skipped: {e:#}"
-                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            "cannot resolve the codebase-memory paths, so the session-start index \
+                             is skipped: {e:#}"
+                        );
+                        roots_notice = Some(index_skipped_notice(&format!(
+                            "cannot resolve the project paths: {e:#}"
+                        )));
+                    }
                 },
                 _ => {
                     tracing::debug!(
@@ -2692,18 +2701,23 @@ fn index_job_command(
 /// drops. If the log can't be opened, indexing still proceeds — a missing
 /// diagnostic is a smaller problem than skipping indexing — but stderr then
 /// falls back to discarded.
+///
+/// Returns the notice for the agent when the index is skipped. The log alone does not reach the
+/// agent, so the skip is also reported at session start.
 fn trigger_codebase_memory_index(
     project_root: &std::path::Path,
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
-) {
+) -> Option<String> {
     // A checkpointed run goes through `llmenv cbm-index-run`, which observes the indexer's exit
     // status. Without a checkpoint the indexer starts directly, as before (#2396).
     let index_path = match expanded_index_path(cm) {
         Ok(path) => path,
         Err(e) => {
             tracing::error!("codebase-memory index skipped: cannot expand index_path: {e:#}");
-            return;
+            return Some(index_skipped_notice(&format!(
+                "cannot expand index_path: {e:#}"
+            )));
         }
     };
     let cache_dir = cache_dir_of(index_path.as_deref(), state_dir);
@@ -2751,7 +2765,16 @@ fn trigger_codebase_memory_index(
     crate::mcp::proxy::detach_process_group(&mut cmd);
     if let Err(e) = cmd.spawn() {
         tracing::error!("codebase-memory-mcp index_repository: failed to spawn: {e}");
+        return Some(index_skipped_notice(&format!(
+            "the indexer did not start: {e}"
+        )));
     }
+    None
+}
+
+/// The session-start line for an index that did not run. `why` names the cause and the fix.
+fn index_skipped_notice(why: &str) -> String {
+    format!("codebase-memory: index skipped, {why}\n")
 }
 
 /// Whether this hook run starts the unfinished background jobs again: a `SessionStart` that is
@@ -4904,6 +4927,20 @@ mod tests {
     }
 
     #[test]
+    fn index_skipped_notice_names_the_skip_and_its_cause() {
+        let notice = index_skipped_notice("cannot expand index_path: HOME is not set");
+        assert!(
+            notice.contains("index skipped"),
+            "unexpected notice: {notice}"
+        );
+        assert!(
+            notice.contains("HOME is not set"),
+            "unexpected notice: {notice}"
+        );
+        assert!(notice.ends_with('\n'), "a notice line ends with a newline");
+    }
+
+    #[test]
     fn expanded_index_path_removes_a_leading_tilde() {
         let cm = crate::config::CodebaseMemory {
             allowed_roots: vec![],
@@ -4935,7 +4972,7 @@ mod tests {
             Some("/custom/path")
         );
         cm.index_path = None;
-        assert_eq!(expanded_index_path(&cm).ok().flatten(), None);
+        assert_eq!(expanded_index_path(&cm).unwrap(), None);
     }
 
     #[test]
