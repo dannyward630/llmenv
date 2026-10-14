@@ -66,7 +66,17 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
             return;
         }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::error!(
+                    "stale-session pruning skipped an entry in {}: {e}",
+                    dir.display()
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;

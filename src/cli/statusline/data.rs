@@ -88,11 +88,20 @@ impl StatusData {
     /// (every field `None`) so the renderer's llmenv-sourced widgets simply
     /// render empty rather than aborting the whole statusline.
     #[must_use]
+    /// A missing file is the empty case. Any other failure is logged at error level, which the
+    /// default log filter shows, so an unreadable status file does not look like no data (#2712).
     pub fn load(path: &std::path::Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                tracing::error!("status file {} is not valid JSON: {e}", path.display());
+                Self::default()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                tracing::error!("cannot read status file {}: {e}", path.display());
+                Self::default()
+            }
+        }
     }
 }
 
