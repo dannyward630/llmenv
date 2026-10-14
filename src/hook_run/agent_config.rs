@@ -282,9 +282,14 @@ pub(crate) fn write_session_start(state_dir: &Path, session_id: &str, mut doc: A
     else {
         return;
     };
-    if let Some(old) = load(state_dir, session_id) {
-        doc.created_at = old.created_at;
-        doc.model_history = old.model_history;
+    match read(state_dir, session_id) {
+        Stored::Doc(old) => {
+            doc.created_at = old.created_at;
+            doc.model_history = old.model_history;
+        }
+        Stored::Missing => {}
+        // The save below replaces the unreadable document, so its model history is lost.
+        Stored::Unreadable => note_history_reset(),
     }
     store(state_dir, session_id, &doc);
 }
@@ -308,9 +313,7 @@ fn apply_model_switch(
         Stored::Missing => fallback(),
         // The unreadable document is replaced by the save below, so its model history is lost.
         Stored::Unreadable => {
-            crate::agent_notice::record(
-                "llmenv: the agent config could not be read, so its model history was reset.",
-            );
+            note_history_reset();
             fallback()
         }
     };
@@ -323,6 +326,13 @@ fn apply_model_switch(
     let excess = doc.model_history.len().saturating_sub(MAX_HISTORY);
     doc.model_history.drain(..excess);
     store(state_dir, session_id, &doc);
+}
+
+/// Tells the agent that an unreadable agent config was replaced and lost its model history.
+fn note_history_reset() {
+    crate::agent_notice::record(
+        "llmenv: the agent config could not be read, so its model history was reset.",
+    );
 }
 
 fn store(state_dir: &Path, session_id: &str, doc: &AgentConfig) {
@@ -370,7 +380,7 @@ mod tests {
         }
     }
 
-    fn doc() -> AgentConfig {
+    pub(super) fn doc() -> AgentConfig {
         AgentConfig::from_scope_context(&ctx(), &facts())
     }
 
@@ -743,5 +753,25 @@ mod tests {
             let back: AgentConfig = serde_json::from_slice(&serde_json::to_vec(&d).unwrap()).unwrap();
             prop_assert_eq!(back, d);
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod reset_notice_tests {
+    use super::{DIR, write_session_start};
+
+    #[test]
+    fn a_session_start_over_a_corrupt_config_tells_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join(DIR);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("s1.json"), "not json").unwrap();
+        write_session_start(dir.path(), "s1", super::tests::doc());
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            text.contains("agent config could not be read"),
+            "got: {text}"
+        );
     }
 }
