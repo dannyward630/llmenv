@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Recall logs the reason and injects nothing when the session recall ledger cannot be read. Before, an unreadable ledger or a busy lock read as empty, and recall repeated records already sent (#2711) [fix:hook]
 - An invalid or unreadable `llmenv-status.json`, and an unreadable entry during stale-session pruning, are logged at error level. Before, both were silent (#2712) [fix:statusline]
 
+### Security
+
+- Update `rustls` to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and RUSTSEC-2026-0349. They cover TLS secrets in `Debug` output, application data sent after an ECH rejection, unbounded Brotli certificate decompression, and a key-exchange downgrade [fix:deps]
+
 ## [3.12.2] - 2026-10-10
 
 3.12.2 is a bug-fix release for 3.12.1.
