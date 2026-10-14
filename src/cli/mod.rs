@@ -1024,15 +1024,30 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether `dir` is inside a git repository. A failure to start git is an error, not "no repo":
-/// only a non-zero exit from `git rev-parse` means the directory is not a repository.
+/// Whether `dir` is inside a git repository.
+///
+/// # Errors
+/// git cannot start, or `git rev-parse` fails for a reason other than "not a git repository",
+/// such as dubious ownership. That failure must not read as "no repo" (#2710).
 fn is_git_repo(dir: &Path) -> anyhow::Result<bool> {
     let output = git::secure_git()
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir)
+        // The "not a git repository" match below needs git's English message.
+        .env("LC_ALL", "C")
         .output()
         .with_context(|| format!("failed to run git in {}", dir.display()))?;
-    Ok(output.status.success())
+    if output.status.success() {
+        return Ok(true);
+    }
+    if String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "git could not check {}: {}",
+        dir.display(),
+        git::git_failure_detail(&output.stderr, &output.stdout, output.status)
+    )
 }
 
 fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
@@ -7246,6 +7261,24 @@ mod config_guard_tests {
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod git_remote_tests {
     use super::check_git_remote;
+
+    #[test]
+    fn a_directory_outside_git_is_not_a_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!super::is_git_repo(dir.path()).expect("git runs"));
+    }
+
+    #[test]
+    fn an_initialized_directory_is_a_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .expect("run git init");
+        assert!(init.success());
+        assert!(super::is_git_repo(dir.path()).expect("git runs"));
+    }
 
     #[test]
     fn a_git_failure_is_not_reported_as_no_remote() {

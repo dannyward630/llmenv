@@ -1383,7 +1383,7 @@ pub(super) fn run_doctor(
         }
     }
 
-    // Check git remote is reachable
+    // The remote is read from the config only. No network call is made.
     let in_git_repo = super::is_git_repo(&config_dir).unwrap_or_else(|e| {
         eprintln!("{warn} Git repository check failed: {e:#}");
         false
@@ -1392,7 +1392,7 @@ pub(super) fn run_doctor(
         match super::check_git_remote(&config_dir) {
             Ok(remote) => {
                 let safe_url = crate::git::sanitize_git_url(&remote);
-                eprintln!("{pass} Git remote reachable: {}", safe_url);
+                eprintln!("{pass} Git remote configured: {}", safe_url);
             }
             Err(e) => eprintln!("{warn} Git remote check failed: {}", e),
         }
