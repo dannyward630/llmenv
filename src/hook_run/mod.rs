@@ -1416,6 +1416,17 @@ fn run_inner(
         let active = crate::scope::evaluate(&config, &env);
         let t_scope = std::time::Instant::now();
 
+        // Recall queries are validated before the SessionStart notices are built. A `?` after
+        // them would return from the hook and drop the notices (#2709). A bad tag therefore
+        // fails the hook before the codebase-memory block below runs, which is the same
+        // failure the hook already reported, one step earlier.
+        let tags = active.tags.iter().cloned().collect::<Vec<_>>();
+        let bundles = recall_bundle_names(&active);
+        // Build per-tag and per-bundle recall queries. Validation rejects query
+        // injection; these are the single sources of the tag/bundle→keyword encoding.
+        let tag_queries = tag_recall_queries(&tags)?;
+        let bundle_queries = bundle_recall_queries(&bundles)?;
+
         // #365: register the active project with codebase-memory-mcp's own
         // background auto-watch on SessionStart. Deliberately NOT gated on an
         // ICM memory client being configured (unlike PostSession/PostToolUse
@@ -1423,14 +1434,6 @@ fn run_inner(
         // Fire-and-forget: indexing a large repo can take minutes (the Linux
         // kernel benchmarks at ~3 per upstream docs), so this must never
         // block SessionStart.
-        // Validated before the SessionStart notices are built. A `?` after them would return from
-        // the hook and drop the notices (#2709), so a bad tag fails the hook here instead.
-        let tags = active.tags.iter().cloned().collect::<Vec<_>>();
-        let bundles = recall_bundle_names(&active);
-        // Build per-tag and per-bundle recall queries. Validation rejects query
-        // injection; these are the single sources of the tag/bundle→keyword encoding.
-        let tag_queries = tag_recall_queries(&tags)?;
-        let bundle_queries = bundle_recall_queries(&bundles)?;
         let mut roots_notice: Option<String> = None;
         if event == HookEvent::SessionStart {
             let active_codebase_memory: Vec<&crate::config::CodebaseMemory> = config
