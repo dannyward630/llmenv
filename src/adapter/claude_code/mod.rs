@@ -630,9 +630,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
         Ok(owned)
     }
 
-    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
+    fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String {
         // Claude Code accepts additionalContext on SessionStart (#2251).
-        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Accepted)
+        super::emit_hook_context(
+            hook_event_name,
+            memory,
+            notes,
+            super::SessionStartContext::Accepted,
+        )
     }
 }
 
@@ -7750,7 +7755,7 @@ mod tests {
         // SessionEnd has no model turn to inject context into, and its schema
         // rejects additionalContext (#558).
         assert_eq!(
-            ClaudeCodeAdapter.emit_hook_context("SessionEnd", "data"),
+            ClaudeCodeAdapter.emit_hook_context("SessionEnd", "data", ""),
             ""
         );
     }
@@ -7759,7 +7764,7 @@ mod tests {
     fn emit_hook_context_session_start_injects_for_claude_code() {
         // #2251: Claude Code accepts additionalContext on SessionStart; the shared
         // suppression came from #558, which was about SessionEnd only.
-        let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", "wake data");
+        let output = ClaudeCodeAdapter.emit_hook_context("SessionStart", "wake data", "");
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("must be valid JSON");
         assert_eq!(
             parsed["hookSpecificOutput"]["hookEventName"],
@@ -7771,7 +7776,7 @@ mod tests {
             "[ICM MEMORY CONTEXT (session start)]\nwake data"
         );
         assert_eq!(
-            ClaudeCodeAdapter.emit_hook_context("SessionStart", "  "),
+            ClaudeCodeAdapter.emit_hook_context("SessionStart", "  ", ""),
             ""
         );
     }
@@ -7782,7 +7787,7 @@ mod tests {
         // additionalContext per Claude Code schema.
         let adapter = ClaudeCodeAdapter;
         for event in ["UserPromptSubmit", "PostToolUse"] {
-            let output = adapter.emit_hook_context(event, "context data");
+            let output = adapter.emit_hook_context(event, "context data", "");
             let parsed: serde_json::Value =
                 serde_json::from_str(&output).expect("must be valid JSON");
             assert_eq!(
@@ -7802,7 +7807,7 @@ mod tests {
     fn emit_hook_context_empty_text_returns_empty_string() {
         // Empty text should return empty string, not invalid JSON
         let adapter = ClaudeCodeAdapter;
-        let output = adapter.emit_hook_context("SessionEnd", "");
+        let output = adapter.emit_hook_context("SessionEnd", "", "");
         assert_eq!(output, "", "empty text should produce empty output");
     }
 

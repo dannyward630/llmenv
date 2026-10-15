@@ -306,9 +306,9 @@ pub trait AgentAdapter {
     /// * `hook_event_name` — the event name from the hook payload (e.g.
     ///   `"SessionStart"`), echoed back as `hookEventName` inside
     ///   `hookSpecificOutput` for runtimes that validate it.
-    /// * `text` — the injected memory context, placed as `additionalContext`
-    ///   inside `hookSpecificOutput`.
-    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String;
+    /// * `memory` — the ICM memory context. It gets the ICM header.
+    /// * `notes` — llmenv notices. They go out without that header.
+    fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String;
 
     /// JSON Schema describing this adapter's materialized output, derived
     /// from the same typed structs that build it. `None` (the default)
@@ -444,6 +444,10 @@ pub(crate) enum SessionStartContext {
 
 /// Format injected hook context in the adapter-native hook-output shape.
 ///
+/// Only `memory` gets the ICM header, because only it came from ICM. `notes`
+/// is llmenv text, so it follows the memory block with no ICM label (#2754).
+/// Both go into one envelope, because an engine reads one JSON object per hook.
+///
 /// Empty input always returns an empty string. `SessionEnd` also returns
 /// empty: it has no model turn to inject context into, and Claude Code
 /// rejects `additionalContext` there (#558). `SessionStart` returns empty
@@ -456,32 +460,40 @@ pub(crate) enum SessionStartContext {
 /// # Arguments
 /// * `hook_event_name` — the event name (e.g. `"SessionStart"`), echoed
 ///   back as `hookEventName` inside `hookSpecificOutput`.
-/// * `text` — the injected context, placed as `additionalContext`.
+/// * `memory` — the ICM memory context. It gets the ICM header.
+/// * `notes` — llmenv notices. They go out unlabeled.
 /// * `session_start` — whether the engine accepts `SessionStart` context.
 #[must_use]
 pub(crate) fn emit_hook_context(
     hook_event_name: &str,
-    text: &str,
+    memory: &str,
+    notes: &str,
     session_start: SessionStartContext,
 ) -> String {
+    if matches!(
+        (hook_event_name, session_start),
+        ("SessionEnd", _) | ("SessionStart", SessionStartContext::Rejected)
+    ) {
+        return String::new();
+    }
     // Whitespace-only counts as empty: an all-advisory recall (stripped by
     // strip_advisory) can leave blank lines behind, and wrapping those would
     // inject an empty "[ICM MEMORY CONTEXT]" block on every turn (#978).
-    if text.trim().is_empty() {
+    let header = if hook_event_name == "SessionStart" {
+        SESSION_START_CONTEXT_HEADER
+    } else {
+        MEMORY_CONTEXT_HEADER
+    };
+    let memory_block = (!memory.trim().is_empty()).then(|| format!("{header}\n{memory}"));
+    let notes_block = (!notes.trim().is_empty()).then(|| notes.to_string());
+    let parts: Vec<String> = [memory_block, notes_block].into_iter().flatten().collect();
+    if parts.is_empty() {
         return String::new();
     }
-    let header = match (hook_event_name, session_start) {
-        ("SessionEnd", _) | ("SessionStart", SessionStartContext::Rejected) => {
-            return String::new();
-        }
-        ("SessionStart", SessionStartContext::Accepted) => SESSION_START_CONTEXT_HEADER,
-        _ => MEMORY_CONTEXT_HEADER,
-    };
-    let wrapped = format!("{header}\n{text}");
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": hook_event_name,
-            "additionalContext": wrapped
+            "additionalContext": parts.join("\n\n")
         }
     })
     .to_string()
@@ -615,7 +627,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn emit_hook_context(&self, _hook_event_name: &str, _text: &str) -> String {
+        fn emit_hook_context(&self, _hook_event_name: &str, _memory: &str, _notes: &str) -> String {
             String::new()
         }
     }
@@ -679,9 +691,52 @@ mod tests {
     #[test]
     fn emit_hook_context_treats_whitespace_only_as_empty() {
         for ss in [SessionStartContext::Accepted, SessionStartContext::Rejected] {
-            assert!(emit_hook_context("UserPromptSubmit", "\n\n", ss).is_empty());
-            assert!(emit_hook_context("SessionStart", "   ", ss).is_empty());
+            assert!(emit_hook_context("UserPromptSubmit", "\n\n", "", ss).is_empty());
+            assert!(emit_hook_context("SessionStart", "   ", "", ss).is_empty());
         }
+    }
+
+    fn additional_context(out: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(out).expect("valid hook JSON");
+        value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    // #2754: only ICM memory carries the ICM header. llmenv notes go out unlabeled.
+    #[test]
+    fn whitespace_only_notes_emit_nothing() {
+        let out = emit_hook_context("PreToolUse", "", "  \n", SessionStartContext::Accepted);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn notes_go_out_without_the_icm_header() {
+        let out = emit_hook_context(
+            "PreToolUse",
+            "",
+            "note: this command changes the working directory",
+            SessionStartContext::Accepted,
+        );
+        assert_eq!(
+            additional_context(&out),
+            "note: this command changes the working directory"
+        );
+    }
+
+    #[test]
+    fn memory_is_labelled_and_the_notes_follow_it() {
+        let out = emit_hook_context(
+            "UserPromptSubmit",
+            "recalled fact",
+            "note: budget",
+            SessionStartContext::Accepted,
+        );
+        assert_eq!(
+            additional_context(&out),
+            "[ICM MEMORY CONTEXT (auto-injected)]\nrecalled fact\n\nnote: budget"
+        );
     }
 
     // #2142: per event and per engine capability, the header that wraps the
@@ -710,7 +765,7 @@ mod tests {
             ),
         ];
         for (event, ss, header) in cases {
-            let out = emit_hook_context(event, "body", ss);
+            let out = emit_hook_context(event, "body", "", ss);
             match header {
                 None => assert_eq!(out, "", "{event} {ss:?}"),
                 Some(header) => {
