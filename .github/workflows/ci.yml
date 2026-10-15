@@ -144,12 +144,27 @@ jobs:
       # docs); RUSTC_BOOTSTRAP=1 is required because `cargo install` ignores
       # this repo's cargo config (#923). No `@version` pin on cargo-hawk
       # itself (#1584) -- see the toolchain step's comment above for why.
-      - uses: taiki-e/cache-cargo-install-action@9ee83daaa7b96a6fab930949ecf1122bba04a389  # v3.0.8
+      #
+      # The cache key holds the latest cargo-hawk version and the rustc commit
+      # hash, so a new release of either one rebuilds the binary. A key on the
+      # tool version alone restored a binary built for an older rustc (#2774).
+      - id: hawk-key
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
+        run: bash scripts/hawk-cache-key.sh >> "$GITHUB_OUTPUT"
+      - id: hawk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-hawk
+            ~/.cargo/bin/cargo-hawk-driver
+          key: ${{ steps.hawk-key.outputs.key }}
+      - if: steps.hawk-cache.outputs.cache-hit != 'true'
         env:
           RUSTC_BOOTSTRAP: "1"
           RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.name }}
-        with:
-          tool: cargo-hawk
+          HAWK_VERSION: ${{ steps.hawk-key.outputs.version }}
+        run: cargo install --locked cargo-hawk --version "$HAWK_VERSION"
       # -D since #1314 cleared the 330-finding backlog from #923. The published
       # `crates/*` libs are excluded as external boundaries by the script.
       # The script builds into target/hawk (#2312). This job has no Rust build

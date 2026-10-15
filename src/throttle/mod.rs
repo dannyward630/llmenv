@@ -233,7 +233,7 @@ fn run_throttle_inner(event: &str, hook_event_name: &str) -> anyhow::Result<()> 
         let note = budget_note(&snapshot, &cfg);
         if !note.is_empty() {
             let adapter = crate::adapter::active_adapter();
-            let out = adapter.emit_hook_context(hook_event_name, &note);
+            let out = adapter.emit_hook_context(hook_event_name, "", &note);
             if !out.is_empty()
                 && let Err(e) = write_hook_context(&mut std::io::stdout(), &out)
             {

@@ -277,7 +277,8 @@ impl LedgerStore {
                 );
                 crate::agent_notice::record(
                     "llmenv: the recall ledger is corrupt, so it started fresh. Records already \
-                     sent may repeat.",
+                     sent may repeat. Fix: delete the ledger file or run `llmenv doctor` to check \
+                     the state directory.",
                 );
                 Ledger::default()
             })),
@@ -309,9 +310,10 @@ impl LedgerStore {
 /// closure, so the caller cannot see this failure (#2729).
 fn note_save_failure(path: &std::path::Path, err: &std::io::Error) {
     tracing::error!("cannot save recall ledger {}: {err}", path.display());
-    crate::agent_notice::record(
-        "llmenv: the recall ledger could not be saved, so some records may repeat.",
-    );
+    crate::agent_notice::record(format!(
+        "llmenv: the recall ledger could not be saved ({err}), so some records may repeat. Fix: \
+         run `llmenv doctor` to check the state directory."
+    ));
 }
 
 #[cfg(test)]

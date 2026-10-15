@@ -766,8 +766,12 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         Ok(text) => {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
-            if text.starts_with("__DENY__:") {
-                let reason = text.trim_start_matches("__DENY__:");
+            if text.notes.starts_with("__DENY__:") {
+                if deny_drops_memory(&text) {
+                    // The deny envelope replaces the whole output, so this memory is not sent.
+                    tracing::error!("hook-run: memory text dropped for a deny envelope");
+                }
+                let reason = text.notes.trim_start_matches("__DENY__:");
                 let reason = match notice {
                     Some(notice) => format!("{notice}\n\n{reason}"),
                     None => reason.to_string(),
@@ -799,11 +803,8 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     return Ok(HookExit::Block);
                 }
             } else {
-                let text = match notice.clone() {
-                    Some(notice) => format!("{notice}\n\n{text}"),
-                    None => text,
-                };
-                let out = adapter.emit_hook_context(hook_event_name, &text);
+                let notes = join_notes(notice.as_deref(), &text.notes);
+                let out = adapter.emit_hook_context(hook_event_name, &text.memory, &notes);
                 log_notice_without_channel(&out, notice.as_deref(), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
@@ -814,7 +815,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             eprintln!("llmenv: memory {event} skipped: {e}");
             // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
             if let Some(notice) = notice {
-                let out = adapter.emit_hook_context(hook_event_name, &notice);
+                let out = adapter.emit_hook_context(hook_event_name, "", &notice);
                 log_notice_without_channel(&out, Some(&notice), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
@@ -1237,13 +1238,45 @@ fn emit_trace_timing(
     }
 }
 
+/// Hook output, split by source. Only `memory` came from ICM, so only it gets the ICM header.
+/// `notes` is llmenv text: the reads, nudges, reminders, and any deny envelope (#2754).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HookText {
+    memory: String,
+    notes: String,
+}
+
+impl HookText {
+    /// Output that holds no ICM memory.
+    fn from_notes(notes: String) -> Self {
+        Self {
+            memory: String::new(),
+            notes,
+        }
+    }
+}
+
+/// Whether a deny envelope would replace memory text that was computed in the same run.
+fn deny_drops_memory(text: &HookText) -> bool {
+    !text.memory.is_empty()
+}
+
+/// Puts the agent notice in front of the llmenv notes, with no empty separator.
+fn join_notes(notice: Option<&str>, notes: &str) -> String {
+    [notice.unwrap_or_default(), notes]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn run_inner(
     event: HookEvent,
     claude_session_id: Option<&str>,
     stdin_payload: &serde_json::Value,
     adapter_name: &str,
     claude_code_version: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<HookText> {
     let t0 = std::time::Instant::now();
     let config_path = crate::paths::config_path()?;
     let config = load_cached_config(&config_path)?;
@@ -1327,7 +1360,7 @@ fn run_inner(
                 // level ever changed.
                 if can_short_circuit(event, &log_cfg) {
                     emit_trace_timing(t0, t_config, None, None, None);
-                    return Ok(t);
+                    return Ok(HookText::from_notes(t));
                 }
                 Some(t)
             }
@@ -1364,7 +1397,7 @@ fn run_inner(
         } else {
             if can_short_circuit(event, &log_cfg) {
                 emit_trace_timing(t0, t_config, None, None, None);
-                return Ok(text);
+                return Ok(HookText::from_notes(text));
             }
             Some(text)
         }
@@ -1415,7 +1448,7 @@ fn run_inner(
                 resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload)
             });
         emit_trace_timing(t0, t_config, None, None, None);
-        return Ok(reminder);
+        return Ok(HookText::from_notes(reminder));
     }
 
     // #2398: a model switch only updates the session's agent-config document. It needs no scope
@@ -1433,7 +1466,7 @@ fn run_inner(
             (_, Err(e)) => tracing::error!("no state dir, model switch not recorded: {e}"),
         }
         emit_trace_timing(t0, t_config, None, None, None);
-        return Ok(String::new());
+        return Ok(HookText::default());
     }
 
     // #867: the rest of the pipeline (scope evaluation, tag/bundle recall
@@ -1445,7 +1478,7 @@ fn run_inner(
     // decision already made) whenever such an error fires after read_once
     // falls through here for Debug-level session logging. Wrapping it lets
     // the match below recover `read_once_text` on `Err` instead of losing it.
-    let pipeline_result: anyhow::Result<String> = (|| {
+    let pipeline_result: anyhow::Result<HookText> = (|| {
         // #702: Early-exit for events that dispatch no memory actions AND have
         // no session-log consumer. The expensive work below (scope evaluation,
         // bundle merge, memory MCP resolution / HTTP client) is only needed when
@@ -1464,7 +1497,7 @@ fn run_inner(
         ) && !log_cfg.any_sink_enabled()
         {
             emit_trace_timing(t0, t_config, None, None, None);
-            return Ok(String::new());
+            return Ok(HookText::default());
         }
 
         let env = crate::scope::matcher::Env::detect_for_config(&config)?;
@@ -1640,7 +1673,7 @@ fn run_inner(
                         );
                     }
                     emit_trace_timing(t0, t_config, Some(t_scope), None, None);
-                    return Ok(String::new());
+                    return Ok(HookText::default());
                 }
             }
             is_unchanged
@@ -1713,6 +1746,7 @@ fn run_inner(
         let out = match rt {
             Some(rt) => rt.block_on(async {
                 let mut out = String::new();
+                let mut memory = String::new();
                 // #866: skip the Store action (and its dedup-snapshot rewrite,
                 // below) when SessionEnd's chunk is unchanged — but still run the
                 // rest of this block (session-log capture) unconditionally.
@@ -1728,7 +1762,7 @@ fn run_inner(
                         dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
                     // Use minimal chunk for storage to avoid duplication. (#1792)
                     let store_content = store_content_for_event(event, &chunk, &storage_chunk);
-                    out = match run_event_memory(MemoryCall {
+                    memory = match run_event_memory(MemoryCall {
                         event,
                         client,
                         settings,
@@ -1753,10 +1787,11 @@ fn run_inner(
                         // read an empty memory block as "nothing to recall".
                         Err(e) if health_notice.is_some() => {
                             eprintln!("llmenv: memory {event} skipped: {e}");
-                            format!(
+                            out = format!(
                                 "llmenv: memory {event} failed: {}\n",
                                 mcp_health::tidy_reason(&format!("{e:#}"))
-                            )
+                            );
+                            String::new()
                         }
                         Err(e) => return Err(e),
                     };
@@ -1854,9 +1889,9 @@ fn run_inner(
                     append_read_once_result(&mut out, text);
                 }
 
-                Ok::<String, anyhow::Error>(out)
+                Ok::<HookText, anyhow::Error>(HookText { memory, notes: out })
             }),
-            None => Ok(String::new()),
+            None => Ok(HookText::default()),
         };
         // After the store, so the child's recall can see this session's chunk,
         // and before `?`, so a failed dedup write or log step does not skip it.
@@ -1899,7 +1934,7 @@ fn recover_from_pipeline_error(
     event: HookEvent,
     error: anyhow::Error,
     precomputed: [Option<String>; 3],
-) -> anyhow::Result<String> {
+) -> anyhow::Result<HookText> {
     let Some(recovered) = join_precomputed(precomputed) else {
         return Err(error);
     };
@@ -1912,7 +1947,7 @@ fn recover_from_pipeline_error(
         "hook-run: pipeline failed after hook text was already computed; \
          returning it instead of silently dropping it"
     );
-    Ok(recovered)
+    Ok(HookText::from_notes(recovered))
 }
 
 /// The last stored SessionEnd chunk, or `None`. A missing file is the normal first run, so only
@@ -1930,7 +1965,7 @@ fn read_dedup_snapshot(path: &std::path::Path) -> Option<String> {
 /// The agent notice for a hook run whose memory step failed.
 fn memory_skipped_notice(event: impl std::fmt::Display, err: &anyhow::Error) -> String {
     format!(
-        "llmenv: memory {event} skipped: {}",
+        "llmenv: memory {event} skipped: {}. Fix: run `llmenv doctor` to check the memory server.",
         mcp_health::tidy_reason(&format!("{err:#}"))
     )
 }
@@ -3275,7 +3310,10 @@ fn append_section(out: &mut String, section: &str) {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod pipeline_recovery_tests {
-    use super::{HookEvent, join_precomputed, read_dedup_snapshot, recover_from_pipeline_error};
+    use super::{
+        HookEvent, HookText, deny_drops_memory, join_notes, join_precomputed, read_dedup_snapshot,
+        recover_from_pipeline_error,
+    };
     use proptest::strategy::Strategy as _;
 
     fn failure() -> anyhow::Error {
@@ -3291,7 +3329,10 @@ mod pipeline_recovery_tests {
             [None, None, Some("nudge: wait for the user".to_string())],
         )
         .expect("a computed nudge must survive the pipeline error");
-        assert_eq!(text, "nudge: wait for the user");
+        assert_eq!(
+            text,
+            HookText::from_notes("nudge: wait for the user".to_string())
+        );
         let notice = crate::agent_notice::current().unwrap_or_default();
         assert!(
             notice.contains("llmenv: memory") && notice.contains("bad tag"),
@@ -3309,6 +3350,27 @@ mod pipeline_recovery_tests {
             recover_from_pipeline_error(HookEvent::PostToolUse, failure(), [None, None, None])
                 .expect_err("nothing to keep, so the error must propagate");
         assert!(err.to_string().contains("bad tag"), "got: {err}");
+    }
+
+    #[test]
+    fn a_deny_drops_only_memory_that_was_computed() {
+        let with_memory = HookText {
+            memory: "recalled".to_string(),
+            notes: "__DENY__:why".to_string(),
+        };
+        assert!(deny_drops_memory(&with_memory));
+        assert!(!deny_drops_memory(&HookText::from_notes(
+            "__DENY__:why".to_string()
+        )));
+    }
+
+    #[test]
+    fn join_notes_joins_only_the_parts_that_have_text() {
+        assert_eq!(join_notes(Some("notice"), "note"), "notice\n\nnote");
+        assert_eq!(join_notes(Some("notice"), ""), "notice");
+        assert_eq!(join_notes(Some(""), "note"), "note");
+        assert_eq!(join_notes(None, "note"), "note");
+        assert_eq!(join_notes(None, ""), "");
     }
 
     #[test]
