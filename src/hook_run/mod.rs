@@ -767,6 +767,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
             if text.notes.starts_with("__DENY__:") {
+                if !text.memory.is_empty() {
+                    // The deny envelope replaces the whole output, so this memory is not sent.
+                    tracing::error!("hook-run: memory text dropped for a deny envelope");
+                }
                 let reason = text.notes.trim_start_matches("__DENY__:");
                 let reason = match notice {
                     Some(notice) => format!("{notice}\n\n{reason}"),
@@ -1254,11 +1258,11 @@ impl HookText {
 
 /// Puts the agent notice in front of the llmenv notes, with no empty separator.
 fn join_notes(notice: Option<&str>, notes: &str) -> String {
-    match notice {
-        Some(notice) if notes.is_empty() => notice.to_string(),
-        Some(notice) => format!("{notice}\n\n{notes}"),
-        None => notes.to_string(),
-    }
+    [notice.unwrap_or_default(), notes]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn run_inner(
@@ -1956,7 +1960,7 @@ fn read_dedup_snapshot(path: &std::path::Path) -> Option<String> {
 /// The agent notice for a hook run whose memory step failed.
 fn memory_skipped_notice(event: impl std::fmt::Display, err: &anyhow::Error) -> String {
     format!(
-        "llmenv: memory {event} skipped: {}",
+        "llmenv: memory {event} skipped: {}. Fix: run `llmenv doctor` to check the memory server.",
         mcp_health::tidy_reason(&format!("{err:#}"))
     )
 }
@@ -3344,17 +3348,10 @@ mod pipeline_recovery_tests {
     }
 
     #[test]
-    fn join_notes_puts_the_agent_notice_before_the_notes() {
+    fn join_notes_joins_only_the_parts_that_have_text() {
         assert_eq!(join_notes(Some("notice"), "note"), "notice\n\nnote");
-    }
-
-    #[test]
-    fn join_notes_without_notes_keeps_only_the_notice() {
         assert_eq!(join_notes(Some("notice"), ""), "notice");
-    }
-
-    #[test]
-    fn join_notes_without_a_notice_keeps_the_notes() {
+        assert_eq!(join_notes(Some(""), "note"), "note");
         assert_eq!(join_notes(None, "note"), "note");
         assert_eq!(join_notes(None, ""), "");
     }

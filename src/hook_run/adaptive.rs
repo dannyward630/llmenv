@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use super::mcp_health;
 use crate::agent_notice;
 use crate::hook_run::HookEvent;
 use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
@@ -117,12 +118,31 @@ async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow
     Some(Action::RecallQuery(q?).run(client, "", "").await)
 }
 
-/// Joins records, dropping every one that icm cut short. A cut record lost its tail, so it is
-/// removed whole rather than shown half-written (#2756).
-fn join_complete(records: Vec<String>) -> String {
-    records
+/// Drops every line that icm cut short. icm ends a cut item with the cut marker, and that item
+/// lost its tail, so the line is removed whole rather than shown half-written (#2756). Returns
+/// the kept text and how many lines were dropped.
+fn drop_cut_items(text: &str) -> (String, usize) {
+    let (kept, cut): (Vec<&str>, Vec<&str>) = text
+        .lines()
+        .partition(|line| !line.trim_end().ends_with(CUT_MARKER));
+    (kept.join("\n"), cut.len())
+}
+
+/// Tells the agent that icm cut some items short, so the drop is not silent (#2756).
+fn note_cut_items(count: usize) {
+    if count > 0 {
+        agent_notice::record(format!(
+            "llmenv: {count} memory item(s) were dropped because icm cut them short. Fix: store \
+             shorter memories, or run `llmenv doctor` to check the memory server."
+        ));
+    }
+}
+
+/// Joins the non-empty parts of the wake-up pack with a blank line.
+fn join_sections(first: &str, second: &str) -> String {
+    [first, second]
         .into_iter()
-        .filter(|r| !r.contains(CUT_MARKER))
+        .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -134,22 +154,25 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> String {
         project: Some(project.to_string()),
         ..query(project, MAIN_LIMIT)
     };
-    match recall(client, Some(q)).await {
-        Some(Ok(text)) => join_complete(
-            split_recall_records(&text)
+    match Action::RecallQuery(q).run(client, "", "").await {
+        Ok(text) => {
+            let records: Vec<String> = split_recall_records(&text)
                 .into_iter()
                 .filter(|r| !r.starts_with(SCOPE_RECORD))
-                .collect(),
-        ),
-        Some(Err(e)) => {
+                .collect();
+            let (kept, cut) = drop_cut_items(&records.join("\n"));
+            note_cut_items(cut);
+            kept
+        }
+        Err(e) => {
             tracing::error!("session start: project memories not recalled for {project}: {e:#}");
             agent_notice::record(format!(
-                "llmenv: project memories were skipped at session start: icm recall failed \
-                 ({e:#}). Fix: run `llmenv doctor` to check the memory server."
+                "llmenv: project memories were skipped at session start: icm recall failed ({}). \
+                 Fix: run `llmenv doctor` to check the memory server.",
+                mcp_health::tidy_reason(&format!("{e:#}"))
             ));
             String::new()
         }
-        None => String::new(),
     }
 }
 
@@ -271,40 +294,43 @@ pub(super) async fn session_start(
         );
     }
     let sent = updated.unwrap_or_default();
-    let wake = if super::continues_session(ctx.payload) {
+    let continues = super::continues_session(ctx.payload);
+    // A failed wake-up call must not discard the project memories that did load, so they are
+    // kept on both paths below (#2756).
+    let own = match &recall_project {
+        Some(p) if !continues => project_memories(ctx.client, p).await,
+        _ => String::new(),
+    };
+    let wake = if continues {
         Ok(String::new())
     } else {
-        let base = wake
-            .run(ctx.client, "", "")
-            .await
-            .map(|t| join_complete(split_recall_records(&t)));
-        let own = match &recall_project {
-            Some(p) => project_memories(ctx.client, p).await,
-            None => String::new(),
-        };
-        base.map(|t| match (t.is_empty(), own.is_empty()) {
-            (_, true) => t,
-            (true, false) => own,
-            (false, false) => format!("{t}\n\n{own}"),
+        wake.run(ctx.client, "", "").await.map(|t| {
+            let (kept, cut) = drop_cut_items(&t);
+            note_cut_items(cut);
+            join_sections(&kept, &own)
         })
     };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
     // only the room that the wake-up pack leaves.
-    let wake_bytes = wake.as_ref().map_or(0, |t| t.len() + 2);
+    let wake_bytes = wake.as_ref().map_or(own.len() + 2, |t| t.len() + 2);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
     let scope_len = scope.len();
     let outcome = run_scope(ctx, scope, &mut budget).await;
     report("session_start", &outcome, &budget);
     let wake = match wake {
         Ok(text) => text,
-        Err(e) if outcome.all_failed() || scope_len == 0 => return Err(e),
+        Err(e) if (outcome.all_failed() || scope_len == 0) && own.is_empty() => return Err(e),
         Err(e) => {
             // The agent is told: stderr from a hook never reaches it.
+            tracing::error!(
+                "session start: icm_wake_up failed, the wake-up pack is skipped: {e:#}"
+            );
             agent_notice::record(format!(
-                "llmenv: memory wake-up skipped: icm_wake_up failed ({e:#}); \
-                 the scope set still goes out. Fix: run `llmenv doctor` to check the memory server."
+                "llmenv: memory wake-up skipped: icm_wake_up failed ({}); the scope set still \
+                 goes out. Fix: run `llmenv doctor` to check the memory server.",
+                mcp_health::tidy_reason(&format!("{e:#}"))
             ));
-            String::new()
+            own
         }
     };
     let complete = outcome.failed == 0;
@@ -1086,6 +1112,92 @@ mod tests {
             "scope records come from the scope set: {out}"
         );
         assert!(!out.contains("cut"), "a cut record is dropped whole: {out}");
+    }
+
+    #[tokio::test]
+    async fn wake_up_drops_only_the_cut_bullet() {
+        // icm writes wake-up items as bullets under headings, not as `[topic]` records.
+        let server = server_with(&[(
+            "icm_wake_up",
+            "# ICM Wake-up (project: proj-a)\n\n## Identity\n- kept preference\n- cut item in the fyi re […]\n",
+        )])
+        .await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(out.contains("## Identity"), "{out}");
+        assert!(out.contains("kept preference"), "{out}");
+        assert!(
+            !out.contains("cut item"),
+            "a cut bullet is dropped alone: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_project_recall_keeps_the_wake_up_pack() {
+        let server = server_with(&[("icm_wake_up", "## Identity\n- global fact")]).await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-b".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(
+            out.contains("global fact"),
+            "the wake-up pack still goes out: {out}"
+        );
+        let notice = agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("project memories were skipped"),
+            "the skipped project recall must reach the agent: {notice}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_wake_up_keeps_the_project_memories() {
+        // The wake-up mock is registered first, so the wake-up request gets its 500 response.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("icm_wake_up"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"project\":\"proj-a\""))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(text("[decisions-a] project fact")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("initialize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+            .mount(&server)
+            .await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(
+            out.contains("project fact"),
+            "the project memories must survive: {out}"
+        );
+        let notice = agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("wake-up skipped"),
+            "the failed wake-up must reach the agent: {notice}"
+        );
     }
 
     #[tokio::test]
