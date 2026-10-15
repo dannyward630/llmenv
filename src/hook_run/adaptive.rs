@@ -25,6 +25,10 @@ const FAILURE_LIMIT: u8 = 5;
 const TAIL_CHARS: usize = 300;
 /// Wave 2 would push a slow backend past the latency that a prompt tolerates.
 const WAVE2_CUTOFF: Duration = Duration::from_millis(1_500);
+/// The mark icm puts at the end of a record it cut short.
+const CUT_MARKER: &str = "[…]";
+/// The topic prefix of a scope-context record. The scope set already sends these.
+const SCOPE_RECORD: &str = "[llmenv-scope-context]";
 
 /// What every adaptive flow needs.
 pub(super) struct AdaptiveCtx<'a> {
@@ -111,6 +115,42 @@ fn report(flow: &str, outcome: &Outcome, budget: &RecallBudget) {
 
 async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow::Result<String>> {
     Some(Action::RecallQuery(q?).run(client, "", "").await)
+}
+
+/// Joins records, dropping every one that icm cut short. A cut record lost its tail, so it is
+/// removed whole rather than shown half-written (#2756).
+fn join_complete(records: Vec<String>) -> String {
+    records
+        .into_iter()
+        .filter(|r| !r.contains(CUT_MARKER))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The session project's own memories for the wake-up pack. The icm wake-up fills its budget
+/// with global records first, so this project-scoped recall runs beside it (#2756).
+async fn project_memories(client: &McpHttpClient, project: &str) -> String {
+    let q = RecallQuery {
+        project: Some(project.to_string()),
+        ..query(project, MAIN_LIMIT)
+    };
+    match recall(client, Some(q)).await {
+        Some(Ok(text)) => join_complete(
+            split_recall_records(&text)
+                .into_iter()
+                .filter(|r| !r.starts_with(SCOPE_RECORD))
+                .collect(),
+        ),
+        Some(Err(e)) => {
+            tracing::error!("session start: project memories not recalled for {project}: {e:#}");
+            agent_notice::record(format!(
+                "llmenv: project memories were skipped at session start: icm recall failed \
+                 ({e:#}). Fix: run `llmenv doctor` to check the memory server."
+            ));
+            String::new()
+        }
+        None => String::new(),
+    }
 }
 
 /// The recall texts for `text`, in budget order: the session project's main
@@ -207,6 +247,7 @@ pub(super) async fn session_start(
         Action::WakeUp(args) => args.project.clone(),
         _ => None,
     };
+    let recall_project = project.clone();
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
     let updated = ctx.store.update(ctx.session_id, |l| {
         if reset {
@@ -233,7 +274,19 @@ pub(super) async fn session_start(
     let wake = if super::continues_session(ctx.payload) {
         Ok(String::new())
     } else {
-        wake.run(ctx.client, "", "").await
+        let base = wake
+            .run(ctx.client, "", "")
+            .await
+            .map(|t| join_complete(split_recall_records(&t)));
+        let own = match &recall_project {
+            Some(p) => project_memories(ctx.client, p).await,
+            None => String::new(),
+        };
+        base.map(|t| match (t.is_empty(), own.is_empty()) {
+            (_, true) => t,
+            (true, false) => own,
+            (false, false) => format!("{t}\n\n{own}"),
+        })
     };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
     // only the room that the wake-up pack leaves.
@@ -1003,6 +1056,36 @@ mod tests {
         assert_eq!(f.store.load("s1").unwrap().errors().len(), 1);
         let second = tool_failure(&ctx(&f, &payload)).await.unwrap();
         assert!(!second.contains("pin mcp<2"), "already sent: {second}");
+    }
+
+    #[tokio::test]
+    async fn session_start_adds_project_memories_and_drops_cut_records() {
+        let server = server_with(&[
+            (
+                "icm_wake_up",
+                "## Identity\n[preferences] global fact\n[preferences] cut mid […]",
+            ),
+            (
+                "\"project\":\"proj-a\"",
+                "[decisions-a] project fact\n[llmenv-scope-context] scope blob\n[d] cut […]",
+            ),
+        ])
+        .await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(out.contains("project fact"), "{out}");
+        assert!(out.contains("global fact"), "{out}");
+        assert!(
+            !out.contains("scope blob"),
+            "scope records come from the scope set: {out}"
+        );
+        assert!(!out.contains("cut"), "a cut record is dropped whole: {out}");
     }
 
     #[tokio::test]
