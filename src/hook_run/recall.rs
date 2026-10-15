@@ -213,12 +213,9 @@ fn is_recall(action: &Action) -> bool {
 /// [`RECALL_BUDGET_BYTES`] is used. Other actions pass through unchanged. Returns the text and
 /// the budget, for the trace line.
 ///
-/// # Errors
-/// Returns the first error from `run`.
-pub(super) async fn run_with_budget<F, Fut>(
-    actions: Vec<Action>,
-    run: F,
-) -> anyhow::Result<(String, RecallBudget)>
+/// A failed action records an agent notice with its cause, and the other actions still run, so
+/// the text they return is kept (#2736).
+pub(super) async fn run_with_budget<F, Fut>(actions: Vec<Action>, run: F) -> (String, RecallBudget)
 where
     F: FnMut(Action) -> Fut,
     Fut: Future<Output = anyhow::Result<String>>,
@@ -235,26 +232,36 @@ async fn run_with_budget_filtered<F, Fut>(
     actions: Vec<Action>,
     mut budget: RecallBudget,
     mut run: F,
-) -> anyhow::Result<(String, RecallBudget)>
+) -> (String, RecallBudget)
 where
     F: FnMut(Action) -> Fut,
     Fut: Future<Output = anyhow::Result<String>>,
 {
     let mut passthrough: Vec<String> = Vec::new();
     for action in actions {
-        if !is_recall(&action) {
-            let text = run(action).await?;
-            if !text.is_empty() && !passthrough.contains(&text) {
-                passthrough.push(text);
-            }
-        } else if budget.is_full() {
+        let recall = is_recall(&action);
+        if recall && budget.is_full() {
             budget.skipped_actions += 1;
-        } else {
-            budget.add_text(&run(action).await?);
+            continue;
+        }
+        let text = match run(action).await {
+            Ok(text) => text,
+            Err(e) => {
+                crate::agent_notice::record(format!(
+                    "llmenv could not run a memory action, so its text is missing: {e:#}. \
+                     Fix: run `llmenv doctor` to check the memory server."
+                ));
+                continue;
+            }
+        };
+        if recall {
+            budget.add_text(&text);
+        } else if !text.is_empty() && !passthrough.contains(&text) {
+            passthrough.push(text);
         }
     }
     let text = budget.render(passthrough);
-    Ok((text, budget))
+    (text, budget)
 }
 
 #[cfg(test)]
@@ -332,7 +339,6 @@ mod tests {
             async move { Ok(text) }
         })
         .await
-        .expect("fake runner does not fail")
     }
 
     #[tokio::test]
@@ -397,8 +403,7 @@ mod tests {
                 ))
             }
         })
-        .await
-        .expect("fake runner does not fail");
+        .await;
         assert_eq!(calls.get(), 1, "budget was full after the first recall");
         assert_eq!(budget.skipped_actions, 2);
         assert_eq!(budget.omitted, 1);
@@ -424,8 +429,7 @@ mod tests {
                 async move { Ok(big) }
             },
         )
-        .await
-        .expect("fake runner does not fail");
+        .await;
         assert_eq!(text, big);
         assert_eq!(budget, RecallBudget::default());
     }
@@ -516,18 +520,27 @@ mod tests {
                 async move { Ok(text) }
             },
         )
-        .await
-        .expect("fake runner does not fail");
+        .await;
         assert_eq!(text, "pack\n\nother");
     }
 
     #[tokio::test]
-    async fn a_failing_action_propagates_its_error() {
-        let result = run_with_budget(vec![Action::Recall(String::new())], |_| async {
-            Err::<String, _>(anyhow::anyhow!("boom"))
+    async fn a_failing_action_keeps_the_text_of_the_others() {
+        let actions = vec![Action::Recall(String::new()), Action::Recall(String::new())];
+        let mut calls = 0;
+        let (text, _) = run_with_budget(actions, |_| {
+            calls += 1;
+            let first = calls == 1;
+            async move {
+                if first {
+                    Err(anyhow::anyhow!("boom"))
+                } else {
+                    Ok("kept record".to_string())
+                }
+            }
         })
         .await;
-        assert!(result.is_err());
+        assert_eq!(text, "kept record");
     }
 
     proptest! {
