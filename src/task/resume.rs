@@ -161,8 +161,9 @@ fn detect_issue(branch: &str) -> Option<u32> {
 /// English message.
 ///
 /// # Errors
-/// git cannot start in `cwd`. A missing directory is one such case. A detached HEAD and a
-/// directory outside git are not errors, and they return `Ok(None)`.
+/// git cannot start in `cwd`, or git fails in a way other than a detached HEAD or a directory
+/// outside git. A missing directory is one such case. A detached HEAD and a directory outside git
+/// are not errors, and they return `Ok(None)`.
 pub(crate) fn git_branch(cwd: &Path) -> anyhow::Result<Option<String>> {
     let output = llmenv_git::secure_git()
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -178,8 +179,8 @@ pub(crate) fn git_branch(cwd: &Path) -> anyhow::Result<Option<String>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if branch_failure_is_unexpected(output.status.code(), &stderr) {
-            eprintln!(
-                "llmenv: git could not report the branch in {}: {}",
+            anyhow::bail!(
+                "git could not report the branch in {}: {}. Fix: check the repository with `git status`.",
                 cwd.display(),
                 stderr.trim()
             );
