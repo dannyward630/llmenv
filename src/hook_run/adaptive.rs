@@ -25,6 +25,10 @@ const FAILURE_LIMIT: u8 = 5;
 const TAIL_CHARS: usize = 300;
 /// Wave 2 would push a slow backend past the latency that a prompt tolerates.
 const WAVE2_CUTOFF: Duration = Duration::from_millis(1_500);
+/// The mark icm puts at the end of a record it cut short.
+const CUT_MARKER: &str = "[…]";
+/// The topic prefix of a scope-context record. The scope set already sends these.
+const SCOPE_RECORD: &str = "[llmenv-scope-context]";
 
 /// What every adaptive flow needs.
 pub(super) struct AdaptiveCtx<'a> {
@@ -111,6 +115,77 @@ fn report(flow: &str, outcome: &Outcome, budget: &RecallBudget) {
 
 async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow::Result<String>> {
     Some(Action::RecallQuery(q?).run(client, "", "").await)
+}
+
+/// Drops every line that icm cut short. icm ends a cut item with the cut marker, and that item
+/// lost its tail, so the line is removed whole rather than shown half-written (#2756). Returns
+/// the kept text and how many lines were dropped.
+fn drop_cut_items(text: &str) -> (String, usize) {
+    let (kept, cut): (Vec<&str>, Vec<&str>) = text
+        .lines()
+        .partition(|line| !line.trim_end().ends_with(CUT_MARKER));
+    (kept.join("\n"), cut.len())
+}
+
+/// Bytes the wake-up pack takes from the output budget: the pack, or the project memories alone
+/// when the wake-up call failed, plus the blank line that joins them to the scope set.
+fn pack_bytes(wake: &anyhow::Result<String>, own: &str) -> usize {
+    wake.as_ref().map_or(own.len() + 2, |t| t.len() + 2)
+}
+
+/// The notice for wake-up items that icm cut short, or `None` when none were cut (#2756).
+fn cut_items_notice(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "llmenv: {count} memory item(s) were dropped because icm cut them short. Fix: store \
+             shorter memories, or run `llmenv doctor` to check the memory server."
+        )
+    })
+}
+
+/// Tells the agent that icm cut some items short, so the drop is not silent (#2756).
+fn note_cut_items(count: usize) {
+    if let Some(notice) = cut_items_notice(count) {
+        agent_notice::record(notice);
+    }
+}
+
+/// Joins the non-empty parts of the wake-up pack with a blank line.
+fn join_sections(first: &str, second: &str) -> String {
+    [first, second]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The session project's own memories for the wake-up pack. The icm wake-up fills its budget
+/// with global records first, so this project-scoped recall runs beside it (#2756).
+async fn project_memories(client: &McpHttpClient, project: &str) -> String {
+    let q = RecallQuery {
+        project: Some(project.to_string()),
+        ..query(project, MAIN_LIMIT)
+    };
+    match Action::RecallQuery(q).run(client, "", "").await {
+        Ok(text) => {
+            let records: Vec<String> = split_recall_records(&text)
+                .into_iter()
+                .filter(|r| !r.starts_with(SCOPE_RECORD))
+                .collect();
+            let (kept, cut) = drop_cut_items(&records.join("\n"));
+            note_cut_items(cut);
+            kept
+        }
+        Err(e) => {
+            tracing::error!("session start: project memories not recalled for {project}: {e:#}");
+            agent_notice::record(format!(
+                "llmenv: project memories were skipped at session start: icm recall failed ({}). \
+                 Fix: run `llmenv doctor` to check the memory server.",
+                llmenv_mcp::stdio_rpc::tidy_reason(&format!("{e:#}"))
+            ));
+            String::new()
+        }
+    }
 }
 
 /// The recall texts for `text`, in budget order: the session project's main
@@ -207,6 +282,7 @@ pub(super) async fn session_start(
         Action::WakeUp(args) => args.project.clone(),
         _ => None,
     };
+    let recall_project = project.clone();
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
     let updated = ctx.store.update(ctx.session_id, |l| {
         if reset {
@@ -224,33 +300,50 @@ pub(super) async fn session_start(
             ctx.payload["source"].as_str().unwrap_or("a context reset")
         );
         agent_notice::record(
-            "llmenv: the recall ledger was not reset after a context reset. \
-             Records seen before the reset may stay filtered from recall.",
+            "llmenv: the recall ledger was not reset after a context reset (the state file was \
+             locked or unreadable). Records seen before the reset may stay filtered from recall. \
+             Fix: run `llmenv doctor` to check the state directory.",
         );
     }
     let sent = updated.unwrap_or_default();
-    let wake = if super::continues_session(ctx.payload) {
-        Ok(String::new())
+    // A resumed session already holds its pack, so it makes neither call (#2142). A failed
+    // wake-up call must not discard the project memories that did load, so they are kept on the
+    // error path below (#2756).
+    let (wake, own) = if super::continues_session(ctx.payload) {
+        (Ok(String::new()), String::new())
     } else {
-        wake.run(ctx.client, "", "").await
+        let own = match &recall_project {
+            Some(p) => project_memories(ctx.client, p).await,
+            None => String::new(),
+        };
+        let wake = wake.run(ctx.client, "", "").await.map(|t| {
+            let (kept, cut) = drop_cut_items(&t);
+            note_cut_items(cut);
+            join_sections(&kept, &own)
+        });
+        (wake, own)
     };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
     // only the room that the wake-up pack leaves.
-    let wake_bytes = wake.as_ref().map_or(0, |t| t.len() + 2);
+    let wake_bytes = pack_bytes(&wake, &own);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
     let scope_len = scope.len();
     let outcome = run_scope(ctx, scope, &mut budget).await;
     report("session_start", &outcome, &budget);
     let wake = match wake {
         Ok(text) => text,
-        Err(e) if outcome.all_failed() || scope_len == 0 => return Err(e),
+        Err(e) if (outcome.all_failed() || scope_len == 0) && own.is_empty() => return Err(e),
         Err(e) => {
             // The agent is told: stderr from a hook never reaches it.
+            tracing::error!(
+                "session start: icm_wake_up failed, the wake-up pack is skipped: {e:#}"
+            );
             agent_notice::record(format!(
-                "llmenv: memory wake-up skipped: icm_wake_up failed ({e:#}); \
-                 the scope set still goes out. Fix: run `llmenv doctor` to check the memory server."
+                "llmenv: memory wake-up skipped: icm_wake_up failed ({}); the scope set still \
+                 goes out. Fix: run `llmenv doctor` to check the memory server.",
+                llmenv_mcp::stdio_rpc::tidy_reason(&format!("{e:#}"))
             ));
-            String::new()
+            own
         }
     };
     let complete = outcome.failed == 0;
@@ -273,12 +366,14 @@ pub(super) async fn session_start(
 }
 
 /// Notice for a ledger update that did not run: the next recall may repeat records (#2729).
-const RECALL_STATE_UNSAVED: &str =
-    "llmenv: recall state was not saved, so some records may repeat.";
+const RECALL_STATE_UNSAVED: &str = "llmenv: recall state was not saved (the state file was locked \
+     or unreadable), so some records may repeat. Fix: run `llmenv doctor` to check the state \
+     directory.";
 
 /// Notice for tool activity that was not recorded: a later recall runs without it (#2729).
-const ACTIVITY_UNSAVED: &str =
-    "llmenv: recent tool activity was not saved, so later recall may miss it.";
+const ACTIVITY_UNSAVED: &str = "llmenv: recent tool activity was not saved (the state file was \
+     locked or unreadable), so later recall may miss it. Fix: run `llmenv doctor` to check the \
+     state directory.";
 
 /// Tells the agent when a ledger update did not run (unsafe id, busy lock, or unreadable file).
 fn note_unless_saved<T>(saved: Option<T>, notice: &str) {
@@ -290,7 +385,8 @@ fn note_unless_saved<T>(saved: Option<T>, notice: &str) {
 /// Tells the agent that recall was skipped, so it is not read as "nothing relevant" (#2664).
 fn note_skipped() {
     agent_notice::record(
-        "llmenv: recall was skipped: the recall ledger cannot be read or updated.",
+        "llmenv: recall was skipped: the recall ledger cannot be read or updated. Fix: run \
+         `llmenv doctor` to check the state directory.",
     );
 }
 
@@ -401,11 +497,19 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
         topic: Some("errors-resolved".to_string()),
         ..query(&text, FANOUT_LIMIT)
     };
-    let (main, fixes) = tokio::join!(
-        recall(ctx.client, Some(query(&text, FAILURE_LIMIT))),
+    // The session project comes first, as in `waves`. The all-projects main recall stays
+    // after the shared `errors-resolved` fix, because that topic is meant to cross projects.
+    let scoped = ledger.project.as_deref().map(|p| RecallQuery {
+        project: Some(p.to_string()),
+        ..query(&text, FAILURE_LIMIT)
+    });
+    let (own, fixes, main) = tokio::join!(
+        recall(ctx.client, scoped),
         recall(ctx.client, Some(resolved)),
+        recall(ctx.client, Some(query(&text, FAILURE_LIMIT))),
     );
     let mut outcome = Outcome::default();
+    outcome.push(own);
     outcome.push(fixes);
     outcome.push(main);
     let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
@@ -991,6 +1095,180 @@ mod tests {
         assert_eq!(f.store.load("s1").unwrap().errors().len(), 1);
         let second = tool_failure(&ctx(&f, &payload)).await.unwrap();
         assert!(!second.contains("pin mcp<2"), "already sent: {second}");
+    }
+
+    #[tokio::test]
+    async fn session_start_adds_project_memories_and_drops_cut_records() {
+        let server = server_with(&[
+            (
+                "icm_wake_up",
+                "## Identity\n[preferences] global fact\n[preferences] cut mid […]",
+            ),
+            (
+                "\"project\":\"proj-a\"",
+                "[decisions-a] project fact\n[llmenv-scope-context] scope blob\n[d] cut […]",
+            ),
+        ])
+        .await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(out.contains("project fact"), "{out}");
+        assert!(out.contains("global fact"), "{out}");
+        assert!(
+            !out.contains("scope blob"),
+            "scope records come from the scope set: {out}"
+        );
+        assert!(!out.contains("cut"), "a cut record is dropped whole: {out}");
+    }
+
+    #[tokio::test]
+    async fn wake_up_drops_only_the_cut_bullet() {
+        // icm writes wake-up items as bullets under headings, not as `[topic]` records.
+        let server = server_with(&[(
+            "icm_wake_up",
+            "# ICM Wake-up (project: proj-a)\n\n## Identity\n- kept preference\n- cut item in the fyi re […]\n",
+        )])
+        .await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(out.contains("## Identity"), "{out}");
+        assert!(out.contains("kept preference"), "{out}");
+        assert!(
+            !out.contains("cut item"),
+            "a cut bullet is dropped alone: {out}"
+        );
+        let notice = agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("1 memory item(s) were dropped"),
+            "the drop must reach the agent: {notice}"
+        );
+    }
+
+    #[test]
+    fn the_cut_notice_names_the_count_and_appears_only_when_items_were_cut() {
+        assert_eq!(cut_items_notice(0), None);
+        assert!(cut_items_notice(1).is_some_and(|n| n.contains("1 memory item(s)")));
+        assert!(cut_items_notice(2).is_some_and(|n| n.contains("2 memory item(s)")));
+    }
+
+    #[test]
+    fn the_pack_budget_counts_the_project_memories_when_wake_up_fails() {
+        let failed: anyhow::Result<String> = Err(anyhow::anyhow!("icm down"));
+        assert_eq!(pack_bytes(&failed, "abc"), 5);
+        let loaded: anyhow::Result<String> = Ok("hello".to_string());
+        assert_eq!(pack_bytes(&loaded, ""), 7);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_skips_the_project_recall() {
+        // A resumed session already holds its pack, so the project recall must not run.
+        let server = server_with(&[("\"project\":\"proj-a\"", "[decisions-a] project fact")]).await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "resume"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(
+            !out.contains("project fact"),
+            "a resume sends no pack: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_project_recall_keeps_the_wake_up_pack() {
+        let server = server_with(&[("icm_wake_up", "## Identity\n- global fact")]).await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-b".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(
+            out.contains("global fact"),
+            "the wake-up pack still goes out: {out}"
+        );
+        let notice = agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("project memories were skipped"),
+            "the skipped project recall must reach the agent: {notice}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_wake_up_keeps_the_project_memories() {
+        // The wake-up mock is registered first, so the wake-up request gets its 500 response.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("icm_wake_up"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"project\":\"proj-a\""))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(text("[decisions-a] project fact")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("initialize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text("")))
+            .mount(&server)
+            .await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(
+            out.contains("project fact"),
+            "the project memories must survive: {out}"
+        );
+        let notice = agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("wake-up skipped"),
+            "the failed wake-up must reach the agent: {notice}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_failure_ranks_the_session_project_first() {
+        let server = server_with(&[
+            ("\"project\":\"proj-a\"", "[own] fix for proj-a"),
+            ("errors-resolved", "[fix] shared fix"),
+        ])
+        .await;
+        let f = fixture(&server);
+        f.store
+            .update("s1", |l| l.project = Some("proj-a".to_string()));
+        let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
+        let out = tool_failure(&ctx(&f, &payload)).await.unwrap();
+        let own = out.find("[own]");
+        let fix = out.find("[fix]");
+        assert!(
+            matches!((own, fix), (Some(o), Some(f)) if o < f),
+            "the project record must come first, and both must be present: {out}"
+        );
     }
 
     #[test]
