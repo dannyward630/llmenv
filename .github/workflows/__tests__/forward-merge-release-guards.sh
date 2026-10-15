@@ -3953,8 +3953,11 @@ test_2796_failed_auto_merge_warns_and_keeps_the_cascade_running() {
   out=$(env -i PATH="$dir:$PATH" GH_LOG="$dir/log" GH_STUB_RC=1 bash -c \
     "$(workflow_function enable_auto_merge)
 enable_auto_merge forward-merge/release/3.x-to-main" 2>&1) || rc=$?
+  local logged
+  logged=$(<"$dir/log")
   rm -rf "$dir"
-  [[ "$rc" -eq 0 && "$out" == *"::warning::"* && "$out" == *"auto-merge is disabled"* ]]
+  [[ "$rc" -eq 0 && "$out" == *"::warning::"* && "$out" == *"auto-merge is disabled"* ]] \
+    && [[ "$logged" == *"pr comment forward-merge/release/3.x-to-main"* ]]
 }
 
 test_2796_pr_opened_exits_zero_and_writes_the_summary() {
@@ -3995,6 +3998,53 @@ run_test "Issue #2796: a halted cascade still exits nonzero" \
   test_2796_halted_cascade_still_exits_nonzero
 run_test "Issue #2796: a clean cascade exits zero" \
   test_2796_clean_cascade_exits_zero
+
+test_2796_missing_app_key_warning_names_the_secret() {
+  run_helper check_cascade_credential SYNC_APP_ID=1 FORWARD_MERGE_PAT=p
+  [[ "$RUN_RC" -eq 0 && "$RUN_ERR" == *"Missing SYNC_APP_PRIVATE_KEY"* ]]
+}
+
+test_2796_app_mode_without_a_token_refuses_the_pat() {
+  run_helper require_app_token MODE=app
+  [[ "$RUN_RC" -ne 0 && "$RUN_ERR" == *"refusing to fall back"* ]]
+}
+
+test_2796_app_mode_with_a_token_passes() {
+  run_helper require_app_token MODE=app _app_token=tok
+  [[ "$RUN_RC" -eq 0 ]]
+}
+
+test_2796_pat_mode_passes_without_an_app_token() {
+  run_helper require_app_token MODE=pat
+  [[ "$RUN_RC" -eq 0 ]]
+}
+
+test_2796_unset_step_summary_fails_loudly() {
+  local rc=0
+  env -i PATH="$PATH" HELD="PR opened for release/4.x" bash -c "set -euo pipefail
+$(workflow_function finish_cascade)
+finish_cascade" >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -ne 0 ]]
+}
+
+# shellcheck disable=SC2016 # literal workflow text, not an expression to expand
+test_2796_app_token_stays_out_of_checkout_and_step_env() {
+  ! grep -Fq 'token: ${{ steps.app.outputs.token' "$WORKFLOW" \
+    && ! grep -Fq 'GH_TOKEN: ${{ steps.app.outputs.token' "$WORKFLOW"
+}
+
+run_test "Issue #2796: a missing App key warning names the secret" \
+  test_2796_missing_app_key_warning_names_the_secret
+run_test "Issue #2796: App mode without a token refuses the PAT" \
+  test_2796_app_mode_without_a_token_refuses_the_pat
+run_test "Issue #2796: App mode with a token passes" \
+  test_2796_app_mode_with_a_token_passes
+run_test "Issue #2796: PAT mode passes without an App token" \
+  test_2796_pat_mode_passes_without_an_app_token
+run_test "Issue #2796: an unset step summary fails loudly" \
+  test_2796_unset_step_summary_fails_loudly
+run_test "Issue #2796: the App token stays out of checkout and GH_TOKEN" \
+  test_2796_app_token_stays_out_of_checkout_and_step_env
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

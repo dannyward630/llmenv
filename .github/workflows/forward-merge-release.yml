@@ -32,10 +32,11 @@ jobs:
   forward-merge:
     runs-on: ubuntu-latest
     # Stops the cascade's own push from re-triggering this workflow on the
-    # target branch. Only holds while pushes go out as GITHUB_TOKEN (which
-    # both skips the anti-recursion rule and is attributed to
-    # github-actions[bot]) — a FORWARD_MERGE_PAT-authenticated push (#1504)
-    # is neither. #1524 raised this as a gap once FORWARD_MERGE_PAT is set,
+    # target branch. The anti-recursion rule does not cover these pushes:
+    # since #2796 they go out as the phaedrus-sync App, and a
+    # FORWARD_MERGE_PAT push (#1504) is not GITHUB_TOKEN either. The loop
+    # stays closed because every cascade push lands on a forward-merge/*
+    # branch, which never matches `release/**`. #1524 raised this as a gap once FORWARD_MERGE_PAT is set,
     # but cff88a8c (#1504) closed it as a side effect: once the secret is
     # set, a direct push to $TARGET is never attempted at all (PUSH_SKIPPED
     # below) — push_with_pat only ever pushes to a forward-merge/* staging
@@ -112,7 +113,7 @@ jobs:
       # #2796: the cascade pushes, opens PRs, and enables auto-merge as the phaedrus-sync
       # GitHub App. A GitHub App token is not GITHUB_TOKEN, so its pushes start the next
       # cascade hop and its PRs are not authored by github-actions. FORWARD_MERGE_PAT stays
-      # as a fallback until the first full App-run cascade is green.
+      # as a fallback until the first full App-run cascade is green (removal: #2797).
       - name: Check cascade credentials
         id: creds
         env:
@@ -129,7 +130,10 @@ jobs:
               return 0
             fi
             if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
-              echo "::warning::SYNC_APP_ID and SYNC_APP_PRIVATE_KEY are not both set, so the cascade falls back to FORWARD_MERGE_PAT. See docs/release.md." >&2
+              missing=""
+              [[ -n "${SYNC_APP_ID:-}" ]] || missing="SYNC_APP_ID"
+              [[ -n "${SYNC_APP_PRIVATE_KEY:-}" ]] || missing="${missing:+$missing and }SYNC_APP_PRIVATE_KEY"
+              echo "::warning::Missing $missing, so the cascade falls back to FORWARD_MERGE_PAT. Set both App secrets to stop using the PAT. See docs/release.md." >&2
               echo "pat"
               return 0
             fi
@@ -161,7 +165,6 @@ jobs:
         with:
           ref: ${{ steps.source.outputs.ref }}
           fetch-depth: 0
-          token: ${{ steps.app.outputs.token || github.token }}
           persist-credentials: true
 
       - name: Configure git
@@ -219,9 +222,12 @@ jobs:
           # closes that exposure is the #1532 fix itself: the changelog.md
           # arm below only ever runs a pinned, already-verified copy of
           # scripts/sync-changelog-doc.sh, never the merged tree's.
-          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
-          # #2796: the App token. Empty when the App is not configured.
+          GH_TOKEN: ${{ github.token }}
+          # #2796: the App token, used only for the push and the PR calls. Kept out of
+          # GH_TOKEN and the checkout, so the tools that run on the merged tree (cargo
+          # update, npm install) never hold it. Empty when the App is not configured.
           APP_TOKEN: ${{ steps.app.outputs.token }}
+          MODE: ${{ steps.creds.outputs.mode }}
           # Fallback only: a fine-grained PAT restricted to just this repository, with
           # only `contents: write` + `workflows: write` — not a classic PAT.
           # A classic repo-scoped PAT would let anyone who can land a commit
@@ -240,8 +246,18 @@ jobs:
           # still has access. Any subprocess this step spawns from here on
           # (bash scripts/sync-changelog-doc.sh included) no longer inherits
           # it.
-          _merge_credential="${APP_TOKEN:-${FORWARD_MERGE_PAT:-}}"
-          unset FORWARD_MERGE_PAT APP_TOKEN
+          _app_token="${APP_TOKEN:-}"
+          unset APP_TOKEN
+          # #2796: a missing App token must not fall back to the PAT without a trace.
+          require_app_token() {
+            if [[ "${MODE:-}" == "app" && -z "${_app_token:-}" ]]; then
+              echo "::error::mode is app but no App token was minted; refusing to fall back to FORWARD_MERGE_PAT" >&2
+              return 1
+            fi
+          }
+          require_app_token
+          _merge_credential="${_app_token:-${FORWARD_MERGE_PAT:-}}"
+          unset FORWARD_MERGE_PAT
 
           # GITHUB_TOKEN can never push a change that touches
           # .github/workflows/*.yml (GitHub's own restriction, not this job's
@@ -387,13 +403,18 @@ jobs:
 
           # #2796: request auto-merge with a merge commit. The merge then runs as the App
           # once required checks pass, and its close event resumes the cascade. A refused
-          # request only warns, so the PR stays open for a person to merge.
+          # request leaves the PR open, so the refusal is also posted on the PR.
           enable_auto_merge() {
             local branch="$1" err
-            if err=$(gh pr merge "$branch" --auto --merge 2>&1 >/dev/null); then
+            if err=$(GH_TOKEN="${_app_token:-${GH_TOKEN:-}}" gh pr merge "$branch" --auto --merge 2>&1 >/dev/null); then
               echo "Auto-merge enabled for $branch; it merges once its required checks pass."
-            else
-              echo "::warning::Could not enable auto-merge for $branch; merge it by hand once its checks pass: ${err//$'\n'/ }"
+              return 0
+            fi
+            err="${err//::/  }"
+            err="${err//$'\n'/ }"
+            echo "::warning::Could not enable auto-merge for $branch; merge it by hand once its checks pass: $err"
+            if ! GH_TOKEN="${_app_token:-${GH_TOKEN:-}}" gh pr comment "$branch" --body "Auto-merge was refused: $err. Merge this PR by hand once its checks pass; the cascade resumes when it merges." >/dev/null 2>&1; then
+              echo "::warning::Could not comment on $branch about the refused auto-merge"
             fi
           }
 
@@ -405,7 +426,7 @@ jobs:
             fi
             if [[ -n "${HELD:-}" ]]; then
               echo "Forward-merge cascade waiting on $HELD; the next targets run when it merges"
-              echo "- Forward-merge cascade waiting on $HELD" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              echo "- Forward-merge cascade waiting on $HELD" >> "$GITHUB_STEP_SUMMARY"
               return 0
             fi
             echo "Forward-merge cascade completed"
@@ -1246,7 +1267,7 @@ jobs:
                   if [[ -n "$BRANCH_OWN" ]]; then
                     PR_BODY+=$'\n\n'"The branch also holds these commits, which are not on $SOURCE_DESC or $TARGET. An earlier PR for this branch may have carried them. Review them before you merge:"$'\n'"$BRANCH_OWN"
                   fi
-                  if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
+                  if ! GH_TOKEN="${_app_token:-${GH_TOKEN:-}}" gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                     --title "Forward-merge $SOURCE_DESC into $TARGET" --body "$PR_BODY"; then
                     echo "::error::Failed to create PR for $MERGE_BRANCH"
                     HALTED="PR creation failed for $TARGET"
@@ -1303,7 +1324,7 @@ jobs:
               if [[ "$PUSH_SKIPPED" -eq 1 ]]; then
                 PR_BODY="FORWARD_MERGE_PAT is set and may bypass branch protection, so direct push was skipped; opening PR so required checks still run before merge."
               fi
-              if ! gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
+              if ! GH_TOKEN="${_app_token:-${GH_TOKEN:-}}" gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
                 --title "Forward-merge $SOURCE_DESC into $TARGET" \
                 --body "$PR_BODY"; then
                 echo "::error::Failed to create PR for $MERGE_BRANCH"

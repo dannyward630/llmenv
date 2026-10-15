@@ -189,7 +189,7 @@ The release workflow requires one secret (repo Settings → Secrets and variable
 crates.io needs no secret, because the workflow uses trusted publishing.
 The `forward-merge-release` workflow runs as the `phaedrus-sync` GitHub App (see [Branch Strategy](#branch-strategy)).
 It needs two repository secrets, `SYNC_APP_ID` and `SYNC_APP_PRIVATE_KEY`, for an App installed on this repository.
-The optional `FORWARD_MERGE_PAT` secret is a fallback, used only while the App secrets are unset.
+The optional `FORWARD_MERGE_PAT` secret is a fallback, used unless both App secrets are set.
 
 **Security notes:**
 
