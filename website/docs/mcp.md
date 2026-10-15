@@ -594,6 +594,8 @@ neutral events:
   (changed in v3.12.0) Claude Code shows it under
   `[ICM MEMORY CONTEXT (session start)]`; a resumed or forked session skips the
   call, because its conversation already holds the earlier pack.
+  (changed in v3.13.0) The pack also holds the session project's own memories,
+  from a project-scoped recall. A memory that icm cut short is dropped whole.
 - **TurnStart** — `hook-run turn_start` injects recalled context at the start of
   each agent turn (`icm_memory_recall`). It issues one **project-unfiltered**
   recall per active tag keyed on `llmenv-tag:<tag>`, and one per active bundle
