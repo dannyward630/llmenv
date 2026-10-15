@@ -64,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Unreadable entries in project config discovery, the ReadOnce status, cache cleanup, the status size estimate, and the `llmenv doctor` version skew check are logged with their directory path. The ReadOnce status counts them as skipped, and shows them when no session file can be read (#2718) [fix:cli]
 - A git read failure shows git's error text instead of "no remote", "not a git repo", or "ref cannot be resolved". `llmenv doctor` reports an unreadable HEAD in a marketplace clone instead of skipping the pin check, and says the git remote is "configured", not "reachable". The statusline shows "branch: unreadable" when HEAD exists but cannot be read, and reads a relative submodule `gitdir:` pointer from the `.git` file (#2710) [fix:cli]
 - Hook output tells the agent when memory or recall state is lost: a failed memory step, a failed recall call, a failed ledger reset, a skipped recall, an unsaved or corrupt ledger, a skipped task reminder, and an unreadable agent config that is rebuilt. Bundle-feature notices use the same channel. See [llmenv notices](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#the-agent-sees-an-llmenv-notice) (#2664, #2729) [fix:hook]
+- Hook failures reach the agent as a notice with the cause and a fix. That covers unreadable hook input, an unreadable state file, a missing state directory, and a failed memory call, which were only logged before (#2736) [fix:hook]
+- A failed memory action no longer drops the text of the other actions in the same recall (#2736) [fix:recall]
+- Unreadable task files and directory entries are reported to the agent. A task that the listing skips no longer vanishes from task lists and resume lookup without a notice (#2738) [fix:task]
+- `git_branch` reports an unexpected git failure, such as a dubious ownership error, instead of reporting that there is no branch (#2737) [fix:git]
+- Memory failure text no longer includes the MCP server URL. A URL with credentials or a query token stays out of the agent's context [fix:mcp]
+- Agent notices are cleaned of control and bidirectional characters, and each is capped at 1000 characters, when it is recorded [fix:notice]
+- A failed memory action is logged at error level as well as sent to the agent [fix:recall]
+- A failed `which` lookup is logged at error level, so `llmenv regenerate` and `llmenv doctor` show the cause instead of reporting the binary as missing (#2737) [fix:adapter]
+- A plugin sync fails when `git reset --hard` cannot run, instead of reporting the old checkout as synced (#2737) [fix:plugins]
+- A failed clear or save of the stop reminder state reaches the agent, and an unreadable agent config is reported with a notice [fix:hook]
+- Detached recorders, the ICM store, consolidation, and the checkpoint spawner log a missing state directory instead of dropping it [fix:hook]
 
 ### Security
 

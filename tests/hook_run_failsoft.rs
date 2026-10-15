@@ -232,6 +232,16 @@ fn assert_fail_soft_with_health_notice(mut cmd: Command, stderr_needle: &str) {
         .stderr(predicate::str::contains(stderr_needle));
 }
 
+/// An unreachable backend fails soft. The agent sees the cause on stdout, because stderr from a
+/// hook never reaches it. The other memory actions still run (#2736).
+fn assert_unreachable_recall_notice(mut cmd: Command) {
+    cmd.timeout(Duration::from_secs(25))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MCP health check failed"))
+        .stdout(predicate::str::contains("could not run a memory action"));
+}
+
 #[test]
 fn unknown_event_exits_zero_with_warning() {
     // The event name is rejected before any config load, so a near-empty config
@@ -279,10 +289,7 @@ fn loopback_url_is_allowed_not_ssrf_rejected() {
     // fail-soft ("skipped"), not an "invalid ... SSRF" rejection.
     let (dir, config_path) = setup_config(&config_with_memory_addr("127.0.0.1", 9));
 
-    assert_fail_soft_with_health_notice(
-        hook_cmd(dir.path(), &config_path, "session_start"),
-        "session_start skipped",
-    );
+    assert_unreachable_recall_notice(hook_cmd(dir.path(), &config_path, "session_start"));
 }
 
 #[test]
@@ -291,10 +298,7 @@ fn private_network_url_is_allowed_not_ssrf_rejected() {
     // `icm serve` (AGENTS.md) and must not be SSRF-rejected.
     let (dir, config_path) = setup_config(&config_with_memory_addr("10.0.0.1", 8080));
 
-    assert_fail_soft_with_health_notice(
-        hook_cmd(dir.path(), &config_path, "session_start"),
-        "session_start skipped",
-    );
+    assert_unreachable_recall_notice(hook_cmd(dir.path(), &config_path, "session_start"));
 }
 
 #[test]
@@ -1389,7 +1393,8 @@ fn session_start_shows_the_memory_error_when_another_server_needs_a_notice() {
         .assert()
         .success()
         .stdout(predicate::str::contains("codebase-memory-mcp"))
-        .stdout(predicate::str::contains("memory session_start failed"));
+        .stdout(predicate::str::contains("could not run a memory action"))
+        .stdout(predicate::str::contains("icm_wake_up returned HTTP 500"));
 }
 
 // A failing memory call reaches the agent as a notice, so a session does not run without memory
@@ -1421,8 +1426,6 @@ fn session_start_reports_a_failing_memory_call_to_the_agent() {
         .timeout(Duration::from_secs(25))
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "llmenv: memory session_start skipped",
-        ))
-        .stderr(predicate::str::contains("session_start skipped"));
+        .stdout(predicate::str::contains("could not run a memory action"))
+        .stdout(predicate::str::contains("icm_wake_up returned HTTP 500"));
 }

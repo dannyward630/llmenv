@@ -81,14 +81,26 @@ fn read_state(path: &Path) -> Result<NudgeState, String> {
             "task nudge state {} is unreadable, reset: {e}",
             path.display()
         );
+        crate::agent_notice::record(format!(
+            "llmenv found an unreadable task nudge state {}, so its nudge history was reset: {e}. \
+             Fix: delete the file.",
+            path.display()
+        ));
         NudgeState::default()
     }))
 }
 
-/// [`read_state`] for the hooks that fail soft: the error is logged, and the caller skips its nudge.
+/// [`read_state`] for the hooks that fail soft: the error is logged and reaches the agent, and the
+/// caller skips its nudge.
 fn load(path: &Path) -> Option<NudgeState> {
     read_state(path)
-        .inspect_err(|e| tracing::error!("task nudge state {e}"))
+        .inspect_err(|e| {
+            tracing::error!("task nudge state {e}");
+            crate::agent_notice::record(format!(
+                "llmenv skipped the task nudge check: task nudge state {e}. Fix: check the file's \
+                 permissions."
+            ));
+        })
         .ok()
 }
 
