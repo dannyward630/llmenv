@@ -13,7 +13,7 @@ pub(crate) struct NoticeList {
 
 impl NoticeList {
     /// An empty list. `const` so the process-wide list can be a `static`.
-    pub(crate) const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             notices: Vec::new(),
         }
@@ -22,7 +22,7 @@ impl NoticeList {
     /// Add a notice. A notice that is already present is not added again, so a failure that
     /// repeats does not repeat its text. Line breaks become spaces, because `current` joins
     /// notices with newlines and one notice must stay one line.
-    pub(crate) fn record(&mut self, notice: impl Into<String>) {
+    fn record(&mut self, notice: impl Into<String>) {
         let notice = notice.into().replace(['\n', '\r'], " ");
         if !self.notices.contains(&notice) {
             self.notices.push(notice);
@@ -30,7 +30,7 @@ impl NoticeList {
     }
 
     /// Every notice, one per line, or `None` when there is none.
-    pub(crate) fn current(&self) -> Option<String> {
+    fn current(&self) -> Option<String> {
         (!self.notices.is_empty()).then(|| self.notices.join("\n"))
     }
 }
