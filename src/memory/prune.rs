@@ -238,15 +238,14 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let merged = crate::hook_run::merged_memory(&config, config_dir, &active)?;
     ensure_retention_unset(&merged.memory, &active.tags)?;
     let client = connect(&config_path, &config)?;
-    let cwd = std::env::current_dir().ok();
-    let project = cwd
-        .as_deref()
-        .map(super::project::session_project)
-        .transpose()?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        anyhow::anyhow!("cannot read the working directory to name the project: {e}")
+    })?;
+    let project = super::project::session_project(&cwd)?;
     let output = call_tool_blocking(
         client.clone(),
         "icm_memory_recall",
-        recall_args(project.as_deref())?,
+        recall_args(Some(project.as_str()))?,
     )?;
 
     let records = parse_recall_output(&output);
