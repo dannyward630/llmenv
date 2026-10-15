@@ -244,10 +244,35 @@ fn resets_ledger(source: Option<&str>) -> bool {
     super::session_state::context_was_lost(source)
 }
 
-/// Whether a context reset left the recall ledger as it was: the ledger update failed (a busy
-/// lock or an unreadable file) while the session asked for a reset.
-fn reset_left_undone(updated: bool, reset: bool) -> bool {
-    reset && !updated
+/// Notice for a context reset that the ledger did not apply. Records seen before the
+/// reset stay filtered from recall, so the agent must hear about it.
+const RESET_UNDONE: &str = "llmenv: the recall ledger was not reset after a context reset (the \
+     state file was locked or unreadable). Records seen before the reset may stay filtered from \
+     recall. Fix: run `llmenv doctor` to check the state directory.";
+
+/// The notice for the first session-start ledger update, or `None` when it saved. The first
+/// update is the only write that carries this session's reset and project, so a failure here
+/// is noticed even when the second update later succeeds (#2767).
+fn first_update_notice(saved: bool, reset: bool) -> Option<&'static str> {
+    if saved {
+        None
+    } else if reset {
+        Some(RESET_UNDONE)
+    } else {
+        Some(RECALL_STATE_UNSAVED)
+    }
+}
+
+/// The notice for scope recalls that the output budget cut off, or `None` when none were cut
+/// (#2766). The recalls are unknown to the agent, not empty, so the notice says so.
+fn scope_cut_notice(skipped: usize) -> Option<String> {
+    (skipped > 0).then(|| {
+        format!(
+            "llmenv: {skipped} recall action(s) were skipped because the output budget was full. \
+             Those recalls are unknown, not empty. Fix: store shorter memories, so more recalls \
+             fit the budget."
+        )
+    })
 }
 
 /// Run the scope recalls into `budget`, one after another, until it is full.
@@ -257,15 +282,19 @@ async fn run_scope(
     budget: &mut RecallBudget,
 ) -> Outcome {
     let mut outcome = Outcome::default();
-    for action in scope {
-        if budget.is_full() {
+    let mut actions = scope.into_iter();
+    while !budget.is_full() {
+        let Some(action) = actions.next() else {
             break;
-        }
+        };
         outcome.push(Some(action.run(ctx.client, "", "").await));
         if let Some(text) = outcome.texts.last() {
             budget.add_text(text);
         }
         outcome.texts.clear();
+    }
+    if let Some(notice) = scope_cut_notice(actions.len()) {
+        agent_notice::record(notice);
     }
     outcome
 }
@@ -293,17 +322,9 @@ pub(super) async fn session_start(
         }
         l.sent_for(MAIN_AGENT)
     });
-    if reset_left_undone(updated.is_some(), reset) {
-        // Records that the model saw before the context loss would stay filtered from recall.
-        tracing::error!(
-            "recall ledger not reset after {}: the lock or the file failed",
-            ctx.payload["source"].as_str().unwrap_or("a context reset")
-        );
-        agent_notice::record(
-            "llmenv: the recall ledger was not reset after a context reset (the state file was \
-             locked or unreadable). Records seen before the reset may stay filtered from recall. \
-             Fix: run `llmenv doctor` to check the state directory.",
-        );
+    if let Some(notice) = first_update_notice(updated.is_some(), reset) {
+        tracing::error!("session start ledger update failed (reset requested: {reset}): {notice}");
+        agent_notice::record(notice);
     }
     let sent = updated.unwrap_or_default();
     // A resumed session already holds its pack, so it makes neither call (#2142). A failed
@@ -637,11 +658,28 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_is_undone_only_when_the_update_failed() {
-        assert!(reset_left_undone(false, true));
-        assert!(!reset_left_undone(true, true));
-        assert!(!reset_left_undone(false, false));
-        assert!(!reset_left_undone(true, false));
+    fn a_scope_set_cut_by_the_budget_names_the_skipped_count() {
+        assert_eq!(scope_cut_notice(0), None);
+        let notice = scope_cut_notice(3).expect("a cut scope set is noticed");
+        assert!(notice.contains("3 recall action(s)"), "{notice}");
+        assert!(
+            notice.contains("Fix:"),
+            "the notice names the fix: {notice}"
+        );
+    }
+
+    #[test]
+    fn a_failed_first_update_is_noticed_even_without_a_reset() {
+        // The first update holds the only copy of the sent set for this session. A later
+        // successful update does not undo a lost first update, so the notice must come from
+        // the first update alone.
+        assert_eq!(first_update_notice(true, false), None);
+        assert_eq!(
+            first_update_notice(false, false),
+            Some(RECALL_STATE_UNSAVED)
+        );
+        assert_eq!(first_update_notice(false, true), Some(RESET_UNDONE));
+        assert_eq!(first_update_notice(true, true), None);
     }
 
     use std::time::Duration;

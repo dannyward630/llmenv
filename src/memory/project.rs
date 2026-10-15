@@ -75,9 +75,10 @@ fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
 /// The project name for a session whose working directory is `cwd`.
 ///
 /// # Errors
-/// git cannot start in `cwd`, fails for a reason other than "not a repository", or the git
-/// common directory cannot be resolved. The caller decides what the agent sees.
-pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<Option<String>> {
+/// git cannot start in `cwd`, fails for a reason other than "not a repository", the git
+/// common directory cannot be resolved, or `cwd` has no name to fall back to. The caller decides
+/// what the agent sees.
+pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<String> {
     if let Some(url) = git_output(cwd, &["config", "--get", "remote.origin.url"])? {
         // A remote that is set but has no readable name is a config problem. Falling back to the
         // folder name would hide it. The URL is masked, so credentials stay out of the error.
@@ -88,7 +89,7 @@ pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<Option<String>> {
                 crate::util::strip_unsafe_chars(&crate::git::sanitize_git_url(&url))
             )
         })?;
-        return Ok(Some(name));
+        return Ok(name);
     }
     // The common dir is the main repo's `.git`, also from a linked worktree.
     if let Some(common) = git_output(
@@ -101,9 +102,16 @@ pub(crate) fn session_project(cwd: &Path) -> anyhow::Result<Option<String>> {
         let name = common.parent().and_then(Path::file_name).ok_or_else(|| {
             anyhow::anyhow!("git common directory {} has no parent", common.display())
         })?;
-        return Ok(Some(name.to_string_lossy().into_owned()));
+        return Ok(name.to_string_lossy().into_owned());
     }
-    Ok(cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
+    let name = cwd.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot tell the project of {}: the folder has no name. Run this from a folder with \
+             a name, or inside a git repository.",
+            cwd.display()
+        )
+    })?;
+    Ok(name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -149,10 +157,7 @@ mod tests {
         );
         let sub = checkout.join("src");
         std::fs::create_dir(&sub).unwrap();
-        assert_eq!(
-            session_project(&sub).ok().flatten().as_deref(),
-            Some("real-name")
-        );
+        assert_eq!(session_project(&sub).ok().as_deref(), Some("real-name"));
     }
 
     #[test]
@@ -185,10 +190,7 @@ mod tests {
         git(&repo, &["init", "-q"]);
         let sub = repo.join("deep");
         std::fs::create_dir(&sub).unwrap();
-        assert_eq!(
-            session_project(&sub).ok().flatten().as_deref(),
-            Some("local-repo")
-        );
+        assert_eq!(session_project(&sub).ok().as_deref(), Some("local-repo"));
     }
 
     #[test]
@@ -219,11 +221,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plain = dir.path().join("plain-dir");
         std::fs::create_dir(&plain).unwrap();
-        assert_eq!(
-            session_project(&plain).ok().flatten().as_deref(),
-            Some("plain-dir")
+        assert_eq!(session_project(&plain).ok().as_deref(), Some("plain-dir"));
+    }
+
+    #[test]
+    fn session_project_errors_for_a_directory_with_no_name() {
+        // A cwd with no file name, such as `/`, has no project. Returning None here sent a
+        // recall with no project scope, so icm searched the server's own folder (#2768).
+        let err = session_project(Path::new("/")).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("/") && text.contains("no name"),
+            "the error must name the directory and the cause: {text}"
         );
-        assert_eq!(session_project(Path::new("/")).unwrap(), None);
     }
 
     #[test]

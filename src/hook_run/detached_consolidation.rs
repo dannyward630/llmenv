@@ -76,16 +76,14 @@ fn run_consolidation_at(
         anyhow::anyhow!("cannot read the working directory to name the project: {e}")
     })?;
     // A lookup that fails leaves the checkpoint unsettled, so the next session runs it again.
-    let project = crate::memory::project::session_project(&cwd)
-        .map_err(|e| anyhow::anyhow!("consolidation-run: cannot name the project: {e:#}"))?;
-    let Some(project) = project else {
+    // The checkpoint stays unsettled on this error, so the next session retries the run.
+    let project = crate::memory::project::session_project(&cwd).map_err(|e| {
         tracing::error!(
-            "consolidation-run: no project name for {}; consolidation skipped",
+            "consolidation-run: cannot name the project of {}: {e:#}",
             cwd.display()
         );
-        settle(checkpoint);
-        return Ok(());
-    };
+        anyhow::anyhow!("consolidation-run: cannot name the project: {e:#}")
+    })?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
