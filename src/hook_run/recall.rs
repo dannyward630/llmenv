@@ -244,15 +244,14 @@ where
             budget.skipped_actions += 1;
             continue;
         }
-        let text = match run(action).await {
-            Ok(text) => text,
-            Err(e) => {
-                crate::agent_notice::record(format!(
-                    "llmenv could not run a memory action, so its text is missing: {e:#}. \
-                     Fix: run `llmenv doctor` to check the memory server."
-                ));
-                continue;
-            }
+        let Ok(text) = run(action).await.inspect_err(|e| {
+            tracing::error!("memory action failed, its text is missing: {e:#}");
+            crate::agent_notice::record(format!(
+                "llmenv could not run a memory action, so its text is missing: {e:#}. \
+                 Fix: run `llmenv doctor` to check the memory server."
+            ));
+        }) else {
+            continue;
         };
         if recall {
             budget.add_text(&text);
@@ -541,6 +540,32 @@ mod tests {
         })
         .await;
         assert_eq!(text, "kept record");
+    }
+
+    /// Run one passthrough action per outcome. `None` is a failed action.
+    fn run_outcomes(outcomes: Vec<Option<String>>) -> String {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        let actions =
+            vec![Action::WakeUp(crate::hook_run::action::WakeUpArgs::default()); outcomes.len()];
+        let mut outcomes = outcomes.into_iter();
+        let (text, _) = runtime.block_on(run_with_budget(actions, |_| {
+            let outcome = outcomes.next().expect("one outcome per action");
+            async move { outcome.ok_or_else(|| anyhow::anyhow!("boom")) }
+        }));
+        text
+    }
+
+    proptest! {
+        /// A failed action changes nothing else: the text equals the run without that action.
+        #[test]
+        fn failing_actions_do_not_change_the_text_of_the_others(
+            outcomes in prop::collection::vec(prop::option::of("[a-z]{1,8}"), 1..10),
+        ) {
+            let kept: Vec<Option<String>> = outcomes.iter().filter(|o| o.is_some()).cloned().collect();
+            prop_assert_eq!(run_outcomes(outcomes), run_outcomes(kept));
+        }
     }
 
     proptest! {
