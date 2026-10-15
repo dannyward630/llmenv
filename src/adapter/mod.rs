@@ -403,8 +403,9 @@ pub(crate) fn known_engine_ids() -> Vec<String> {
 /// Returns `true` when `name` resolves to an executable on the current `PATH`.
 ///
 /// Uses the platform `which` command so the result matches what a shell would
-/// find. Returns `false` when `which` exits non-zero. A spawn failure also returns `false`, and
-/// it is recorded for the agent, because `false` alone reads as "not installed".
+/// find. Returns `false` when `which` exits non-zero. A spawn failure also returns `false`, so it
+/// is logged at error level and recorded for the agent, because `false` alone reads as "not
+/// installed".
 ///
 /// Names containing `/` or ASCII whitespace are unconditionally rejected;
 /// they cannot be plain binary names and would produce confusing `which` behaviour.
@@ -416,6 +417,8 @@ pub(crate) fn binary_on_path(name: &str) -> bool {
     match std::process::Command::new("which").arg(name).output() {
         Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         Err(e) => {
+            // ERROR level, so a CLI run shows the cause on stderr under the default filter.
+            tracing::error!("cannot run `which` to look for `{name}`: {e}");
             crate::agent_notice::record(format!(
                 "llmenv could not run `which` to look for `{name}`: {e}. \
                  Fix: check that `which` is on PATH."
