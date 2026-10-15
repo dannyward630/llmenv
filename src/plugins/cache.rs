@@ -316,14 +316,14 @@ fn sync_git(
         Some(&extra),
     );
 
-    let head_result = git.head(&dest);
-    let head_error = head_result.as_ref().err().cloned().unwrap_or_default();
-    let head = head_result.ok();
+    let head = git.head(&dest);
     // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
     // the clone is broken and we shouldn't silently cache it with an unstable hash.
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
-    if head.is_none() && dest.join(".git").exists() {
+    if let Err(head_error) = &head
+        && dest.join(".git").exists()
+    {
         let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
             "marketplace '{}': unable to resolve git HEAD: {head_error} ({note})",
@@ -333,7 +333,7 @@ fn sync_git(
 
     Ok(MarketplaceState {
         install_location: dest,
-        head,
+        head: head.ok(),
     })
 }
 
@@ -698,14 +698,14 @@ fn sync_external_plugin_with(
                 source: e,
             })?;
     }
-    let head_result = git.head(&dest);
-    let head_error = head_result.as_ref().err().cloned().unwrap_or_default();
-    let head = head_result.ok();
+    let head = git.head(&dest);
     // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
     // the clone is broken and we shouldn't silently cache it with an unstable hash.
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
-    if head.is_none() && dest.join(".git").exists() {
+    if let Err(head_error) = &head
+        && dest.join(".git").exists()
+    {
         let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
             "plugin '{plugin}@{marketplace}': unable to resolve git HEAD: {head_error} ({note})"
@@ -714,7 +714,7 @@ fn sync_external_plugin_with(
 
     Ok(MarketplaceState {
         install_location: dest,
-        head,
+        head: head.ok(),
     })
 }
 
@@ -975,8 +975,8 @@ fn git_pull(repo: &Path) -> Result<()> {
         .output()
         .context("spawning git reset")?;
     if !reset_out.status.success() {
-        tracing::warn!(
-            "marketplace refresh did not fast-forward at {}: {}",
+        anyhow::bail!(
+            "git reset --hard @{{u}} failed at {}: {}",
             repo.display(),
             git::git_failure_detail(&reset_out.stderr, &reset_out.stdout, reset_out.status)
         );
