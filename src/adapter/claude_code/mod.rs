@@ -192,6 +192,7 @@ const SESSION_LOG_HOOK_EVENTS: &[(&str, &str)] = &[
 const ICM_READ_ONLY: &[&str] = &[
     "icm_wake_up",
     "icm_memory_recall",
+    "icm_memory_related",
     "icm_memory_stats",
     "icm_memory_health",
     "icm_memory_list_topics",
@@ -7872,9 +7873,10 @@ mod tests {
     /// Snapshot of every tool exported by the ICM MCP server (server-side
     /// name, without the `mcp__icm__` prefix that Claude Code applies).
     const ALL_KNOWN_ICM_TOOLS: &[&str] = &[
-        // READ_ONLY (16)
+        // READ_ONLY (17)
         "icm_wake_up",
         "icm_memory_recall",
+        "icm_memory_related",
         "icm_memory_stats",
         "icm_memory_health",
         "icm_memory_list_topics",
