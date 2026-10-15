@@ -276,6 +276,10 @@ fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<
             }
             Err(e) => {
                 tracing::warn!(error = %e, dir = %dir.display(), "skipping unreadable directory entry");
+                crate::agent_notice::record(format!(
+                    "llmenv skipped an unreadable entry in {}: {e}. Fix: check the directory's permissions.",
+                    dir.display()
+                ));
                 continue;
             }
         };
@@ -302,12 +306,22 @@ fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<
                     path = %path.display(),
                     "skipping unreadable task file"
                 );
+                crate::agent_notice::record(format!(
+                    "llmenv skipped the unreadable task file {}: {e}. The task is missing from \
+                     task lists and resume. Fix: check the file's permissions.",
+                    path.display()
+                ));
             }
             Err(e) if policy == UnreadablePolicy::Fail => {
                 return Err(e.context(format!("parsing task file {}", path.display())));
             }
             Err(e) => {
                 tracing::error!(error = %e, path = %path.display(), "skipping corrupt task file");
+                crate::agent_notice::record(format!(
+                    "llmenv skipped the corrupt task file {}: {e}. The task is missing from task \
+                     lists and resume. Fix: repair or delete the file.",
+                    path.display()
+                ));
             }
         }
     }

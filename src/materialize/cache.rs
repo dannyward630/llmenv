@@ -456,8 +456,15 @@ fn restore_dir_write_bits(dir: &Path) {
         for entry in readable {
             // `file_type()` is lstat-equivalent: a symlink reports as a symlink
             // rather than as the directory it points at.
-            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                restore_dir_write_bits(&entry.path());
+            // An unreadable type is not a directory, so the write bits would stay unrestored.
+            // The error is logged with its path, and the cleanup fails at the next step.
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => restore_dir_write_bits(&entry.path()),
+                Ok(_) => {}
+                Err(e) => tracing::error!(
+                    "cache cleanup cannot read the type of {}: {e}",
+                    entry.path().display()
+                ),
             }
         }
     }
