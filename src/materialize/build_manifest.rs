@@ -290,16 +290,30 @@ fn sync_marketplaces(
     Ok(out)
 }
 
+/// Tells the user and the agent that an external plugin is not loaded. A plugin with no install
+/// path would load from the marketplace path, which does not hold its payload (#2750).
+///
+/// The cause is a fixed phrase. A lookup error can carry a plugin source URL, and that text
+/// goes into the agent's context, so the error detail is logged by the caller, not here.
+fn note_unloaded_plugin(plugin: &str, marketplace: &str, cause: &str) {
+    let notice = format!(
+        "llmenv: external plugin '{plugin}@{marketplace}' was not loaded: {cause}. Fix: run \
+         `llmenv plugin-sync` to refresh the clone."
+    );
+    eprintln!("warning: {notice}");
+    crate::agent_notice::record(notice);
+}
+
 /// Look up stable external plugin payload paths for resolved plugins. Non-refreshing
-/// (export path): silently skips plugins whose payload hasn't been synced yet, so a
-/// missing payload doesn't abort materialization — users run `llmenv plugin-sync` first.
+/// (export path): an external plugin whose payload is not usable is dropped and noted, so the
+/// agent never sees an install path that points nowhere. Run `llmenv plugin-sync` to restore it.
 fn sync_plugin_payloads(
     cache_root: &Path,
     plugins: Vec<crate::plugins::resolve::ResolvedPlugin>,
 ) -> Vec<crate::plugins::resolve::ResolvedPlugin> {
     plugins
         .into_iter()
-        .map(|mut p| {
+        .filter_map(|mut p| {
             let mkt_path = crate::plugins::cache::marketplace_path(cache_root, &p.marketplace);
             let entries = match crate::plugins::cache::read_marketplace_plugins(&mkt_path) {
                 Ok(entries) => entries,
@@ -309,12 +323,15 @@ fn sync_plugin_payloads(
                     // cause rather than a fixed plugin-sync hint that won't fix
                     // a permission error or a corrupt manifest.
                     tracing::warn!(
-                        "cannot read marketplace manifest for '{}' ({e:#}) — \
-                         skipping external plugin '{}'",
-                        p.marketplace,
-                        p.plugin
+                        "cannot read marketplace manifest for '{}': {e:#}",
+                        p.marketplace
                     );
-                    return p;
+                    note_unloaded_plugin(
+                        &p.plugin,
+                        &p.marketplace,
+                        "its marketplace manifest is unreadable",
+                    );
+                    return None;
                 }
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
@@ -325,10 +342,10 @@ fn sync_plugin_payloads(
                     p.plugin,
                     p.marketplace
                 );
-                return p;
+                return Some(p);
             };
             if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
-                return p;
+                return Some(p);
             }
             match crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, false)
             {
@@ -337,20 +354,20 @@ fn sync_plugin_payloads(
                     p.git_commit_sha = state.head;
                 }
                 Err(crate::plugins::cache::SyncError::NotCloned { .. }) => {
-                    eprintln!(
-                        "warning: external plugin '{}@{}' not yet fetched\n  \
-                         → run `llmenv plugin-sync` to download it",
-                        p.plugin, p.marketplace
-                    );
+                    note_unloaded_plugin(&p.plugin, &p.marketplace, "it is not fetched yet");
+                    return None;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "warning: external plugin '{}@{}' payload lookup failed: {e:#}",
-                        p.plugin, p.marketplace
+                    tracing::warn!(
+                        "payload lookup for '{}@{}' failed: {e:#}",
+                        p.plugin,
+                        p.marketplace
                     );
+                    note_unloaded_plugin(&p.plugin, &p.marketplace, "its payload lookup failed");
+                    return None;
                 }
             }
-            p
+            Some(p)
         })
         .collect()
 }
