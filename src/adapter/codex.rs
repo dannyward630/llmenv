@@ -378,10 +378,15 @@ impl AgentAdapter for CodexAdapter {
         Ok(owned)
     }
 
-    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
+    fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String {
         // Codex turns SessionStart additionalContext into model context
         // (codex-rs hooks/src/events/session_start.rs).
-        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Accepted)
+        super::emit_hook_context(
+            hook_event_name,
+            memory,
+            notes,
+            super::SessionStartContext::Accepted,
+        )
     }
 }
 
@@ -1367,7 +1372,7 @@ mod tests {
     // suppressing it would drop the wake-up pack the adaptive ledger marks sent.
     #[test]
     fn emit_hook_context_delivers_session_start_context() {
-        let out = CodexAdapter.emit_hook_context("SessionStart", "wake");
+        let out = CodexAdapter.emit_hook_context("SessionStart", "wake", "");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["hookSpecificOutput"]["additionalContext"],

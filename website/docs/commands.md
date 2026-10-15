@@ -660,7 +660,11 @@ recall events also need `adaptive_recall` on):
   Code fetched the wake-up pack but never showed it to the model. (changed in
   v3.12.0) In Claude Code, Codex and opencode the block starts with
   `[ICM MEMORY CONTEXT (session start)]`, so it reads as different from the
-  per-prompt `[ICM MEMORY CONTEXT (auto-injected)]` recall. A resumed or forked
+  per-prompt `[ICM MEMORY CONTEXT (auto-injected)]` recall. (changed in v3.13.0)
+  Only ICM memory carries an ICM header. llmenv notices, such as the `cd`
+  advisory and the repeat warning, follow the memory block with no header.
+  (added in v3.13.0) The wake-up pack also holds the session project's memories.
+  A resumed or forked
   session (`source` `resume` or `fork`) makes no `icm_wake_up` call, because
   the conversation already holds the earlier pack. opencode receives the block
   in its first message; Crush runs no `SessionStart` hook.

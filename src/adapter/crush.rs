@@ -519,8 +519,13 @@ impl AgentAdapter for CrushAdapter {
         Ok(owned)
     }
 
-    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
-        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Rejected)
+    fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String {
+        super::emit_hook_context(
+            hook_event_name,
+            memory,
+            notes,
+            super::SessionStartContext::Rejected,
+        )
     }
 }
 
@@ -1475,18 +1480,21 @@ mod tests {
 
     #[test]
     fn emit_hook_context_empty_text_returns_empty() {
-        assert_eq!(CrushAdapter.emit_hook_context("PreToolUse", ""), "");
+        assert_eq!(CrushAdapter.emit_hook_context("PreToolUse", "", ""), "");
     }
 
     // #2142: nothing shows Crush's hook schema accepts SessionStart context.
     #[test]
     fn emit_hook_context_suppresses_session_start() {
-        assert_eq!(CrushAdapter.emit_hook_context("SessionStart", "mem"), "");
+        assert_eq!(
+            CrushAdapter.emit_hook_context("SessionStart", "mem", ""),
+            ""
+        );
     }
 
     #[test]
     fn emit_hook_context_wraps_in_hook_specific_output() {
-        let out = CrushAdapter.emit_hook_context("PreToolUse", "some context");
+        let out = CrushAdapter.emit_hook_context("PreToolUse", "some context", "");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert!(
@@ -1499,7 +1507,7 @@ mod tests {
 
     #[test]
     fn emit_hook_context_includes_injection_barrier() {
-        let out = CrushAdapter.emit_hook_context("PreToolUse", "mem");
+        let out = CrushAdapter.emit_hook_context("PreToolUse", "mem", "");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let ctx = v["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -2771,7 +2779,7 @@ mod tests {
             event in "[A-Za-z]{1,20}",
             text in ".{1,200}",
         ) {
-            let out = CrushAdapter.emit_hook_context(&event, &text);
+            let out = CrushAdapter.emit_hook_context(&event, &text, "");
             // Store-only events (SessionStart/SessionEnd) return empty;
             // all other events return valid JSON wrapping the text.
             prop_assert!(
@@ -2784,7 +2792,7 @@ mod tests {
         fn prop_emit_hook_context_empty_text_is_empty_string(
             event in "[A-Za-z]{1,20}",
         ) {
-            prop_assert_eq!(CrushAdapter.emit_hook_context(&event, ""), "");
+            prop_assert_eq!(CrushAdapter.emit_hook_context(&event, "", ""), "");
         }
 
         // ── P2: render_permission_rule ────────────────────────────────────────
