@@ -523,7 +523,19 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     let mut skipped: u64 = 0;
     let mut path_hits: HashMap<String, u64> = HashMap::new();
 
-    for entry in dir_entries.flatten() {
+    for entry in dir_entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    dir = %ro_dir.display(),
+                    "cannot read a ReadOnce cache entry"
+                );
+                skipped += 1;
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -566,7 +578,14 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
     }
 
     if session_count == 0 {
-        println!("  ReadOnce: (empty)");
+        // Unreadable files are not "no data", so the count stays visible (#2718).
+        if skipped > 0 {
+            println!(
+                "  ReadOnce: (no readable sessions, {skipped} corrupt/unreadable files skipped)"
+            );
+        } else {
+            println!("  ReadOnce: (empty)");
+        }
         return Ok(());
     }
 

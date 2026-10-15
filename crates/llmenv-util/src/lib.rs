@@ -1,5 +1,7 @@
 //! Small shared helpers with no better home.
 
+pub mod agent_notice;
+
 use anstyle::{AnsiColor, Color, Style};
 use sha2::{Digest, Sha256};
 

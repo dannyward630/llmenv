@@ -4,11 +4,13 @@
 # fmt on commit (fast); clippy on push (fast on incremental builds).
 # Tests and cargo-deny run in CI only (slow full rebuild).
 #
-# cargo-hawk (pre-push, #923) requires a one-time install matching the pinned
-# toolchain exactly (see rust-toolchain.toml), with the rust-src/rustc-dev/
-# llvm-tools-preview components hawk's own build needs:
+# cargo-hawk (pre-push, #923) links rustc internals, so it must be built with
+# the active stable toolchain (see rust-toolchain.toml), with the rust-src/
+# rustc-dev/llvm-tools-preview components hawk's own build needs. Install the
+# latest release, as CI does (#1584), and install it again after each Rust
+# stable update:
 #   rustup component add rust-src rustc-dev llvm-tools-preview
-#   RUSTC_BOOTSTRAP=1 cargo install --locked cargo-hawk@0.1.12
+#   RUSTC_BOOTSTRAP=1 cargo install --locked cargo-hawk
 # Or install a prebuilt release instead (no components/RUSTC_BOOTSTRAP
 # needed) — see https://github.com/astral-sh/hawk#installation.
 repos:

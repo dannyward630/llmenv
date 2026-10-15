@@ -275,6 +275,10 @@ impl LedgerStore {
                     "recall ledger {} is corrupt, starting a fresh epoch: {e}",
                     path.display()
                 );
+                crate::agent_notice::record(
+                    "llmenv: the recall ledger is corrupt, so it started fresh. Records already \
+                     sent may repeat.",
+                );
                 Ledger::default()
             })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Ledger::default()),
@@ -296,9 +300,18 @@ impl LedgerStore {
             .map_err(std::io::Error::other)
             .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
         if let Err(e) = result {
-            tracing::error!("cannot save recall ledger {}: {e}", path.display());
+            note_save_failure(&path, &e);
         }
     }
+}
+
+/// Logs a failed ledger save and tells the agent. `update` still returns the result of its
+/// closure, so the caller cannot see this failure (#2729).
+fn note_save_failure(path: &std::path::Path, err: &std::io::Error) {
+    tracing::error!("cannot save recall ledger {}: {err}", path.display());
+    crate::agent_notice::record(
+        "llmenv: the recall ledger could not be saved, so some records may repeat.",
+    );
 }
 
 #[cfg(test)]
@@ -631,5 +644,40 @@ mod tests {
             "a session in its first update keeps its lock"
         );
         assert!(dir.path().join("recall_session").join("s1.lock").exists());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod corrupt_notice_tests {
+    use super::{LedgerStore, MAIN_AGENT};
+
+    #[test]
+    fn a_corrupt_ledger_tells_the_agent_that_records_may_repeat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LedgerStore::new(dir.path());
+        store.update("s1", |l| l.mark_sent(MAIN_AGENT, ["keep".to_string()]));
+        let path = dir.path().join("recall_session").join("s1.json");
+        std::fs::write(&path, "not json").expect("corrupt the ledger");
+        assert!(
+            store.load("s1").is_some(),
+            "a corrupt ledger still loads as a fresh one"
+        );
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(text.contains("recall ledger is corrupt"), "got: {text}");
+    }
+
+    #[test]
+    fn a_failed_save_tells_the_agent() {
+        // The atomic writer rebuilds the directory, so a real save failure cannot be forced here.
+        super::note_save_failure(
+            std::path::Path::new("/state/recall_session/s1.json"),
+            &std::io::Error::other("disk full"),
+        );
+        let text = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            text.contains("recall ledger could not be saved"),
+            "got: {text}"
+        );
     }
 }
