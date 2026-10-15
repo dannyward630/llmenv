@@ -5,8 +5,19 @@
 
 use std::sync::{Mutex, PoisonError};
 
+/// The most characters of one notice. A notice can carry an error chain, so the cap keeps one
+/// failure from filling the agent's context.
+const MAX_NOTICE_CHARS: usize = 1000;
+
+/// One line, free of control and bidirectional characters, and at most [`MAX_NOTICE_CHARS`].
+fn clean(text: &str) -> String {
+    let spaced = text.replace(['\n', '\r'], " ");
+    let plain = crate::util::strip_unsafe_chars(&spaced);
+    plain.chars().take(MAX_NOTICE_CHARS).collect()
+}
+
 /// The notices of one process, in the order they were first raised.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct NoticeList {
     notices: Vec<String>,
 }
@@ -20,10 +31,11 @@ impl NoticeList {
     }
 
     /// Add a notice. A notice that is already present is not added again, so a failure that
-    /// repeats does not repeat its text. Line breaks become spaces, because `current` joins
-    /// notices with newlines and one notice must stay one line.
+    /// repeats does not repeat its text. The text is cleaned first: control and bidirectional
+    /// characters are removed, line breaks become spaces, and the text is capped, because a
+    /// failure text can carry server or URL content and `current` joins notices with newlines.
     fn record(&mut self, notice: impl Into<String>) {
-        let notice = notice.into().replace(['\n', '\r'], " ");
+        let notice = clean(&notice.into());
         if !self.notices.contains(&notice) {
             self.notices.push(notice);
         }
@@ -86,11 +98,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_list_has_no_current_text() {
-        assert_eq!(NoticeList::new().current(), None);
-    }
-
-    #[test]
     fn a_notice_with_a_line_break_stays_one_line() {
         let mut list = NoticeList::new();
         list.record("first\nsecond\r\nthird");
@@ -98,6 +105,35 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn every_line_is_clean_and_the_line_count_is_the_distinct_count(
+            raised in proptest::collection::vec("[a-z \n\r\u{202e}\u{200b}\u{7}]{0,12}", 0..16),
+        ) {
+            let mut list = NoticeList::new();
+            for notice in &raised {
+                list.record(notice.as_str());
+            }
+            let text = list.current().unwrap_or_default();
+            for line in text.lines() {
+                prop_assert!(
+                    !line.chars().any(|c| c.is_control() || c == '\u{202e}' || c == '\u{200b}'),
+                    "unclean line: {line:?}"
+                );
+            }
+            let distinct: std::collections::BTreeSet<&str> = text.lines().collect();
+            prop_assert_eq!(distinct.len(), text.lines().count());
+        }
+
+        #[test]
+        fn recording_a_notice_twice_changes_nothing(notice in "[ -~]{0,40}") {
+            let mut once = NoticeList::new();
+            once.record(notice.as_str());
+            let mut twice = NoticeList::new();
+            twice.record(notice.as_str());
+            twice.record(notice.as_str());
+            prop_assert_eq!(once.current(), twice.current());
+        }
+
         #[test]
         fn current_is_the_first_occurrence_dedupe_joined_by_newlines(
             raised in proptest::collection::vec("[a-z \n\r]{0,12}", 0..16),
