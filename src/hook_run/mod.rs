@@ -767,7 +767,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             // #318: deny envelope detected — write a proper deny JSON envelope
             // to stdout so the Claude Code engine blocks the tool call.
             if text.notes.starts_with("__DENY__:") {
-                if !text.memory.is_empty() {
+                if deny_drops_memory(&text) {
                     // The deny envelope replaces the whole output, so this memory is not sent.
                     tracing::error!("hook-run: memory text dropped for a deny envelope");
                 }
@@ -1254,6 +1254,11 @@ impl HookText {
             notes,
         }
     }
+}
+
+/// Whether a deny envelope would replace memory text that was computed in the same run.
+fn deny_drops_memory(text: &HookText) -> bool {
+    !text.memory.is_empty()
 }
 
 /// Puts the agent notice in front of the llmenv notes, with no empty separator.
@@ -3306,7 +3311,7 @@ fn append_section(out: &mut String, section: &str) {
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod pipeline_recovery_tests {
     use super::{
-        HookEvent, HookText, join_notes, join_precomputed, read_dedup_snapshot,
+        HookEvent, HookText, deny_drops_memory, join_notes, join_precomputed, read_dedup_snapshot,
         recover_from_pipeline_error,
     };
     use proptest::strategy::Strategy as _;
@@ -3345,6 +3350,18 @@ mod pipeline_recovery_tests {
             recover_from_pipeline_error(HookEvent::PostToolUse, failure(), [None, None, None])
                 .expect_err("nothing to keep, so the error must propagate");
         assert!(err.to_string().contains("bad tag"), "got: {err}");
+    }
+
+    #[test]
+    fn a_deny_drops_only_memory_that_was_computed() {
+        let with_memory = HookText {
+            memory: "recalled".to_string(),
+            notes: "__DENY__:why".to_string(),
+        };
+        assert!(deny_drops_memory(&with_memory));
+        assert!(!deny_drops_memory(&HookText::from_notes(
+            "__DENY__:why".to_string()
+        )));
     }
 
     #[test]

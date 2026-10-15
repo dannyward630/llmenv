@@ -128,13 +128,26 @@ fn drop_cut_items(text: &str) -> (String, usize) {
     (kept.join("\n"), cut.len())
 }
 
-/// Tells the agent that icm cut some items short, so the drop is not silent (#2756).
-fn note_cut_items(count: usize) {
-    if count > 0 {
-        agent_notice::record(format!(
+/// Bytes the wake-up pack takes from the output budget: the pack, or the project memories alone
+/// when the wake-up call failed, plus the blank line that joins them to the scope set.
+fn pack_bytes(wake: &anyhow::Result<String>, own: &str) -> usize {
+    wake.as_ref().map_or(own.len() + 2, |t| t.len() + 2)
+}
+
+/// The notice for wake-up items that icm cut short, or `None` when none were cut (#2756).
+fn cut_items_notice(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
             "llmenv: {count} memory item(s) were dropped because icm cut them short. Fix: store \
              shorter memories, or run `llmenv doctor` to check the memory server."
-        ));
+        )
+    })
+}
+
+/// Tells the agent that icm cut some items short, so the drop is not silent (#2756).
+fn note_cut_items(count: usize) {
+    if let Some(notice) = cut_items_notice(count) {
+        agent_notice::record(notice);
     }
 }
 
@@ -312,7 +325,7 @@ pub(super) async fn session_start(
     };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
     // only the room that the wake-up pack leaves.
-    let wake_bytes = wake.as_ref().map_or(own.len() + 2, |t| t.len() + 2);
+    let wake_bytes = pack_bytes(&wake, &own);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
     let scope_len = scope.len();
     let outcome = run_scope(ctx, scope, &mut budget).await;
@@ -1135,6 +1148,44 @@ mod tests {
         assert!(
             !out.contains("cut item"),
             "a cut bullet is dropped alone: {out}"
+        );
+        let notice = agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains("1 memory item(s) were dropped"),
+            "the drop must reach the agent: {notice}"
+        );
+    }
+
+    #[test]
+    fn the_cut_notice_names_the_count_and_appears_only_when_items_were_cut() {
+        assert_eq!(cut_items_notice(0), None);
+        assert!(cut_items_notice(1).is_some_and(|n| n.contains("1 memory item(s)")));
+        assert!(cut_items_notice(2).is_some_and(|n| n.contains("2 memory item(s)")));
+    }
+
+    #[test]
+    fn the_pack_budget_counts_the_project_memories_when_wake_up_fails() {
+        let failed: anyhow::Result<String> = Err(anyhow::anyhow!("icm down"));
+        assert_eq!(pack_bytes(&failed, "abc"), 5);
+        let loaded: anyhow::Result<String> = Ok("hello".to_string());
+        assert_eq!(pack_bytes(&loaded, ""), 7);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_skips_the_project_recall() {
+        // A resumed session already holds its pack, so the project recall must not run.
+        let server = server_with(&[("\"project\":\"proj-a\"", "[decisions-a] project fact")]).await;
+        let f = fixture(&server);
+        let wake = Action::WakeUp(crate::hook_run::action::WakeUpArgs {
+            max_tokens: None,
+            project: Some("proj-a".into()),
+        });
+        let out = session_start(&ctx(&f, &json!({"source": "resume"})), wake, vec![])
+            .await
+            .unwrap();
+        assert!(
+            !out.contains("project fact"),
+            "a resume sends no pack: {out}"
         );
     }
 
