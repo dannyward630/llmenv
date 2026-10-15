@@ -65,8 +65,12 @@ impl GitBackend for FakeGit {
         Ok(())
     }
 
-    fn head(&self, repo: &Path) -> Option<String> {
-        self.cloned.borrow().get(repo).cloned()
+    fn head(&self, repo: &Path) -> Result<String, String> {
+        self.cloned
+            .borrow()
+            .get(repo)
+            .cloned()
+            .ok_or_else(|| "mock: no HEAD".to_string())
     }
 }
 
@@ -183,8 +187,8 @@ fn git_clone_failure_with_refresh_true_propagates() {
         fn pull(&self, _: &std::path::Path) -> anyhow::Result<()> {
             unreachable!()
         }
-        fn head(&self, _: &std::path::Path) -> Option<String> {
-            None
+        fn head(&self, _: &std::path::Path) -> Result<String, String> {
+            Err("mock: no HEAD".to_string())
         }
     }
 

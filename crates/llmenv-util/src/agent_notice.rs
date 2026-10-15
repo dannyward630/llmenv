@@ -5,29 +5,72 @@
 
 use std::sync::{Mutex, PoisonError};
 
-/// Notices raised in this process, in the order they were raised.
-static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The most characters of one notice. A notice can carry an error chain, so the cap keeps one
+/// failure from filling the agent's context.
+const MAX_NOTICE_CHARS: usize = 1000;
 
-/// Add a notice for the agent. A notice that is already recorded is not added again, so a
-/// failure that repeats in one process does not repeat its text.
-pub fn record(notice: impl Into<String>) {
-    let notice = notice.into();
-    let mut notices = NOTICES.lock().unwrap_or_else(PoisonError::into_inner);
-    if !notices.contains(&notice) {
-        notices.push(notice);
+/// One line, free of control and bidirectional characters, and at most [`MAX_NOTICE_CHARS`].
+fn clean(text: &str) -> String {
+    let spaced = text.replace(['\n', '\r'], " ");
+    let plain = crate::strip_unsafe_chars(&spaced);
+    plain.chars().take(MAX_NOTICE_CHARS).collect()
+}
+
+/// The notices of one process, in the order they were first raised.
+#[derive(Debug)]
+pub(crate) struct NoticeList {
+    notices: Vec<String>,
+}
+
+impl NoticeList {
+    /// An empty list. `const` so the process-wide list can be a `static`.
+    const fn new() -> Self {
+        Self {
+            notices: Vec::new(),
+        }
     }
+
+    /// Add a notice. A notice that is already present is not added again, so a failure that
+    /// repeats does not repeat its text. The text is cleaned first: control and bidirectional
+    /// characters are removed, line breaks become spaces, and the text is capped, because a
+    /// failure text can carry server or URL content and `current` joins notices with newlines.
+    fn record(&mut self, notice: impl Into<String>) {
+        let notice = clean(&notice.into());
+        if !self.notices.contains(&notice) {
+            self.notices.push(notice);
+        }
+    }
+
+    /// Every notice, one per line, or `None` when there is none.
+    fn current(&self) -> Option<String> {
+        (!self.notices.is_empty()).then(|| self.notices.join("\n"))
+    }
+}
+
+/// Notices raised in this process.
+pub(crate) static NOTICES: Mutex<NoticeList> = Mutex::new(NoticeList::new());
+
+/// Add a notice for the agent. See `NoticeList::record`.
+pub fn record(notice: impl Into<String>) {
+    NOTICES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .record(notice);
 }
 
 /// Every notice of this process, one per line, or `None` when there is none. The list stays set,
 /// so every call returns the same notices.
 pub fn current() -> Option<String> {
-    let notices = NOTICES.lock().unwrap_or_else(PoisonError::into_inner);
-    (!notices.is_empty()).then(|| notices.join("\n"))
+    NOTICES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .current()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{current, record};
+    use super::{NoticeList, current, record};
+    use proptest::prelude::*;
 
     #[test]
     fn a_repeated_notice_is_kept_once() {
@@ -52,5 +95,60 @@ mod tests {
             first < second,
             "the first raised notice must come first: {text}"
         );
+    }
+
+    #[test]
+    fn a_notice_with_a_line_break_stays_one_line() {
+        let mut list = NoticeList::new();
+        list.record("first\nsecond\r\nthird");
+        assert_eq!(list.current().as_deref(), Some("first second  third"));
+    }
+
+    proptest! {
+        #[test]
+        fn every_line_is_clean_and_the_line_count_is_the_distinct_count(
+            raised in proptest::collection::vec("[a-z \n\r\u{202e}\u{200b}\u{7}]{0,12}", 0..16),
+        ) {
+            let mut list = NoticeList::new();
+            for notice in &raised {
+                list.record(notice.as_str());
+            }
+            let text = list.current().unwrap_or_default();
+            for line in text.lines() {
+                prop_assert!(
+                    !line.chars().any(|c| c.is_control() || c == '\u{202e}' || c == '\u{200b}'),
+                    "unclean line: {line:?}"
+                );
+            }
+            let distinct: std::collections::BTreeSet<&str> = text.lines().collect();
+            prop_assert_eq!(distinct.len(), text.lines().count());
+        }
+
+        #[test]
+        fn recording_a_notice_twice_changes_nothing(notice in "[ -~]{0,40}") {
+            let mut once = NoticeList::new();
+            once.record(notice.as_str());
+            let mut twice = NoticeList::new();
+            twice.record(notice.as_str());
+            twice.record(notice.as_str());
+            prop_assert_eq!(once.current(), twice.current());
+        }
+
+        #[test]
+        fn current_is_the_first_occurrence_dedupe_joined_by_newlines(
+            raised in proptest::collection::vec("[a-z \n\r]{0,12}", 0..16),
+        ) {
+            let mut list = NoticeList::new();
+            let mut expected: Vec<String> = Vec::new();
+            for notice in &raised {
+                list.record(notice.as_str());
+                let flat = notice.replace(['\n', '\r'], " ");
+                if !expected.contains(&flat) {
+                    expected.push(flat);
+                }
+            }
+            let want = (!expected.is_empty()).then(|| expected.join("\n"));
+            prop_assert_eq!(list.current(), want);
+        }
     }
 }
