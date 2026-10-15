@@ -233,6 +233,27 @@ fn an_unchanged_stop_reminder_is_emitted_once_and_a_changed_one_again() {
     assert_eq!(stop_output(&dir, &stop), "");
 }
 
+// With no session-log sink, the Stop reminder takes an early return. That return is for Stop
+// only: another event must not return the reminder.
+#[test]
+fn the_stop_fast_path_is_for_stop_only() {
+    let dir = setup("");
+    let config = dir.path().join("config.yaml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("session_log:\n  file:\n    enabled: false\n  transcript:\n    enabled: false\n");
+    fs::write(&config, text).unwrap();
+    task(&dir, &["session", "start", "sprint"]);
+    let prompt = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "sess-1",
+        "prompt": "continue",
+    });
+    hook(&dir, "turn_start", &prompt)
+        .stdout(predicates::str::contains("is open and has no tasks").not());
+    let stop = stop_output(&dir, &stop_payload("sess-1", false));
+    assert!(stop.contains("is open and has no tasks"), "{stop}");
+}
+
 // #2511: a new user prompt makes an unchanged reminder due again.
 #[test]
 fn a_user_prompt_re_arms_the_stop_reminder() {

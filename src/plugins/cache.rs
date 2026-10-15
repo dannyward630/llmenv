@@ -90,7 +90,7 @@ impl GitBackend for SystemGit {
         git_pull(repo)
     }
     fn head(&self, repo: &Path) -> Option<String> {
-        git_head(repo)
+        git_head(repo).inspect_err(|e| tracing::warn!("{e}")).ok()
     }
 }
 
@@ -980,60 +980,41 @@ fn git_pull(repo: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Shared helper for `git rev-parse <ref>`. Returns the trimmed commit SHA on
-/// success, `None` on any failure (IO, non-zero exit, invalid UTF-8, empty output).
-fn git_rev_parse(repo: &Path, ref_name: &str) -> Option<String> {
-    let output = match git::secure_git()
+/// Runs `git rev-parse <ref>` and returns the trimmed commit SHA.
+///
+/// # Errors
+/// Returns git's failure text when git cannot start, exits non-zero, or prints no SHA. The text
+/// names the cause, so a git failure is not reported as a missing ref (#2710).
+fn git_rev_parse(repo: &Path, ref_name: &str) -> Result<String, String> {
+    let output = git::secure_git()
         .args(["rev-parse", ref_name])
         .current_dir(repo)
         .output()
-    {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::warn!(
-                "git rev-parse {ref_name} failed at {}: {}",
-                repo.display(),
-                e
-            );
-            return None;
-        }
-    };
+        .map_err(|e| format!("git could not start in {}: {e}", repo.display()))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        tracing::warn!(
-            "git rev-parse {ref_name} failed at {} with exit {}: {}",
-            repo.display(),
+        return Err(git::git_failure_detail(
+            &output.stderr,
+            &output.stdout,
             output.status,
-            stderr
-        );
-        return None;
+        ));
     }
-    match String::from_utf8(output.stdout) {
-        Ok(sha) => {
-            let sha = sha.trim().to_string();
-            if sha.is_empty() {
-                tracing::warn!(
-                    "git rev-parse {ref_name} at {} returned empty output",
-                    repo.display()
-                );
-                None
-            } else {
-                Some(sha)
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                "git rev-parse {ref_name} output invalid UTF-8 at {}: {}",
-                repo.display(),
-                e
-            );
-            None
-        }
+    let sha = String::from_utf8(output.stdout)
+        .map_err(|e| format!("git printed a non-UTF-8 SHA in {}: {e}", repo.display()))?;
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return Err(format!(
+            "git rev-parse {ref_name} printed no SHA in {}",
+            repo.display()
+        ));
     }
+    Ok(sha.to_string())
 }
 
-/// Resolve the current HEAD sha of a git checkout, or `None` if it can't be read.
-pub(crate) fn git_head(repo: &Path) -> Option<String> {
+/// Resolve the current HEAD sha of a git checkout.
+///
+/// # Errors
+/// The git failure text from [`git_rev_parse`] when HEAD cannot be read.
+pub(crate) fn git_head(repo: &Path) -> Result<String, String> {
     git_rev_parse(repo, "HEAD")
 }
 
@@ -1041,9 +1022,9 @@ pub(crate) fn git_head(repo: &Path) -> Option<String> {
 /// This dereferences annotated tags to the underlying commit SHA, unlike bare
 /// `git rev-parse <ref>` which returns the tag object SHA for annotated tags.
 ///
-/// Returns `None` when the ref cannot be resolved (doesn't exist, or the
-/// checked-out repo can't be read).
-pub(crate) fn git_peeled_ref(repo: &Path, ref_name: &str) -> Option<String> {
+/// # Errors
+/// The git failure text from [`git_rev_parse`], which also covers a ref that does not exist.
+pub(crate) fn git_peeled_ref(repo: &Path, ref_name: &str) -> Result<String, String> {
     git_rev_parse(repo, &format!("{ref_name}^{{commit}}"))
 }
 
@@ -2186,7 +2167,7 @@ mod tests {
         let source = format!("{}#{first}", src.path().display());
         git_clone(&source, &clone).unwrap();
         assert_eq!(std::fs::read_to_string(clone.join("f")).unwrap(), "one");
-        assert_eq!(git_head(&clone).as_deref(), Some(first.as_str()));
+        assert_eq!(git_head(&clone).ok().as_deref(), Some(first.as_str()));
 
         let bad = dest.path().join("bad");
         let missing = format!("{}#{}", src.path().display(), "0".repeat(40));
@@ -2597,7 +2578,7 @@ mod tests {
         // git_head on a non-repo returns None immediately (does not hang).
         // If stdin were inherited and git prompted, this would block.
         let head = git_head(tmp.path());
-        assert!(head.is_none(), "git_head on non-repo should return None");
+        assert!(head.is_err(), "git_head on non-repo should return an error");
 
         // git_clone on an invalid local URL fails fast (exits non-zero, no hang).
         let dest = tmp.path().join("clone_dest");
@@ -2610,5 +2591,30 @@ mod tests {
         // git_pull on a non-repo fails fast.
         let err = git_pull(tmp.path());
         assert!(err.is_err(), "git_pull on non-repo should fail, not hang");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod git_failure_tests {
+    use super::{git_head, git_peeled_ref};
+
+    /// A `.git` file that names a missing gitdir makes git fail with exit 128, not "unset".
+    fn broken_checkout() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(".git"),
+            "gitdir: /nonexistent/llmenv-2710\n",
+        )
+        .expect("write");
+        dir
+    }
+
+    #[test]
+    fn a_git_failure_is_reported_not_read_as_a_missing_ref() {
+        let dir = broken_checkout();
+        let err = git_head(dir.path()).expect_err("a broken checkout has no HEAD");
+        assert!(!err.is_empty(), "the failure must carry git's text");
+        assert!(git_peeled_ref(dir.path(), "v1").is_err());
     }
 }

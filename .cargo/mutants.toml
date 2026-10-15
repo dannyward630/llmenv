@@ -43,4 +43,6 @@ exclude_re = [
   # The returned value is the same either way.
   "replace match guard e.kind\\(\\) == std::io::ErrorKind::NotFound with (true|false) in read_dir_logged",
   "replace == with != in read_dir_logged",
+  # The NotFound guard in read_dedup_snapshot only chooses between a silent None and a logged None.
+  "replace != with == in read_dedup_snapshot",
 ]
