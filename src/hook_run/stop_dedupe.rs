@@ -93,11 +93,23 @@ fn load_last(path: &Path) -> Option<LastReminder> {
         Err(e) => {
             // Error level: the default log filter is ERROR, so a warn is never shown (#2657).
             tracing::error!("cannot read stop_dedupe state {}: {e}", path.display());
+            crate::agent_notice::record(format!(
+                "llmenv could not read the stop reminder state {}: {e}. The state is reset and \
+                 the next save replaces the file. Fix: check the file's permissions.",
+                path.display()
+            ));
             return None;
         }
     };
     serde_json::from_str(&text)
-        .map_err(|e| tracing::error!("malformed stop_dedupe state {}: {e}", path.display()))
+        .map_err(|e| {
+            tracing::error!("malformed stop_dedupe state {}: {e}", path.display());
+            crate::agent_notice::record(format!(
+                "llmenv found a malformed stop reminder state {}: {e}. The state is reset and \
+                 the next save replaces the file. Fix: delete the file.",
+                path.display()
+            ));
+        })
         .ok()
 }
 
@@ -211,6 +223,20 @@ mod tests {
         std::fs::write(&path, "not json").expect("write");
         assert_eq!(emit_once(dir.path(), Some("s1"), "a"), "a");
         assert_eq!(emit_once(dir.path(), Some("s1"), "a"), "");
+    }
+
+    #[test]
+    fn malformed_state_file_tells_the_agent_it_was_reset() {
+        let dir = TempDir::new().expect("test");
+        let path = state_path(dir.path(), Some("s1")).expect("path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, "not json").expect("write");
+        assert!(load_last(&path).is_none());
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            notice.contains(&format!("malformed stop reminder state {}", path.display())),
+            "the agent must see the reset: {notice}"
+        );
     }
 
     proptest! {
