@@ -1565,9 +1565,7 @@ fn tasks_for_current_project(state_dir: &Path, tasks: Vec<Task>) -> anyhow::Resu
         Ok(project) => project,
         Err(e) => {
             tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            llmenv_util::agent_notice::record(
-                "llmenv: the task reminder was skipped: the project tag cannot be resolved.",
-            );
+            llmenv_util::agent_notice::record(TAG_UNRESOLVED_NOTICE);
             return Ok(Vec::new());
         }
     };
@@ -1792,14 +1790,16 @@ fn finish_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) 
 
 /// Run `reminder` for the current project. A project tag that cannot be resolved is logged, and
 /// the reminder is skipped: a hook must never block the agent.
+/// Shown to the agent when the task reminder cannot find its project tag.
+const TAG_UNRESOLVED_NOTICE: &str = "llmenv: the task reminder was skipped: the project tag cannot \
+     be resolved. Fix: run this from a git repository or a named project folder.";
+
 fn for_current_project(reminder: impl FnOnce(&str) -> String) -> String {
     match project::current_tag() {
         Ok(project) => reminder(&project),
         Err(e) => {
             tracing::error!("project::current_tag failed, so the task reminder is skipped: {e:#}");
-            llmenv_util::agent_notice::record(
-                "llmenv: the task reminder was skipped: the project tag cannot be resolved.",
-            );
+            llmenv_util::agent_notice::record(TAG_UNRESOLVED_NOTICE);
             String::new()
         }
     }
