@@ -316,6 +316,7 @@ fn sync_git(
         Some(&extra),
     );
 
+    require_git_dir(&dest, &format!("marketplace '{}'", m.name))?;
     let head = git.head(&dest);
     // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
     // the clone is broken and we shouldn't silently cache it with an unstable hash.
@@ -698,6 +699,7 @@ fn sync_external_plugin_with(
                 source: e,
             })?;
     }
+    require_git_dir(&dest, &format!("plugin '{plugin}@{marketplace}'"))?;
     let head = git.head(&dest);
     // After any git operation (clone, pull), HEAD must be resolvable. If it isn't,
     // the clone is broken and we shouldn't silently cache it with an unstable hash.
@@ -716,6 +718,20 @@ fn sync_external_plugin_with(
         install_location: dest,
         head: head.ok(),
     })
+}
+
+/// A clone with no `.git` after a sync has no commit to hash. Caching it with `head: None` gave
+/// the agent an install with no SHA and no error, so the clone is removed and the sync fails
+/// (#2750). `label` names the marketplace or plugin in the error.
+fn require_git_dir(dest: &Path, label: &str) -> Result<(), SyncError> {
+    if dest.join(".git").exists() {
+        return Ok(());
+    }
+    let note = broken_clone_note(dest);
+    Err(SyncError::Other(anyhow::anyhow!(
+        "{label}: the clone at {} has no .git after sync ({note})",
+        dest.display()
+    )))
 }
 
 /// Remove a clone whose git HEAD does not resolve. Returns the note for the error message. The note
@@ -1422,6 +1438,40 @@ mod tests {
 
     fn sync_plugin(cache: &Path, source: &str, refresh: bool, git: &CallLog) {
         sync_external_plugin_with(cache, "market", "plugin", source, refresh, git).unwrap();
+    }
+
+    #[test]
+    fn a_plugin_clone_without_git_after_sync_is_an_error_not_an_unhashed_success() {
+        // A clone with no `.git` has no commit to hash. Caching it with `head: None` gave the
+        // agent a plugin with no install path or SHA, and no error (#2750).
+        struct NoGitDir;
+        impl GitBackend for NoGitDir {
+            fn clone(&self, _: &str, dest: &Path) -> Result<()> {
+                std::fs::create_dir_all(dest).unwrap();
+                Ok(())
+            }
+            fn pull(&self, _: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("abc123".into())
+            }
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let err = sync_external_plugin_with(
+            cache.path(),
+            "market",
+            "plugin",
+            "https://github.com/example/plugin.git",
+            true,
+            &NoGitDir,
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(".git"),
+            "the error must name the missing .git: {text}"
+        );
     }
 
     #[test]

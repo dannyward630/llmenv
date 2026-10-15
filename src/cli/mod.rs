@@ -3020,7 +3020,7 @@ fn sync_plugin_payloads(
 ) -> Vec<crate::plugins::resolve::ResolvedPlugin> {
     plugins
         .into_iter()
-        .map(|mut p| {
+        .filter_map(|mut p| {
             let mkt_path = crate::plugins::cache::marketplace_path(cache_root, &p.marketplace);
             let entries = match crate::plugins::cache::read_marketplace_plugins(&mkt_path) {
                 Ok(entries) => entries,
@@ -3035,7 +3035,7 @@ fn sync_plugin_payloads(
                         p.marketplace,
                         p.plugin
                     );
-                    return p;
+                    return Some(p);
                 }
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
@@ -3046,10 +3046,10 @@ fn sync_plugin_payloads(
                     p.plugin,
                     p.marketplace
                 );
-                return p;
+                return Some(p);
             };
             if !crate::plugins::cache::is_external_plugin_source(&entry.source) {
-                return p;
+                return Some(p);
             }
             match crate::plugins::cache::sync_plugin_entry(cache_root, &p.marketplace, entry, false)
             {
@@ -3065,13 +3065,19 @@ fn sync_plugin_payloads(
                     );
                 }
                 Err(e) => {
-                    eprintln!(
-                        "warning: external plugin '{}@{}' payload lookup failed: {e:#}",
+                    // A plugin with no install path would load from nowhere, so it is dropped.
+                    // The agent is told why, so the missing plugin is not read as "not installed".
+                    let notice = format!(
+                        "llmenv: external plugin '{}@{}' was not loaded: its payload lookup \
+                         failed ({e:#}). Fix: run `llmenv plugin-sync` to refresh the clone.",
                         p.plugin, p.marketplace
                     );
+                    eprintln!("warning: {notice}");
+                    crate::agent_notice::record(notice);
+                    return None;
                 }
             }
-            p
+            Some(p)
         })
         .collect()
 }
