@@ -724,7 +724,9 @@ fn sync_external_plugin_with(
 /// the agent an install with no SHA and no error, so the clone is removed and the sync fails
 /// (#2750). `label` names the marketplace or plugin in the error.
 fn require_git_dir(dest: &Path, label: &str) -> Result<(), SyncError> {
-    if dest.join(".git").exists() {
+    // `symlink_metadata` sees a dangling `.git` link. `exists` would call it missing and delete
+    // the clone, when the HEAD check can report the broken link instead.
+    if std::fs::symlink_metadata(dest.join(".git")).is_ok() {
         return Ok(());
     }
     let note = broken_clone_note(dest);
