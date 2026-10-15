@@ -336,6 +336,13 @@ fn suppressed_bundle_capabilities(
         .into_iter()
         .filter_map(|r| {
             crate::merge::read_bundle_yaml(&r.path, &r.name)
+                .inspect_err(|e| {
+                    crate::agent_notice::record(format!(
+                        "llmenv could not read bundle {} to check its suppressed capabilities: \
+                         {e:#}. Fix: check the bundle's bundle.yaml.",
+                        r.name
+                    ));
+                })
                 .ok()
                 .flatten()
                 .map(|caps| (r.name, caps))

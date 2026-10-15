@@ -90,7 +90,9 @@ fn run_consolidation_at(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let state_dir = crate::paths::state_dir().ok();
+    let state_dir = crate::paths::state_dir()
+        .inspect_err(|e| tracing::error!("consolidation has no state dir: {e:#}"))
+        .ok();
     let _result = rt.block_on(consolidation::run(
         cc,
         &client,

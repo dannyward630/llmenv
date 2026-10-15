@@ -265,12 +265,19 @@ fn read(state_dir: &Path, session_id: &str) -> Stored {
     )
 }
 
-/// Read the document. A missing, corrupt, or unreadable file gives `None`. The last two warn,
-/// because the next write replaces the file.
+/// Read the document. A missing file gives `None`. A corrupt or unreadable file also gives `None`,
+/// and the agent is told, because the next write replaces the file.
 pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
     match read(state_dir, session_id) {
         Stored::Doc(doc) => Some(*doc),
-        Stored::Missing | Stored::Unreadable => None,
+        Stored::Missing => None,
+        Stored::Unreadable => {
+            crate::agent_notice::record(
+                "llmenv could not read the agent config, so its model and creation time are not \
+                 restored. Fix: delete the agent config file for this session.",
+            );
+            None
+        }
     }
 }
 
@@ -280,6 +287,10 @@ fn write_session_start(state_dir: &Path, session_id: &str, mut doc: AgentConfig)
     let dir = state_dir.join(DIR);
     let Some(_lock) = super::session_state::lock_state_file(&dir, session_id, "agent config")
     else {
+        crate::agent_notice::record(
+            "llmenv could not update the agent config: it is locked or cannot be opened, so the \
+             model history was not recorded. Fix: run `llmenv doctor` to check the state directory.",
+        );
         return;
     };
     match read(state_dir, session_id) {
@@ -306,6 +317,10 @@ fn apply_model_switch(
     let dir = state_dir.join(DIR);
     let Some(_lock) = super::session_state::lock_state_file(&dir, session_id, "agent config")
     else {
+        crate::agent_notice::record(
+            "llmenv could not update the agent config: it is locked or cannot be opened, so the \
+             model history was not recorded. Fix: run `llmenv doctor` to check the state directory.",
+        );
         return;
     };
     let mut doc = match read(state_dir, session_id) {
@@ -348,6 +363,10 @@ fn store(state_dir: &Path, session_id: &str, doc: &AgentConfig) {
         .and_then(|bytes| crate::paths::write_owner_only_atomic(&path, &bytes));
     if let Err(e) = result {
         tracing::error!("cannot save agent config {}: {e}", path.display());
+        crate::agent_notice::record(format!(
+            "llmenv could not save the agent config {}: {e}. Fix: check the file's permissions.",
+            path.display()
+        ));
     }
 }
 
