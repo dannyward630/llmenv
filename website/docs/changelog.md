@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A stateless recall at the start of a turn, with no session id under adaptive recall, scopes to the session project. Before, it searched every project's memories (#2765) [fix:hook]
+- A scope recall that the output budget cuts short leaves a notice that names the count of skipped recalls, instead of dropping them silently (#2766) [fix:hook]
+- A failed first session-start update to the recall ledger leaves a notice for the agent, even when no context reset was requested (#2767) [fix:hook]
+- A working directory with no name, such as `/`, fails the project lookup with an error. Before, the recall ran with no project scope (#2768) [fix:mcp]
+- A plugin or marketplace clone with no `.git` after sync fails with an error, instead of caching with no commit hash (#2750) [fix:adapter]
+- An external plugin whose payload lookup fails is not loaded, and the agent gets a notice with the fix. Before, it loaded with no install path (#2750) [fix:cli]
 - The task commit gate sees a commit behind `eval`, `env -S`, `sh -c`, `bash -c`, `timeout`, `env`, `nice`, `sudo`, `xargs`, `stdbuf`, `setsid`, `flock`, and the other wrappers, with their options and long options. `timeout --signal KILL 60 git commit` and `env -S 'git commit'` are denied like a plain `git commit`. Nested `eval` and `sh -c` count toward the substitution depth limit, so a long chain fails closed instead of growing the hook stack. The slippage check sees writes behind the same wrappers (#2627, #2542) [fix:hook]
 - The task commit gate denies a commit that it cannot check. That covers a state directory that cannot be resolved, a payload with no session id, a nudge state file that cannot be read or saved, and a task store that cannot be read. The deny names the cause and the fix, instead of allowing the commit (#2630) [fix:hook]
 - Session reminders say that the task store cannot be read, instead of reporting that no session is open or that a session has no tasks. `llmenv task session summary`, `llmenv task session show`, `llmenv task ls --all`, and `llmenv task show current` fail with an error when a task file cannot be read (#2608) [fix:task]
