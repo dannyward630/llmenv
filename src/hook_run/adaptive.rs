@@ -1100,13 +1100,12 @@ mod tests {
             .update("s1", |l| l.project = Some("proj-a".to_string()));
         let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
         let out = tool_failure(&ctx(&f, &payload)).await.unwrap();
-        let own = out
-            .find("[own]")
-            .unwrap_or_else(|| panic!("no project record: {out}"));
-        let fix = out
-            .find("[fix]")
-            .unwrap_or_else(|| panic!("no shared fix: {out}"));
-        assert!(own < fix, "project record must come first: {out}");
+        let own = out.find("[own]");
+        let fix = out.find("[fix]");
+        assert!(
+            matches!((own, fix), (Some(o), Some(f)) if o < f),
+            "the project record must come first, and both must be present: {out}"
+        );
     }
 
     #[test]

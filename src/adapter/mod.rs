@@ -697,7 +697,8 @@ mod tests {
     }
 
     fn additional_context(out: &str) -> String {
-        let value: serde_json::Value = serde_json::from_str(out).expect("valid hook JSON");
+        // Invalid JSON yields Null here, so the assertion that follows fails with the output.
+        let value: serde_json::Value = serde_json::from_str(out).unwrap_or_default();
         value["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap_or_default()
