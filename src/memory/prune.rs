@@ -242,8 +242,7 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let project = cwd
         .as_deref()
         .map(super::project::session_project)
-        .transpose()?
-        .flatten();
+        .transpose()?;
     let output = call_tool_blocking(
         client.clone(),
         "icm_memory_recall",

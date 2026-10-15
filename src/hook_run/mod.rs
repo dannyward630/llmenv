@@ -512,7 +512,8 @@ fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
 /// The `icm_wake_up` arguments for `event`, whose project also scopes the
 /// stateless `TurnStart` recall (#2253). The project lookup runs git, so only
 /// `SessionStart` and a stateless `TurnStart` pay for it; the adaptive
-/// `TurnStart` reads the project from its session ledger.
+/// `TurnStart` reads the project from its session ledger. Whether a `TurnStart`
+/// is stateless follows [`uses_adaptive`], so a missing session id still scopes.
 ///
 /// # Errors
 /// The project cannot be named. The caller skips the event's memory work, because a recall
@@ -522,15 +523,17 @@ fn wake_args(
     settings: Option<MemoryHookSettings>,
     payload: &serde_json::Value,
     cwd: &str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<WakeUpArgs> {
-    let adaptive = settings.is_some_and(|s| s.adaptive_recall);
     let wants_project = match event {
         HookEvent::SessionStart => true,
-        HookEvent::TurnStart => !adaptive,
+        HookEvent::TurnStart => !uses_adaptive(event, settings, session_id),
         _ => false,
     };
     let project = if wants_project {
-        crate::memory::project::session_project(&hook_cwd(payload, cwd))?
+        Some(crate::memory::project::session_project(&hook_cwd(
+            payload, cwd,
+        ))?)
     } else {
         None
     };
@@ -1613,17 +1616,18 @@ fn run_inner(
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
-        let (wake, memory_notice) = match wake_args(event, settings, stdin_payload, &env.cwd) {
-            Ok(args) => (args, None),
-            Err(e) => {
-                tracing::error!("memory skipped for {event}: {e:#}");
-                let args = WakeUpArgs {
-                    max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
-                    project: None,
-                };
-                (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
-            }
-        };
+        let (wake, memory_notice) =
+            match wake_args(event, settings, stdin_payload, &env.cwd, claude_session_id) {
+                Ok(args) => (args, None),
+                Err(e) => {
+                    tracing::error!("memory skipped for {event}: {e:#}");
+                    let args = WakeUpArgs {
+                        max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
+                        project: None,
+                    };
+                    (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
+                }
+            };
         let memory_skipped = memory_notice.is_some();
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
@@ -8039,20 +8043,29 @@ mod adaptive_routing_tests {
             default_type: None,
             default_importance: None,
         });
-        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/")
+        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/", Some("s1"))
             .ok()
             .and_then(|w| w.project);
         assert_eq!(start.as_deref(), Some("wake-repo"));
         // #2253: the stateless TurnStart recall is scoped to the session project.
-        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/")
+        let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/", Some("s1"))
             .ok()
             .and_then(|w| w.project);
         assert_eq!(stateless.as_deref(), Some("wake-repo"));
-        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/")
+        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/", Some("s1"))
             .ok()
             .and_then(|w| w.project);
         assert_eq!(adaptive_turn, None, "the ledger holds the project");
-        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/")
+        // Adaptive is on, but no session id means the stateless path runs. It must still scope.
+        let no_session = wake_args(HookEvent::TurnStart, adaptive, &payload, "/", None)
+            .ok()
+            .and_then(|w| w.project);
+        assert_eq!(
+            no_session.as_deref(),
+            Some("wake-repo"),
+            "no ledger, so no project otherwise"
+        );
+        let other = wake_args(HookEvent::PostToolUse, None, &payload, "/", None)
             .ok()
             .and_then(|w| w.project);
         assert_eq!(other, None);
@@ -8061,7 +8074,7 @@ mod adaptive_routing_tests {
     #[test]
     fn wake_args_refuses_to_guess_a_project_when_git_cannot_start() {
         let payload = serde_json::json!({ "cwd": "/no/such/dir/for/llmenv-hook" });
-        let err = wake_args(HookEvent::SessionStart, None, &payload, "/")
+        let err = wake_args(HookEvent::SessionStart, None, &payload, "/", None)
             .err()
             .map(|e| format!("{e:#}"))
             .unwrap_or_default();

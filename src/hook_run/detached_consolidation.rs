@@ -71,14 +71,6 @@ fn run_consolidation_at(
     // A lookup that fails leaves the checkpoint unsettled, so the next session runs it again.
     let project = crate::memory::project::session_project(&cwd)
         .map_err(|e| anyhow::anyhow!("consolidation-run: cannot name the project: {e:#}"))?;
-    let Some(project) = project else {
-        tracing::error!(
-            "consolidation-run: no project name for {}; consolidation skipped",
-            cwd.display()
-        );
-        settle(checkpoint);
-        return Ok(());
-    };
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
