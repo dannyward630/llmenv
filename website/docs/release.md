@@ -187,7 +187,9 @@ The release workflow requires one secret (repo Settings → Secrets and variable
 - `HOMEBREW_TAP_TOKEN` — GitHub PAT with write access to `phaedrus1992/homebrew-tap`
 
 crates.io needs no secret, because the workflow uses trusted publishing.
-The `forward-merge-release` workflow also reads an optional `FORWARD_MERGE_PAT` secret (see [Branch Strategy](#branch-strategy)).
+The `forward-merge-release` workflow runs as the `phaedrus-sync` GitHub App (see [Branch Strategy](#branch-strategy)).
+It needs two repository secrets, `SYNC_APP_ID` and `SYNC_APP_PRIVATE_KEY`, for an App installed on this repository.
+The optional `FORWARD_MERGE_PAT` secret is a fallback, used unless both App secrets are set.
 
 **Security notes:**
 
@@ -220,11 +222,14 @@ It merges the branch into the next release branch, and that branch into the next
 Each link of the chain merges the previous link, so `main` also receives the commits of the branches in between.
 
 - A target that already holds the source is skipped.
-- Without the `FORWARD_MERGE_PAT` secret, the workflow pushes the merge to the target branch.
-  If the push is rejected, it opens a pull request and stops.
-- With `FORWARD_MERGE_PAT` set, the workflow never pushes to a target.
-  It always opens a `forward-merge/<source>-to-<target>` pull request, so the required checks run first.
-  When someone merges that pull request, the workflow starts again from the same source, so the rest of the chain is merged.
+- The workflow never pushes a merge to a target branch.
+  Branch protection rejects that push, so the workflow opens a `forward-merge/<source>-to-<target>` pull request.
+  Required checks run on that pull request first.
+- The workflow enables auto-merge on that pull request, with a merge commit.
+  GitHub merges it when the checks pass, and the merge starts the workflow again from the same source, so the rest of the chain is merged.
+- If auto-merge cannot be enabled, the run warns, and a person merges the pull request by hand.
+- A run that opens a pull request exits successfully.
+  A conflict or another error still fails the run.
 - A merge that conflicts is resolved by the workflow only for three kinds of file.
   It regenerates `website/docs/changelog.md` and the two lockfiles (`Cargo.lock`, `website/package-lock.json`).
   It keeps the target's own version in the `Cargo.toml` files, when the source changed nothing else there.
