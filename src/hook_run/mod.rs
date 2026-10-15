@@ -3221,7 +3221,7 @@ fn append_section(out: &mut String, section: &str) {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::expect_fun_call)]
 mod pipeline_recovery_tests {
-    use super::{HookEvent, join_precomputed, recover_from_pipeline_error};
+    use super::{HookEvent, join_precomputed, read_dedup_snapshot, recover_from_pipeline_error};
     use proptest::strategy::Strategy as _;
 
     fn failure() -> anyhow::Error {
@@ -3282,6 +3282,19 @@ mod pipeline_recovery_tests {
             None,
         ]);
         assert_eq!(joined.as_deref(), Some("__DENY__:already read\nturn"));
+    }
+
+    #[test]
+    fn the_dedup_snapshot_reads_the_stored_chunk_and_a_missing_file_as_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session_end_dedup");
+        assert_eq!(
+            read_dedup_snapshot(&path),
+            None,
+            "a first run has no snapshot"
+        );
+        std::fs::write(&path, "stored chunk").expect("write snapshot");
+        assert_eq!(read_dedup_snapshot(&path).as_deref(), Some("stored chunk"));
     }
 
     /// A slot value: absent, empty, plain text, or a deny marker.
