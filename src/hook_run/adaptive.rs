@@ -224,8 +224,9 @@ pub(super) async fn session_start(
             ctx.payload["source"].as_str().unwrap_or("a context reset")
         );
         agent_notice::record(
-            "llmenv: the recall ledger was not reset after a context reset. \
-             Records seen before the reset may stay filtered from recall.",
+            "llmenv: the recall ledger was not reset after a context reset (the state file was \
+             locked or unreadable). Records seen before the reset may stay filtered from recall. \
+             Fix: run `llmenv doctor` to check the state directory.",
         );
     }
     let sent = updated.unwrap_or_default();
@@ -273,12 +274,14 @@ pub(super) async fn session_start(
 }
 
 /// Notice for a ledger update that did not run: the next recall may repeat records (#2729).
-const RECALL_STATE_UNSAVED: &str =
-    "llmenv: recall state was not saved, so some records may repeat.";
+const RECALL_STATE_UNSAVED: &str = "llmenv: recall state was not saved (the state file was locked \
+     or unreadable), so some records may repeat. Fix: run `llmenv doctor` to check the state \
+     directory.";
 
 /// Notice for tool activity that was not recorded: a later recall runs without it (#2729).
-const ACTIVITY_UNSAVED: &str =
-    "llmenv: recent tool activity was not saved, so later recall may miss it.";
+const ACTIVITY_UNSAVED: &str = "llmenv: recent tool activity was not saved (the state file was \
+     locked or unreadable), so later recall may miss it. Fix: run `llmenv doctor` to check the \
+     state directory.";
 
 /// Tells the agent when a ledger update did not run (unsafe id, busy lock, or unreadable file).
 fn note_unless_saved<T>(saved: Option<T>, notice: &str) {
@@ -290,7 +293,8 @@ fn note_unless_saved<T>(saved: Option<T>, notice: &str) {
 /// Tells the agent that recall was skipped, so it is not read as "nothing relevant" (#2664).
 fn note_skipped() {
     agent_notice::record(
-        "llmenv: recall was skipped: the recall ledger cannot be read or updated.",
+        "llmenv: recall was skipped: the recall ledger cannot be read or updated. Fix: run \
+         `llmenv doctor` to check the state directory.",
     );
 }
 
