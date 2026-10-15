@@ -123,6 +123,11 @@ fn save(path: &Path, last: &LastReminder) {
         .and_then(|json| crate::paths::write_owner_only_atomic(path, &json));
     if let Err(e) = result {
         tracing::error!("cannot save stop_dedupe state {}: {e}", path.display());
+        crate::agent_notice::record(format!(
+            "llmenv could not save the stop reminder state {}: {e}. The reminder may repeat. \
+             Fix: check the state directory's permissions.",
+            path.display()
+        ));
     }
 }
 
@@ -130,7 +135,14 @@ fn clear_last(path: &Path) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::error!("cannot clear stop_dedupe state {}: {e}", path.display()),
+        Err(e) => {
+            tracing::error!("cannot clear stop_dedupe state {}: {e}", path.display());
+            crate::agent_notice::record(format!(
+                "llmenv could not clear the stop reminder state {}: {e}. A repeated reminder may \
+                 stay hidden. Fix: delete the file or check its permissions.",
+                path.display()
+            ));
+        }
     }
 }
 

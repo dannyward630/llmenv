@@ -265,12 +265,19 @@ fn read(state_dir: &Path, session_id: &str) -> Stored {
     )
 }
 
-/// Read the document. A missing, corrupt, or unreadable file gives `None`. The last two warn,
-/// because the next write replaces the file.
+/// Read the document. A missing file gives `None`. A corrupt or unreadable file also gives `None`,
+/// and the agent is told, because the next write replaces the file.
 pub(crate) fn load(state_dir: &Path, session_id: &str) -> Option<AgentConfig> {
     match read(state_dir, session_id) {
         Stored::Doc(doc) => Some(*doc),
-        Stored::Missing | Stored::Unreadable => None,
+        Stored::Missing => None,
+        Stored::Unreadable => {
+            crate::agent_notice::record(
+                "llmenv could not read the agent config, so its model and creation time are not \
+                 restored. Fix: delete the agent config file for this session.",
+            );
+            None
+        }
     }
 }
 

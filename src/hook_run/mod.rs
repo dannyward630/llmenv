@@ -710,7 +710,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     let claude_code_version = match crate::env_var::utf8_var("CLAUDE_CODE_VERSION") {
         Ok(version) => version.unwrap_or_default(),
         Err(e) => {
-            tracing::warn!("{e:#}");
+            tracing::error!("{e:#}");
             String::new()
         }
     };
@@ -1594,9 +1594,13 @@ fn run_inner(
         let memory_skipped = memory_notice.is_some();
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
-            .inspect_err(
-                |e| error!(error = %e, "no ICM transcript state: the session map is unavailable"),
-            )
+            .inspect_err(|e| {
+                error!(error = %e, "no ICM transcript state: the session map is unavailable");
+                crate::agent_notice::record(format!(
+                    "llmenv could not open the ICM transcript state, so this session's transcript link is \
+                     not recorded: {e:#}. Fix: run `llmenv doctor` to check the state directory."
+                ));
+            })
             .ok();
         let ctx = build_scope_context(
             &active,
