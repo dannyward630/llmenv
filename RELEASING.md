@@ -50,9 +50,9 @@ the cross-listing rule below takes over.
 release branch. It merges each branch into the next one up to `main`, and it
 resolves the conflicts that every forward-merge produces (the generated
 `website/docs/changelog.md`, the lockfiles, and the version in the `Cargo.toml`
-files). If it pushes to a target and the push is rejected, or if the
-`FORWARD_MERGE_PAT` secret is set, it opens a `forward-merge/<source>-to-<target>`
-pull request instead. If a merge hits any other conflict, the run fails and the
+files). It never pushes to a target. It opens a `forward-merge/<source>-to-<target>`
+pull request and enables auto-merge on it, because branch protection rejects a direct
+push. If a merge hits any other conflict, the run fails and the
 chain stops: merge the source into the target by hand, as the error says. Don't
 work around it by applying the change twice. An old `forward-merge/` branch that
 has no open PR and holds only workflow-written commits is reset to a fresh merge
