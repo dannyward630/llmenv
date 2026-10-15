@@ -525,9 +525,13 @@ fn wake_args(
     cwd: &str,
     session_id: Option<&str>,
 ) -> anyhow::Result<WakeUpArgs> {
+    // The adaptive flow also needs a state dir. Without one, the stateless actions run, and
+    // they recall with the project this lookup supplies (#2765).
+    let adaptive_turn =
+        uses_adaptive(event, settings, session_id) && crate::paths::state_dir().is_ok();
     let wants_project = match event {
         HookEvent::SessionStart => true,
-        HookEvent::TurnStart => !uses_adaptive(event, settings, session_id),
+        HookEvent::TurnStart => !adaptive_turn,
         _ => false,
     };
     let project = if wants_project {

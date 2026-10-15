@@ -245,12 +245,6 @@ fn resets_ledger(source: Option<&str>) -> bool {
     super::session_state::context_was_lost(source)
 }
 
-/// Whether a context reset left the recall ledger as it was: the ledger update failed (a busy
-/// lock or an unreadable file) while the session asked for a reset.
-fn reset_left_undone(updated: bool, reset: bool) -> bool {
-    reset && !updated
-}
-
 /// Notice for a context reset that the ledger did not apply. Records seen before the
 /// reset stay filtered from recall, so the agent must hear about it.
 const RESET_UNDONE: &str = "llmenv: the recall ledger was not reset after a context reset (the \
@@ -261,22 +255,23 @@ const RESET_UNDONE: &str = "llmenv: the recall ledger was not reset after a cont
 /// update is the only write that carries this session's reset and project, so a failure here
 /// is noticed even when the second update later succeeds (#2767).
 fn first_update_notice(saved: bool, reset: bool) -> Option<&'static str> {
-    if reset_left_undone(saved, reset) {
-        Some(RESET_UNDONE)
-    } else if saved {
+    if saved {
         None
+    } else if reset {
+        Some(RESET_UNDONE)
     } else {
         Some(RECALL_STATE_UNSAVED)
     }
 }
 
 /// The notice for scope recalls that the output budget cut off, or `None` when none were cut
-/// (#2766). The agent is told the count, so a dropped recall is not read as "nothing relevant".
+/// (#2766). The recalls are unknown to the agent, not empty, so the notice says so.
 fn scope_cut_notice(skipped: usize) -> Option<String> {
     (skipped > 0).then(|| {
         format!(
             "llmenv: {skipped} recall action(s) were skipped because the output budget was full. \
-             Fix: store shorter memories, or narrow the recall scope."
+             Those recalls are unknown, not empty. Fix: store shorter memories, so more recalls \
+             fit the budget."
         )
     })
 }
@@ -288,20 +283,18 @@ async fn run_scope(
     budget: &mut RecallBudget,
 ) -> Outcome {
     let mut outcome = Outcome::default();
-    let total = scope.len();
-    let mut ran = 0;
-    for action in scope {
-        if budget.is_full() {
+    let mut actions = scope.into_iter();
+    while !budget.is_full() {
+        let Some(action) = actions.next() else {
             break;
-        }
+        };
         outcome.push(Some(action.run(ctx.client, "", "").await));
         if let Some(text) = outcome.texts.last() {
             budget.add_text(text);
         }
         outcome.texts.clear();
-        ran += 1;
     }
-    if let Some(notice) = scope_cut_notice(total - ran) {
+    if let Some(notice) = scope_cut_notice(actions.len()) {
         agent_notice::record(notice);
     }
     outcome
@@ -331,10 +324,7 @@ pub(super) async fn session_start(
         l.sent_for(MAIN_AGENT)
     });
     if let Some(notice) = first_update_notice(updated.is_some(), reset) {
-        tracing::error!(
-            "session start ledger update failed (source: {}): {notice}",
-            ctx.payload["source"].as_str().unwrap_or("none")
-        );
+        tracing::error!("session start ledger update failed (reset requested: {reset}): {notice}");
         agent_notice::record(notice);
     }
     let sent = updated.unwrap_or_default();
@@ -666,14 +656,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("test");
         let store = LedgerStore::new(dir.path());
         assert!(ledger_or_skip(&store, "../escape", "test").is_none());
-    }
-
-    #[test]
-    fn a_reset_is_undone_only_when_the_update_failed() {
-        assert!(reset_left_undone(false, true));
-        assert!(!reset_left_undone(true, true));
-        assert!(!reset_left_undone(false, false));
-        assert!(!reset_left_undone(true, false));
     }
 
     #[test]
