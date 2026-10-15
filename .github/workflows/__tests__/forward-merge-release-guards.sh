@@ -82,6 +82,7 @@ fallback_block() {
   cat <<'SHELL'
 set -euo pipefail
 HALTED=""
+HELD=""
 
 if PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
   PUSH_RC=0
@@ -771,13 +772,13 @@ test_1532_differing_script_bails() {
 pat_scope_block() {
   cat <<'SHELL'
 set -euo pipefail
-_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+_merge_credential="${FORWARD_MERGE_PAT:-}"
 unset FORWARD_MERGE_PAT
 
 push_with_pat() {
-  if [[ -n "$_forward_merge_pat" ]]; then
+  if [[ -n "$_merge_credential" ]]; then
     local auth
-    auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    auth="$(printf 'x-access-token:%s' "$_merge_credential" | base64 -w0)"
     echo "::add-mask::$auth"
     git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
   else
@@ -791,7 +792,7 @@ push_with_pat origin HEAD:main
 SHELL
 }
 
-test_1532_forward_merge_pat_not_inherited_by_subprocess() {
+test_1532_merge_credential_not_inherited_by_subprocess() {
   local tmpdir
   tmpdir=$(mktemp -d)
 
@@ -1239,13 +1240,13 @@ test_2166_target_without_manifest_script_bails() {
 push_with_pat_block() {
   cat <<'SHELL'
 set -euo pipefail
-_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+_merge_credential="${FORWARD_MERGE_PAT:-}"
 unset FORWARD_MERGE_PAT
 
 push_with_pat() {
-  if [[ -n "$_forward_merge_pat" ]]; then
+  if [[ -n "$_merge_credential" ]]; then
     local auth
-    auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    auth="$(printf 'x-access-token:%s' "$_merge_credential" | base64 -w0)"
     echo "::add-mask::$auth"
     git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
   else
@@ -1302,11 +1303,11 @@ STUB
 direct_push_decision_block() {
   cat <<'SHELL'
 set -euo pipefail
-_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+_merge_credential="${FORWARD_MERGE_PAT:-}"
 unset FORWARD_MERGE_PAT
 TARGET="main"
 PUSH_SKIPPED=0
-if [[ -n "$_forward_merge_pat" ]]; then
+if [[ -n "$_merge_credential" ]]; then
   PUSH_SKIPPED=1
   PUSH_RC=1
   PUSH_STDERR=""
@@ -1427,7 +1428,7 @@ STUB
 push_with_pat_header_block() {
   cat <<'SHELL'
 set -euo pipefail
-_forward_merge_pat="${FORWARD_MERGE_PAT:-}"
+_merge_credential="${FORWARD_MERGE_PAT:-}"
 unset FORWARD_MERGE_PAT
 
 push_with_pat() {
@@ -1435,10 +1436,10 @@ push_with_pat() {
     echo "::error::push_with_pat called more than once in this job after already dropping the persisted checkout credential -- update the caller, this function assumes a single last call"
     exit 1
   fi
-  if [[ -n "$_forward_merge_pat" ]]; then
+  if [[ -n "$_merge_credential" ]]; then
     _push_with_pat_credential_dropped=1
     local auth
-    auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+    auth="$(printf 'x-access-token:%s' "$_merge_credential" | base64 -w0)"
     echo "::add-mask::$auth"
     if UNSET_OUT=$(git config --local --unset-all http.https://github.com/.extraheader 2>&1); then
       UNSET_RC=0
@@ -2338,18 +2339,21 @@ new_merge_branch_block() {
   cat <<'SHELL'
 set -euo pipefail
 HALTED=""
+HELD=""
 PUSH_SKIPPED=0
 push_with_pat() { git push "$@"; }
 approve_pending_runs() { :; }
+enable_auto_merge() { :; }
 for _once in once; do
 SHELL
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
-  sed -n '/^ *# Create the branch at HEAD (the merge commit made above)/,/^ *HALTED="PR opened for \$TARGET"$/p' \
+  sed -n '/^ *# Create the branch at HEAD (the merge commit made above)/,/^ *HELD="PR opened for \$TARGET"$/p' \
     "$WORKFLOW"
   cat <<'SHELL'
 fi
 done
-echo "HALTED=$HALTED"
+echo "HALTED=${HALTED:-}"
+echo "HELD=${HELD:-}"
 SHELL
 }
 
@@ -2735,6 +2739,7 @@ target_check_block() {
   cat <<'SHELL'
 set -euo pipefail
 HALTED=""
+HELD=""
 SOURCE_REF="origin/release/3.x"
 SOURCE_DESC="release/3.x"
 for TARGET in release/4.x; do
@@ -2746,7 +2751,8 @@ break
 fi
 echo NEXT
 done
-echo "HALTED=$HALTED"
+echo "HALTED=${HALTED:-}"
+echo "HELD=${HELD:-}"
 SHELL
 }
 
@@ -2896,6 +2902,7 @@ trial_merge_block() {
   cat <<'SHELL'
 set -euo pipefail
 HALTED=""
+HELD=""
 for _once in once; do
 SHELL
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
@@ -2906,7 +2913,8 @@ break
 fi
 fi
 done
-echo "HALTED=$HALTED"
+echo "HALTED=${HALTED:-}"
+echo "HELD=${HELD:-}"
 SHELL
 }
 
@@ -2958,7 +2966,7 @@ STUB
   out=$(PATH="$stubs:$PATH" SOURCE_REF=origin/source TARGET=release/4.x \
     SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
     bash -c "$(existing_branch_update_block)
-echo \"HALTED=\$HALTED\"" 2>&1 || true)
+echo \"HALTED=\${HALTED:-}\"; echo \"HELD=\${HELD:-}\"" 2>&1 || true)
   trash "$stubs" 2>/dev/null || true
 
   [[ "$out" == *"failed with no merge in progress: fatal: refusing to merge unrelated histories"* ]] \
@@ -3003,7 +3011,7 @@ run_stale_arm() {
   env -u GH_TOKEN -u GITHUB_TOKEN PATH="$stubs:$PATH" SOURCE_REF=origin/release/3.x TARGET=release/4.x \
     SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
     bash -c "$(existing_branch_update_block)
-echo \"HALTED=\$HALTED\"" 2>&1 || true
+echo \"HALTED=\${HALTED:-}\"; echo \"HELD=\${HELD:-}\"" 2>&1 || true
   trash "$stubs" 2>/dev/null || true
 }
 
@@ -3011,7 +3019,7 @@ test_2272_orphan_branch_is_updated_and_gets_a_new_pr() {
   local out
   out=$(GH_PRS_JSON="[]" run_stale_arm 1)
   [[ "$out" == *"PUSHED:"* ]] && [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
-    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+    && [[ "$out" == *"HELD=PR opened for release/4.x"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3020,7 +3028,7 @@ test_2272_orphan_branch_already_current_gets_a_new_pr() {
   local out
   out=$(GH_PRS_JSON="[]" run_stale_arm 0)
   [[ "$out" != *"PUSHED:"* ]] && [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
-    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+    && [[ "$out" == *"HELD=PR opened for release/4.x"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3034,7 +3042,7 @@ test_2272_open_pr_is_updated_in_place() {
   calls=$(cat "$log")
   trash "$log" 2>/dev/null || true
   [[ "$out" == *"PUSHED:"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] \
-    && [[ "$out" == *"HALTED=PR already open for release/4.x (branch updated with release/3.x)"* ]] \
+    && [[ "$out" == *"HELD=PR already open for release/4.x (branch updated with release/3.x)"* ]] \
     && [[ "$calls" == *"pr list --head forward-merge/release/3.x-to-release/4.x --base release/4.x --state open"* ]] \
     && return 0
   printf '  calls: %s\n' "$calls" >&2
@@ -3048,7 +3056,7 @@ test_2272_fork_pr_with_same_head_name_does_not_count() {
   local out
   out=$(GH_PRS_JSON='[{"number":9,"isCrossRepository":true}]' run_stale_arm 1)
   [[ "$out" == *"GH_CALL:pr create --base release/4.x"* ]] \
-    && [[ "$out" == *"HALTED=PR opened for release/4.x"* ]] && return 0
+    && [[ "$out" == *"HELD=PR opened for release/4.x"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3068,7 +3076,7 @@ test_2272_current_branch_with_open_pr_halts_without_push() {
   local out
   out=$(run_stale_arm 0)
   [[ "$out" != *"PUSHED:"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] \
-    && [[ "$out" == *"HALTED=PR already open for release/4.x"* ]] \
+    && [[ "$out" == *"HELD=PR already open for release/4.x"* ]] \
     && [[ "$out" != *"(branch updated"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
@@ -3105,7 +3113,7 @@ test_2272_pr_lookup_failure_halts() {
 
 # GITHUB_TOKEN cannot push a change to .github/workflows/, so without the PAT
 # that is the likely cause of a failed merge-branch push.
-PAT_HINT="set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only"
+PAT_HINT="set the App secrets SYNC_APP_ID and SYNC_APP_PRIVATE_KEY"
 
 # git and gh stubs for a merge-branch push that fails. `git diff --quiet`
 # exits with $1: 1 means the merge changes .github/workflows/, 0 means it does
@@ -3142,7 +3150,7 @@ test_2271_no_push_hint_without_workflow_change() {
 test_2271_no_push_hint_with_pat_set() {
   local stubs out
   stubs=$(push_failure_stubs 1)
-  out=$(PATH="$stubs:$PATH" _forward_merge_pat=set \
+  out=$(PATH="$stubs:$PATH" _merge_credential=set \
     MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
     TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
   trash "$stubs" 2>/dev/null || true
@@ -3185,6 +3193,7 @@ ls_remote_block() {
   cat <<'SHELL'
 set -euo pipefail
 HALTED=""
+HELD=""
 for _once in once; do
 SHELL
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
@@ -3193,7 +3202,8 @@ SHELL
 break
 fi
 done
-echo "HALTED=$HALTED"
+echo "HALTED=${HALTED:-}"
+echo "HELD=${HELD:-}"
 SHELL
 }
 
@@ -3235,6 +3245,7 @@ existing_branch_update_block() {
   cat <<'SHELL'
 push_with_pat() { git push "$@"; }
 approve_pending_runs() { :; }
+enable_auto_merge() { :; }
 # A function shadows any real gh on PATH, so a test never reaches GitHub.
 # GH_PRS_JSON is the JSON that `gh pr list` prints (default: one same-repo
 # open PR). GH_FAIL makes `pr list` fail, GH_CREATE_FAIL makes `pr create`
@@ -3658,7 +3669,7 @@ run_test "Issue #1532: a differing scripts/sync-changelog-doc.sh bails instead o
   test_1532_differing_script_bails
 
 run_test "Issue #1532: FORWARD_MERGE_PAT is not inherited by a spawned subprocess" \
-  test_1532_forward_merge_pat_not_inherited_by_subprocess
+  test_1532_merge_credential_not_inherited_by_subprocess
 
 run_test "Issue #1532: the real sync-changelog-doc.sh regenerates changelog.md through the pinned-copy path" \
   test_1532_real_script_regenerates_changelog
@@ -3865,6 +3876,175 @@ run_test "Issue #2504: an unreadable branch history halts and names the git erro
   test_2504_unreadable_branch_history_halts_and_names_the_error
 run_test "Issue #2504: a stale branch that merges cleanly is updated, not reset" \
   test_2504_stale_branch_that_merges_cleanly_is_not_reset
+
+# ---------------------------------------------------------------------------
+# Issue #2796: the cascade runs as a GitHub App. The helpers below are
+# extracted from the workflow by name, so each test runs the shipped code.
+# ---------------------------------------------------------------------------
+workflow_function() {
+  awk -v name="$1" '
+    $0 ~ ("^ *" name "\\(\\) \\{$") { indent = $0; sub(/[^ ].*$/, "", indent); found = 1 }
+    found { print }
+    found && $0 == indent "}" { exit }
+  ' "$WORKFLOW"
+}
+
+# Runs one helper in a clean environment. Sets RUN_OUT, RUN_ERR, and RUN_RC.
+run_helper() {
+  local helper="$1"
+  local err_file
+  err_file=$(mktemp)
+  RUN_RC=0
+  RUN_OUT=$(env -i PATH="$PATH" "${@:2}" bash -c "$(workflow_function "$helper")
+$helper" 2>"$err_file") || RUN_RC=$?
+  RUN_ERR=$(<"$err_file")
+  rm -f "$err_file"
+}
+
+test_2796_app_credentials_select_the_app() {
+  run_helper check_cascade_credential SYNC_APP_ID=1 SYNC_APP_PRIVATE_KEY=k
+  [[ "$RUN_RC" -eq 0 && "$RUN_OUT" == "app" ]]
+}
+
+test_2796_pat_alone_falls_back_with_a_warning() {
+  run_helper check_cascade_credential FORWARD_MERGE_PAT=p
+  [[ "$RUN_RC" -eq 0 && "$RUN_OUT" == "pat" && "$RUN_ERR" == *"::warning::"* ]]
+}
+
+test_2796_app_id_without_key_falls_back_to_the_pat() {
+  run_helper check_cascade_credential SYNC_APP_ID=1 FORWARD_MERGE_PAT=p
+  [[ "$RUN_RC" -eq 0 && "$RUN_OUT" == "pat" ]]
+}
+
+test_2796_no_credentials_fails_and_names_the_fix() {
+  run_helper check_cascade_credential
+  [[ "$RUN_RC" -ne 0 && "$RUN_ERR" == *"SYNC_APP_ID"* && "$RUN_ERR" == *"SYNC_APP_PRIVATE_KEY"* ]]
+}
+
+# Stubs gh. Records its arguments in $GH_LOG and exits with $GH_STUB_RC.
+make_gh_stub() {
+  local dir="$1"
+  cat > "$dir/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+[[ "$GH_STUB_RC" -eq 0 ]] || echo "auto-merge is disabled" >&2
+exit "$GH_STUB_RC"
+STUB
+  chmod +x "$dir/gh"
+}
+
+test_2796_auto_merge_requests_a_merge_commit() {
+  local dir
+  dir=$(mktemp -d)
+  make_gh_stub "$dir"
+  env -i PATH="$dir:$PATH" GH_LOG="$dir/log" GH_STUB_RC=0 bash -c \
+    "$(workflow_function enable_auto_merge)
+enable_auto_merge forward-merge/release/3.x-to-main" >/dev/null 2>&1 || true
+  local logged
+  logged=$(<"$dir/log")
+  rm -rf "$dir"
+  [[ "$logged" == "pr merge forward-merge/release/3.x-to-main --auto --merge" ]]
+}
+
+test_2796_failed_auto_merge_warns_and_keeps_the_cascade_running() {
+  local dir out rc=0
+  dir=$(mktemp -d)
+  make_gh_stub "$dir"
+  out=$(env -i PATH="$dir:$PATH" GH_LOG="$dir/log" GH_STUB_RC=1 bash -c \
+    "$(workflow_function enable_auto_merge)
+enable_auto_merge forward-merge/release/3.x-to-main" 2>&1) || rc=$?
+  local logged
+  logged=$(<"$dir/log")
+  rm -rf "$dir"
+  [[ "$rc" -eq 0 && "$out" == *"::warning::"* && "$out" == *"auto-merge is disabled"* ]] \
+    && [[ "$logged" == *"pr comment forward-merge/release/3.x-to-main"* ]]
+}
+
+test_2796_pr_opened_exits_zero_and_writes_the_summary() {
+  local summary
+  summary=$(mktemp)
+  run_helper finish_cascade HELD="PR opened for release/4.x" GITHUB_STEP_SUMMARY="$summary"
+  local text
+  text=$(<"$summary")
+  rm -f "$summary"
+  [[ "$RUN_RC" -eq 0 && "$text" == *"PR opened for release/4.x"* ]]
+}
+
+test_2796_halted_cascade_still_exits_nonzero() {
+  run_helper finish_cascade HALTED="conflict updating existing forward-merge/release/3.x-to-main"
+  [[ "$RUN_RC" -ne 0 && "$RUN_OUT" == *"halted"* ]]
+}
+
+test_2796_clean_cascade_exits_zero() {
+  run_helper finish_cascade
+  [[ "$RUN_RC" -eq 0 && "$RUN_OUT" == *"completed"* ]]
+}
+
+run_test "Issue #2796: App credentials select the App" \
+  test_2796_app_credentials_select_the_app
+run_test "Issue #2796: the PAT alone falls back with a warning" \
+  test_2796_pat_alone_falls_back_with_a_warning
+run_test "Issue #2796: an App id without a key falls back to the PAT" \
+  test_2796_app_id_without_key_falls_back_to_the_pat
+run_test "Issue #2796: no credentials fails and names the secrets" \
+  test_2796_no_credentials_fails_and_names_the_fix
+run_test "Issue #2796: auto-merge requests a merge commit" \
+  test_2796_auto_merge_requests_a_merge_commit
+run_test "Issue #2796: a failed auto-merge warns and the cascade keeps running" \
+  test_2796_failed_auto_merge_warns_and_keeps_the_cascade_running
+run_test "Issue #2796: an opened PR exits zero and writes the job summary" \
+  test_2796_pr_opened_exits_zero_and_writes_the_summary
+run_test "Issue #2796: a halted cascade still exits nonzero" \
+  test_2796_halted_cascade_still_exits_nonzero
+run_test "Issue #2796: a clean cascade exits zero" \
+  test_2796_clean_cascade_exits_zero
+
+test_2796_missing_app_key_warning_names_the_secret() {
+  run_helper check_cascade_credential SYNC_APP_ID=1 FORWARD_MERGE_PAT=p
+  [[ "$RUN_RC" -eq 0 && "$RUN_ERR" == *"Missing SYNC_APP_PRIVATE_KEY"* ]]
+}
+
+test_2796_app_mode_without_a_token_refuses_the_pat() {
+  run_helper require_app_token MODE=app
+  [[ "$RUN_RC" -ne 0 && "$RUN_ERR" == *"refusing to fall back"* ]]
+}
+
+test_2796_app_mode_with_a_token_passes() {
+  run_helper require_app_token MODE=app _app_token=tok
+  [[ "$RUN_RC" -eq 0 ]]
+}
+
+test_2796_pat_mode_passes_without_an_app_token() {
+  run_helper require_app_token MODE=pat
+  [[ "$RUN_RC" -eq 0 ]]
+}
+
+test_2796_unset_step_summary_fails_loudly() {
+  local rc=0
+  env -i PATH="$PATH" HELD="PR opened for release/4.x" bash -c "set -euo pipefail
+$(workflow_function finish_cascade)
+finish_cascade" >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -ne 0 ]]
+}
+
+# shellcheck disable=SC2016 # literal workflow text, not an expression to expand
+test_2796_app_token_stays_out_of_checkout_and_step_env() {
+  ! grep -Fq 'token: ${{ steps.app.outputs.token' "$WORKFLOW" \
+    && ! grep -Fq 'GH_TOKEN: ${{ steps.app.outputs.token' "$WORKFLOW"
+}
+
+run_test "Issue #2796: a missing App key warning names the secret" \
+  test_2796_missing_app_key_warning_names_the_secret
+run_test "Issue #2796: App mode without a token refuses the PAT" \
+  test_2796_app_mode_without_a_token_refuses_the_pat
+run_test "Issue #2796: App mode with a token passes" \
+  test_2796_app_mode_with_a_token_passes
+run_test "Issue #2796: PAT mode passes without an App token" \
+  test_2796_pat_mode_passes_without_an_app_token
+run_test "Issue #2796: an unset step summary fails loudly" \
+  test_2796_unset_step_summary_fails_loudly
+run_test "Issue #2796: the App token stays out of checkout and GH_TOKEN" \
+  test_2796_app_token_stays_out_of_checkout_and_step_env
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
