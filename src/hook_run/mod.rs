@@ -3773,6 +3773,23 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     #[test]
+    fn a_notice_with_no_channel_is_logged_at_error_level() {
+        let logs = crate::test_log_capture::capture_logs(|| {
+            log_notice_without_channel("", Some("the session map is locked"), "session_end");
+        });
+        assert!(logs.contains("ERROR"), "{logs}");
+        assert!(logs.contains("the session map is locked"), "{logs}");
+    }
+
+    #[test]
+    fn a_notice_with_a_channel_is_not_logged_here() {
+        let logs = crate::test_log_capture::capture_logs(|| {
+            log_notice_without_channel("{}", Some("notice"), "turn_start");
+        });
+        assert!(logs.is_empty(), "{logs}");
+    }
+
+    #[test]
     fn every_listed_hook_event_name_parses_and_round_trips() {
         for name in HOOK_EVENT_NAMES {
             let event: HookEvent = name.parse().unwrap();
