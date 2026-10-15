@@ -307,21 +307,22 @@ pub(super) async fn session_start(
         );
     }
     let sent = updated.unwrap_or_default();
-    let continues = super::continues_session(ctx.payload);
-    // A failed wake-up call must not discard the project memories that did load, so they are
-    // kept on both paths below (#2756).
-    let own = match &recall_project {
-        Some(p) if !continues => project_memories(ctx.client, p).await,
-        _ => String::new(),
-    };
-    let wake = if continues {
-        Ok(String::new())
+    // A resumed session already holds its pack, so it makes neither call (#2142). A failed
+    // wake-up call must not discard the project memories that did load, so they are kept on the
+    // error path below (#2756).
+    let (wake, own) = if super::continues_session(ctx.payload) {
+        (Ok(String::new()), String::new())
     } else {
-        wake.run(ctx.client, "", "").await.map(|t| {
+        let own = match &recall_project {
+            Some(p) => project_memories(ctx.client, p).await,
+            None => String::new(),
+        };
+        let wake = wake.run(ctx.client, "", "").await.map(|t| {
             let (kept, cut) = drop_cut_items(&t);
             note_cut_items(cut);
             join_sections(&kept, &own)
-        })
+        });
+        (wake, own)
     };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
     // only the room that the wake-up pack leaves.
