@@ -405,11 +405,19 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
         topic: Some("errors-resolved".to_string()),
         ..query(&text, FANOUT_LIMIT)
     };
-    let (main, fixes) = tokio::join!(
-        recall(ctx.client, Some(query(&text, FAILURE_LIMIT))),
+    // The session project comes first, as in `waves`. The all-projects main recall stays
+    // after the shared `errors-resolved` fix, because that topic is meant to cross projects.
+    let scoped = ledger.project.as_deref().map(|p| RecallQuery {
+        project: Some(p.to_string()),
+        ..query(&text, FAILURE_LIMIT)
+    });
+    let (own, fixes, main) = tokio::join!(
+        recall(ctx.client, scoped),
         recall(ctx.client, Some(resolved)),
+        recall(ctx.client, Some(query(&text, FAILURE_LIMIT))),
     );
     let mut outcome = Outcome::default();
+    outcome.push(own);
     outcome.push(fixes);
     outcome.push(main);
     let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
@@ -995,6 +1003,27 @@ mod tests {
         assert_eq!(f.store.load("s1").unwrap().errors().len(), 1);
         let second = tool_failure(&ctx(&f, &payload)).await.unwrap();
         assert!(!second.contains("pin mcp<2"), "already sent: {second}");
+    }
+
+    #[tokio::test]
+    async fn tool_failure_ranks_the_session_project_first() {
+        let server = server_with(&[
+            ("\"project\":\"proj-a\"", "[own] fix for proj-a"),
+            ("errors-resolved", "[fix] shared fix"),
+        ])
+        .await;
+        let f = fixture(&server);
+        f.store
+            .update("s1", |l| l.project = Some("proj-a".to_string()));
+        let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
+        let out = tool_failure(&ctx(&f, &payload)).await.unwrap();
+        let own = out
+            .find("[own]")
+            .unwrap_or_else(|| panic!("no project record: {out}"));
+        let fix = out
+            .find("[fix]")
+            .unwrap_or_else(|| panic!("no shared fix: {out}"));
+        assert!(own < fix, "project record must come first: {out}");
     }
 
     #[test]
