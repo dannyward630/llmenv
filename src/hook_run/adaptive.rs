@@ -66,9 +66,10 @@ impl Outcome {
             Err(e) => {
                 self.failed += 1;
                 tracing::error!("adaptive recall call failed, its records are skipped: {e}");
-                agent_notice::record(
-                    "llmenv: a memory recall call failed, so its records were not sent.",
-                );
+                agent_notice::record(format!(
+                    "llmenv: a memory recall call failed, so its records were not sent: {e:#}. \
+                     Fix: run `llmenv doctor` to check the memory server."
+                ));
             }
         }
     }
@@ -244,11 +245,11 @@ pub(super) async fn session_start(
         Ok(text) => text,
         Err(e) if outcome.all_failed() || scope_len == 0 => return Err(e),
         Err(e) => {
-            // eprintln, as in `report`: the default tracing filter is ERROR-only.
-            eprintln!(
-                "llmenv: memory wake-up skipped: icm_wake_up failed ({e}); \
-                 the scope set still goes out"
-            );
+            // The agent is told: stderr from a hook never reaches it.
+            agent_notice::record(format!(
+                "llmenv: memory wake-up skipped: icm_wake_up failed ({e:#}); \
+                 the scope set still goes out. Fix: run `llmenv doctor` to check the memory server."
+            ));
             String::new()
         }
     };

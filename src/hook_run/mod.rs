@@ -583,15 +583,21 @@ struct MemoryCall<'a> {
 /// stateless actions. A missing state dir degrades to the stateless actions.
 async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
     let Some(session_id) = call.session_id else {
-        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+        return Ok(
+            run_memory_actions(call.client, call.actions, call.query, call.store_content).await,
+        );
     };
     // A separate bind keeps the session id out of the state dir path's data flow,
     // which CodeQL tracks through a tuple (rust/cleartext-logging).
     let Some(state_dir) = call.state_dir.as_deref() else {
-        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+        return Ok(
+            run_memory_actions(call.client, call.actions, call.query, call.store_content).await,
+        );
     };
     if !uses_adaptive(call.event, call.settings, Some(session_id)) {
-        return run_memory_actions(call.client, call.actions, call.query, call.store_content).await;
+        return Ok(
+            run_memory_actions(call.client, call.actions, call.query, call.store_content).await,
+        );
     }
     let store = session_ledger::LedgerStore::new(state_dir);
     let ctx = adaptive::AdaptiveCtx {
@@ -607,7 +613,9 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
         HookEvent::TurnStart => adaptive::turn_start(&ctx, call.scope).await,
         HookEvent::PostToolUseFailure => adaptive::tool_failure(&ctx).await,
         HookEvent::SubagentStart => adaptive::subagent_start(&ctx).await,
-        _ => run_memory_actions(call.client, call.actions, call.query, call.store_content).await,
+        _ => {
+            Ok(run_memory_actions(call.client, call.actions, call.query, call.store_content).await)
+        }
     }
 }
 
@@ -672,11 +680,24 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     use std::io::Read;
 
     let mut stdin_buf = String::new();
+    // Without the input the hook has no session id, so every per-session feature turns off.
+    // The agent is told, because a log line or stderr never reaches it.
     if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
-        eprintln!("llmenv hook-run: failed to read stdin: {e}");
+        crate::agent_notice::record(format!(
+            "llmenv hook-run could not read its input, so per-session features are off: {e}. \
+             Fix: check how the engine runs the hook command."
+        ));
     }
     let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf)
-        .inspect_err(|e| tracing::error!("hook-run: failed to parse stdin JSON: {e}"))
+        .inspect_err(|e| {
+            // Empty stdin is no payload, not a broken one, so it adds no notice.
+            if !stdin_buf.trim().is_empty() {
+                crate::agent_notice::record(format!(
+                    "llmenv hook-run could not parse its input, so per-session features are off: \
+                     {e}. Fix: check that the engine sends JSON on stdin."
+                ));
+            }
+        })
         .ok();
     let hook_event_name: &str = stdin_json
         .as_ref()
@@ -689,7 +710,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     let claude_code_version = match crate::env_var::utf8_var("CLAUDE_CODE_VERSION") {
         Ok(version) => version.unwrap_or_default(),
         Err(e) => {
-            tracing::warn!("{e:#}");
+            tracing::error!("{e:#}");
             String::new()
         }
     };
@@ -721,7 +742,10 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             // Visible, not `tracing::debug!`: the default `EnvFilter` is
             // `ERROR`, so a debug line here would mean the user silently loses
             // drift detection with no way to notice (#1345's lesson).
-            eprintln!("warning: llmenv could not check whether your config drifted: {e:#}");
+            crate::agent_notice::record(format!(
+                "llmenv could not check whether your config drifted: {e:#}. \
+                 Fix: run `llmenv doctor` to see the cause."
+            ));
         }
     }
 
@@ -775,11 +799,12 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     return Ok(HookExit::Block);
                 }
             } else {
-                let text = match notice {
+                let text = match notice.clone() {
                     Some(notice) => format!("{notice}\n\n{text}"),
                     None => text,
                 };
                 let out = adapter.emit_hook_context(hook_event_name, &text);
+                log_notice_without_channel(&out, notice.as_deref(), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -790,6 +815,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
             if let Some(notice) = notice {
                 let out = adapter.emit_hook_context(hook_event_name, &notice);
+                log_notice_without_channel(&out, Some(&notice), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -797,6 +823,18 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         }
     }
     Ok(HookExit::Success)
+}
+
+/// An engine that takes no hook context, such as the SessionEnd path, gets empty output, so a
+/// notice in it reaches no one. The error log is the only place left for it (#2736).
+fn log_notice_without_channel(out: &str, notice: Option<&str>, event: &str) {
+    if let Some(notice) = notice
+        && out.is_empty()
+    {
+        tracing::error!(
+            "hook-run {event} has no channel to the agent, so the notice is logged only: {notice}"
+        );
+    }
 }
 
 /// Resolve config, find the memory URL, run the event's actions, and return the
@@ -839,7 +877,12 @@ pub fn set_preloaded_config(config: crate::config::Config) {
 /// The error level shows at the default log level, so a hook that cannot keep its state is seen.
 fn state_dir_or_log(disabled: &str) -> Option<std::path::PathBuf> {
     crate::paths::state_dir()
-        .inspect_err(|e| tracing::error!("no state dir, {disabled}: {e:#}"))
+        .inspect_err(|e| {
+            crate::agent_notice::record(format!(
+                "llmenv has no state directory, so {disabled}: {e:#}. \
+                 Fix: run `llmenv doctor` to check the state directory."
+            ));
+        })
         .ok()
 }
 
@@ -1551,9 +1594,13 @@ fn run_inner(
         let memory_skipped = memory_notice.is_some();
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
-            .inspect_err(
-                |e| error!(error = %e, "no ICM transcript state: the session map is unavailable"),
-            )
+            .inspect_err(|e| {
+                error!(error = %e, "no ICM transcript state: the session map is unavailable");
+                crate::agent_notice::record(format!(
+                    "llmenv could not open the ICM transcript state, so this session's transcript link is \
+                     not recorded: {e:#}. Fix: run `llmenv doctor` to check the state directory."
+                ));
+            })
             .ok();
         let ctx = build_scope_context(
             &active,
@@ -1913,17 +1960,17 @@ async fn run_memory_actions(
     actions: Vec<Action>,
     query: &str,
     chunk: &str,
-) -> anyhow::Result<String> {
+) -> String {
     let (text, budget) = recall::run_with_budget(actions, |action| async move {
         action.run(client, query, chunk).await
     })
-    .await?;
+    .await;
     // Same env var that gates hook-run's other stderr telemetry (#1261).
     let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
     if let Some(line) = budget.trace_line(tracing_enabled) {
         eprintln!("{line}");
     }
-    Ok(text)
+    text
 }
 
 /// Borrowed inputs `run_session_log` needs, grouped to keep the function under
@@ -2674,6 +2721,13 @@ fn suppressed_bundle_capabilities(
         .into_iter()
         .filter_map(|r| {
             crate::merge::read_bundle_yaml(&r.path, &r.name)
+                .inspect_err(|e| {
+                    crate::agent_notice::record(format!(
+                        "llmenv could not read bundle {} to check its suppressed capabilities: \
+                         {e:#}. Fix: check the bundle's bundle.yaml.",
+                        r.name
+                    ));
+                })
                 .ok()
                 .flatten()
                 .map(|caps| (r.name, caps))
@@ -3718,6 +3772,23 @@ fn post_session_consolidation_in(state_dir: Option<&std::path::Path>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn a_notice_with_no_channel_is_logged_at_error_level() {
+        let logs = crate::test_log_capture::capture_logs(|| {
+            log_notice_without_channel("", Some("the session map is locked"), "session_end");
+        });
+        assert!(logs.contains("ERROR"), "{logs}");
+        assert!(logs.contains("the session map is locked"), "{logs}");
+    }
+
+    #[test]
+    fn a_notice_with_a_channel_is_not_logged_here() {
+        let logs = crate::test_log_capture::capture_logs(|| {
+            log_notice_without_channel("{}", Some("notice"), "turn_start");
+        });
+        assert!(logs.is_empty(), "{logs}");
+    }
+
     #[test]
     fn every_listed_hook_event_name_parses_and_round_trips() {
         for name in HOOK_EVENT_NAMES {
@@ -6523,8 +6594,7 @@ mod tests {
             "q",
             "chunk",
         )
-        .await
-        .expect("recall succeeds");
+        .await;
 
         assert_eq!(text, "[t] one\n\n[t] two");
     }

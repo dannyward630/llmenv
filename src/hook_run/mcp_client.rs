@@ -234,6 +234,7 @@ impl McpHttpClient {
             .json(&init_req)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {} for MCP initialize", self.display_url()))?;
         if !resp.status().is_success() {
             let status = resp.status();
@@ -256,12 +257,16 @@ impl McpHttpClient {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if capture_info {
-            let text = resp.text().await.with_context(|| {
-                format!(
-                    "reading the MCP initialize reply from {}",
-                    self.display_url()
-                )
-            })?;
+            let text = resp
+                .text()
+                .await
+                .map_err(reqwest::Error::without_url)
+                .with_context(|| {
+                    format!(
+                        "reading the MCP initialize reply from {}",
+                        self.display_url()
+                    )
+                })?;
             *self.init_info.lock().await = Some(parse_initialize_info(&text)?);
         }
 
@@ -441,6 +446,7 @@ impl McpHttpClient {
             .json(&req)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {} for {label}", self.display_url()))
             .map_err(CallToolError::Fatal)?;
 
@@ -469,6 +475,7 @@ impl McpHttpClient {
         let text = resp
             .text()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("decoding JSON response for {label}"))
             .map_err(CallToolError::Fatal)?;
         let body = parse_rpc_body(&text)
