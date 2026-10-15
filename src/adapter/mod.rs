@@ -445,8 +445,10 @@ pub(crate) enum SessionStartContext {
 /// Format injected hook context in the adapter-native hook-output shape.
 ///
 /// Only `memory` gets the ICM header, because only it came from ICM. `notes`
-/// is llmenv text, so it follows the memory block with no ICM label (#2754).
-/// Both go into one envelope, because an engine reads one JSON object per hook.
+/// is llmenv text, so it goes out with no ICM label (#2754). The notes come
+/// first, so the memory block is last and the header is the final label the
+/// model reads. Both go into one envelope, because an engine reads one JSON
+/// object per hook.
 ///
 /// Empty input always returns an empty string. `SessionEnd` also returns
 /// empty: it has no model turn to inject context into, and Claude Code
@@ -486,7 +488,7 @@ pub(crate) fn emit_hook_context(
     };
     let memory_block = (!memory.trim().is_empty()).then(|| format!("{header}\n{memory}"));
     let notes_block = (!notes.trim().is_empty()).then(|| notes.to_string());
-    let parts: Vec<String> = [memory_block, notes_block].into_iter().flatten().collect();
+    let parts: Vec<String> = [notes_block, memory_block].into_iter().flatten().collect();
     if parts.is_empty() {
         return String::new();
     }
@@ -693,6 +695,30 @@ mod tests {
         for ss in [SessionStartContext::Accepted, SessionStartContext::Rejected] {
             assert!(emit_hook_context("UserPromptSubmit", "\n\n", "", ss).is_empty());
             assert!(emit_hook_context("SessionStart", "   ", "", ss).is_empty());
+            assert!(emit_hook_context("PreToolUse", "", " \n", ss).is_empty());
+        }
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // The header labels the memory exactly when memory has text, and the memory is the last
+        // text in the envelope, so no notice can follow it unlabeled (#2754).
+        #[test]
+        fn memory_is_labelled_once_and_ends_the_context(
+            memory in "[ -~\n]{0,80}",
+            notes in "[ -~\n]{0,80}",
+        ) {
+            let out = emit_hook_context("UserPromptSubmit", &memory, &notes, SessionStartContext::Accepted);
+            let ctx = additional_context(&out);
+            let labels = ctx.matches("[ICM MEMORY CONTEXT (auto-injected)]").count();
+            prop_assert_eq!(labels, usize::from(!memory.trim().is_empty()));
+            if memory.trim().is_empty() && notes.trim().is_empty() {
+                prop_assert!(out.is_empty());
+            }
+            if !memory.trim().is_empty() {
+                prop_assert!(ctx.ends_with(&memory));
+            }
         }
     }
 
@@ -706,12 +732,6 @@ mod tests {
     }
 
     // #2754: only ICM memory carries the ICM header. llmenv notes go out unlabeled.
-    #[test]
-    fn whitespace_only_notes_emit_nothing() {
-        let out = emit_hook_context("PreToolUse", "", "  \n", SessionStartContext::Accepted);
-        assert_eq!(out, "");
-    }
-
     #[test]
     fn notes_go_out_without_the_icm_header() {
         let out = emit_hook_context(
@@ -736,7 +756,7 @@ mod tests {
         );
         assert_eq!(
             additional_context(&out),
-            "[ICM MEMORY CONTEXT (auto-injected)]\nrecalled fact\n\nnote: budget"
+            "note: budget\n\n[ICM MEMORY CONTEXT (auto-injected)]\nrecalled fact"
         );
     }
 
