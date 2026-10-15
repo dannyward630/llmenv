@@ -109,6 +109,49 @@ jobs:
             echo "ref=$source_branch" >> "$GITHUB_OUTPUT"
           fi
 
+      # #2796: the cascade pushes, opens PRs, and enables auto-merge as the phaedrus-sync
+      # GitHub App. A GitHub App token is not GITHUB_TOKEN, so its pushes start the next
+      # cascade hop and its PRs are not authored by github-actions. FORWARD_MERGE_PAT stays
+      # as a fallback until the first full App-run cascade is green.
+      - name: Check cascade credentials
+        id: creds
+        env:
+          SYNC_APP_ID: ${{ secrets.SYNC_APP_ID }}
+          SYNC_APP_PRIVATE_KEY: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          FORWARD_MERGE_PAT: ${{ secrets.FORWARD_MERGE_PAT }}
+        run: |
+          set -euo pipefail
+          # Prints "app" or "pat". The App needs both of its secrets. A missing App
+          # falls back to the PAT with a warning. With neither, the step fails.
+          check_cascade_credential() {
+            if [[ -n "${SYNC_APP_ID:-}" && -n "${SYNC_APP_PRIVATE_KEY:-}" ]]; then
+              echo "app"
+              return 0
+            fi
+            if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then
+              echo "::warning::SYNC_APP_ID and SYNC_APP_PRIVATE_KEY are not both set, so the cascade falls back to FORWARD_MERGE_PAT. See docs/release.md." >&2
+              echo "pat"
+              return 0
+            fi
+            echo "::error::No cascade credential. Set the repository secrets SYNC_APP_ID and SYNC_APP_PRIVATE_KEY for the phaedrus-sync App (installed on this repository). See docs/release.md." >&2
+            return 1
+          }
+          mode=$(check_cascade_credential)
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Mint cascade app token
+        id: app
+        if: steps.creds.outputs.mode == 'app'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
       # The ref is validated above to release/X.x or main, so this step never checks out
       # code from a pull request. The cascade needs the credential for fetch and push, so
       # persist-credentials stays true. CodeQL alert actions/untrusted-checkout (#2475)
@@ -118,6 +161,7 @@ jobs:
         with:
           ref: ${{ steps.source.outputs.ref }}
           fetch-depth: 0
+          token: ${{ steps.app.outputs.token || github.token }}
           persist-credentials: true
 
       - name: Configure git
@@ -175,8 +219,10 @@ jobs:
           # closes that exposure is the #1532 fix itself: the changelog.md
           # arm below only ever runs a pinned, already-verified copy of
           # scripts/sync-changelog-doc.sh, never the merged tree's.
-          GH_TOKEN: ${{ github.token }}
-          # Use a fine-grained PAT restricted to just this repository, with
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          # #2796: the App token. Empty when the App is not configured.
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+          # Fallback only: a fine-grained PAT restricted to just this repository, with
           # only `contents: write` + `workflows: write` — not a classic PAT.
           # A classic repo-scoped PAT would let anyone who can land a commit
           # on release/** exfiltrate access to every repository the PAT's
@@ -194,8 +240,8 @@ jobs:
           # still has access. Any subprocess this step spawns from here on
           # (bash scripts/sync-changelog-doc.sh included) no longer inherits
           # it.
-          _forward_merge_pat="${FORWARD_MERGE_PAT:-}"
-          unset FORWARD_MERGE_PAT
+          _merge_credential="${APP_TOKEN:-${FORWARD_MERGE_PAT:-}}"
+          unset FORWARD_MERGE_PAT APP_TOKEN
 
           # GITHUB_TOKEN can never push a change that touches
           # .github/workflows/*.yml (GitHub's own restriction, not this job's
@@ -249,10 +295,10 @@ jobs:
               echo "::error::push_with_pat called more than once in this job after already dropping the persisted checkout credential -- update the caller, this function assumes a single last call"
               exit 1
             fi
-            if [[ -n "$_forward_merge_pat" ]]; then
+            if [[ -n "$_merge_credential" ]]; then
               _push_with_pat_credential_dropped=1
               local auth
-              auth="$(printf 'x-access-token:%s' "$_forward_merge_pat" | base64 -w0)"
+              auth="$(printf 'x-access-token:%s' "$_merge_credential" | base64 -w0)"
               # GitHub's log scrubber masks the literal PAT value, not its
               # base64 encoding — register the encoded form too, so a stray
               # git trace or `set -x` can't print a trivially-reversible copy.
@@ -337,6 +383,32 @@ jobs:
             else
               git push "$@"
             fi
+          }
+
+          # #2796: request auto-merge with a merge commit. The merge then runs as the App
+          # once required checks pass, and its close event resumes the cascade. A refused
+          # request only warns, so the PR stays open for a person to merge.
+          enable_auto_merge() {
+            local branch="$1" err
+            if err=$(gh pr merge "$branch" --auto --merge 2>&1 >/dev/null); then
+              echo "Auto-merge enabled for $branch; it merges once its required checks pass."
+            else
+              echo "::warning::Could not enable auto-merge for $branch; merge it by hand once its checks pass: ${err//$'\n'/ }"
+            fi
+          }
+
+          # The cascade stops at a failed hop, or waits on an open PR. A wait exits zero.
+          finish_cascade() {
+            if [[ -n "${HALTED:-}" ]]; then
+              echo "Forward-merge cascade halted ($HALTED); downstream targets not merged"
+              return 1
+            fi
+            if [[ -n "${HELD:-}" ]]; then
+              echo "Forward-merge cascade waiting on $HELD; the next targets run when it merges"
+              echo "- Forward-merge cascade waiting on $HELD" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              return 0
+            fi
+            echo "Forward-merge cascade completed"
           }
 
           # GitHub sometimes gates this PR's `pull_request`-triggered runs
@@ -463,6 +535,7 @@ jobs:
           # Track whether the cascade halted early so the run fails visibly
           # rather than silently leaving downstream targets unmerged.
           HALTED=""
+          HELD=""
 
           # The cascade is a *chain*: each target is merged from the previous
           # link, not from the branch that was pushed. Pushing release/3.x with
@@ -952,7 +1025,7 @@ jobs:
             # push entirely and always go through the PR path below, where
             # required checks run before a human merges it.
             PUSH_SKIPPED=0
-            if [[ -n "$_forward_merge_pat" ]]; then
+            if [[ -n "$_merge_credential" ]]; then
               PUSH_SKIPPED=1
               PUSH_RC=1
               PUSH_STDERR=""
@@ -1081,7 +1154,7 @@ jobs:
                   BRANCH_CURRENT=1
                   if [[ "$OPEN_PRS" -gt 0 ]]; then
                     echo "::endgroup::"
-                    HALTED="PR already open for $TARGET"
+                    HELD="PR already open for $TARGET"
                     break
                   fi
                 fi
@@ -1147,9 +1220,9 @@ jobs:
                   MERGE_SHA=$(git rev-parse HEAD)
                   if ! push_with_pat origin "$MERGE_BRANCH" ${RESET_LEASE:+"$RESET_LEASE"}; then
                     echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
-                    if [[ -z "${_forward_merge_pat:-}" ]] \
+                    if [[ -z "${_merge_credential:-}" ]] \
                         && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
-                      echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
+                      echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set the App secrets SYNC_APP_ID and SYNC_APP_PRIVATE_KEY (the App needs workflows: write), or push $MERGE_BRANCH by hand."
                     fi
                     echo "::endgroup::"
                     HALTED="merge-branch update push failed for $TARGET"
@@ -1178,16 +1251,17 @@ jobs:
                     echo "::error::Failed to create PR for $MERGE_BRANCH"
                     HALTED="PR creation failed for $TARGET"
                   else
-                    echo "::error::Cascade halted: opened PR for $TARGET on the existing $MERGE_BRANCH"
+                    echo "::notice::Opened PR for $TARGET on the existing $MERGE_BRANCH; the cascade resumes when it merges"
+                    enable_auto_merge "$MERGE_BRANCH"
                     approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
-                    HALTED="PR opened for $TARGET"
+                    HELD="PR opened for $TARGET"
                   fi
                   echo "::endgroup::"
                   break
                 fi
-                echo "::error::Cascade halted: updated existing PR for $TARGET instead of pushing directly"
+                echo "::notice::Updated the open PR for $TARGET instead of pushing directly"
                 echo "::endgroup::"
-                HALTED="PR already open for $TARGET (branch updated with $SOURCE_DESC)"
+                HELD="PR already open for $TARGET (branch updated with $SOURCE_DESC)"
                 break
               elif [[ $ls_rc -ne 2 ]]; then
                 # Exit 2 means "no such branch". Any other code (auth, network,
@@ -1216,9 +1290,9 @@ jobs:
               # person created it since then.
               if ! push_with_pat origin "$MERGE_BRANCH" --force-with-lease; then
                 echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
-                if [[ -z "${_forward_merge_pat:-}" ]] \
+                if [[ -z "${_merge_credential:-}" ]] \
                     && ! git diff --quiet "origin/$TARGET" HEAD -- .github/workflows/; then
-                  echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set FORWARD_MERGE_PAT (a fine-grained PAT for this repository only, with contents: write and workflows: write), or push $MERGE_BRANCH by hand."
+                  echo "::error::This merge changes .github/workflows/, which GITHUB_TOKEN cannot push. To fix, set the App secrets SYNC_APP_ID and SYNC_APP_PRIVATE_KEY (the App needs workflows: write), or push $MERGE_BRANCH by hand."
                 fi
                 echo "::endgroup::"
                 HALTED="merge-branch push failed for $TARGET"
@@ -1235,9 +1309,10 @@ jobs:
                 echo "::error::Failed to create PR for $MERGE_BRANCH"
                 HALTED="PR creation failed for $TARGET"
               else
-                echo "::error::Cascade halted: opened PR for $TARGET instead of pushing directly"
+                echo "::notice::Opened PR for $TARGET; the cascade resumes when it merges"
+                enable_auto_merge "$MERGE_BRANCH"
                 approve_pending_runs "$MERGE_SHA" "$MERGE_BRANCH"
-                HALTED="PR opened for $TARGET"
+                HELD="PR opened for $TARGET"
               fi
               echo "::endgroup::"
               break
@@ -1246,9 +1321,4 @@ jobs:
             echo "::endgroup::"
           done
 
-          if [[ -n "$HALTED" ]]; then
-            echo "Forward-merge cascade halted ($HALTED); downstream targets not merged"
-            exit 1
-          fi
-
-          echo "Forward-merge cascade completed"
+          finish_cascade
