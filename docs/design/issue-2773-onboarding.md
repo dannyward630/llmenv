@@ -135,17 +135,59 @@ The default re-run path is a merge.
 
 After a write, the flow runs `llmenv validate`, then `llmenv regenerate`.
 
+## Tool suggestions
+
+Onboarding suggests the tools that make agent work faster.
+The suggestions fall into two groups.
+
+1. llmenv features that run an MCP server: ICM memory (`features.memory`) and codebase-memory-mcp (`features.codebase_memory`).
+2. CLI tools that the agent runs often, such as `rg`, `fd`, `ast-grep`, `jq`, `gh`, `uv`, `shellcheck`, and `shfmt`.
+   Some tools depend on the scan evidence, for example `uv` and `ruff` for a Python repository, or `cargo-nextest` for a Rust repository.
+
+The candidate tools live in one data file in the repository, not in the skill prose.
+The file names each tool, its purpose, the evidence that makes it relevant, and its package name for each package manager.
+The file holds no version numbers.
+
+The work splits as in Decision 2.
+
+- Rust reports which candidate tools are on `PATH`. The report makes no network call.
+- The skill decides which tools to suggest and why, from the scan evidence and the `PATH` report.
+
+Each suggestion follows these rules.
+
+1. Onboarding never installs a tool.
+   An install runs third-party code, so the install is the user's action.
+   For a missing tool, the plan shows the install command for the user's package manager.
+2. For a tool that is present, the plan suggests the matching rule (for example, "use `rg`, not `grep`") and the matching permission allows.
+   Each allow needs a yes, as in Q4.
+3. An MCP server feature needs a yes, as in Q4.
+   The plan shows the server command in full.
+   If the server binary is missing, the plan shows its install command, and the feature stays off until the binary is present.
+
+### ICM and codebase-memory-mcp are the strong default
+
+Much of llmenv's value depends on ICM memory and codebase-memory-mcp.
+Without them, the memory hooks and the code-graph tools have nothing to call.
+Onboarding therefore treats these two as the recommended default, not as one option in a list.
+
+- The plan shows them first in the tool part, above every other suggestion.
+- Their yes is preselected. The user still confirms each one, because each one runs an MCP server (Q4).
+- A yes turns on the matching feature: `features.memory` for ICM, and `features.codebase_memory` for codebase-memory-mcp.
+- A no is allowed. The plan then states what stops working without the server, so the choice is informed.
+- On a re-run (Q5), a machine that has either feature off gets the suggestion again, with the same explanation.
+
 ## The plan the user reviews
 
 The plan is printed in the conversation.
-It has four parts, in this order.
+It has five parts, in this order.
 
 1. Scan summary: roots, repository count, and the count skipped by a bound.
 2. Suggested bundles, each with its evidence and an accept or reject choice.
-3. Items that need a yes: hooks, MCP servers, and permission allows.
-4. Files to create, and the `config.yaml` diff.
+3. Suggested tools: features to turn on, rules to add, and install commands for missing tools.
+4. Items that need a yes: hooks, MCP servers, and permission allows.
+5. Files to create, and the `config.yaml` diff.
 
-The user approves the plan as a whole, and then approves the items in part 3 one by one.
+The user approves the plan as a whole, and then approves the items in part 4 one by one.
 Nothing is written before that approval.
 
 ## Not in scope
@@ -163,3 +205,4 @@ Each buildable piece has its own issue, on milestone v3.13.0.
 3. #2787: productize shipped bundles: split general from personal rules, move personal values to user bundles, and add the CI guard.
 4. #2788: guarded writes and the plan gate: plan validation, the per-item trust gate, the `config.yaml` diff, and the replacement of the `setup-llmenv` walkthrough.
 5. #2789: re-run merge semantics on top of `--rescan`.
+6. #2791: tool suggestions: the candidate data file, the `PATH` report, and the strong default for ICM and codebase-memory-mcp.
