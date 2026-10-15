@@ -502,7 +502,10 @@ fn render_branch_with(
         Ok(Some(name)) => name,
         Ok(None) => return String::new(),
         // Same label as the other unreadable widgets. The segment is never hidden silently.
-        Err(_) => return "branch: unreadable".to_string(),
+        Err(e) => {
+            tracing::error!("statusline branch cannot be read: {e}");
+            return "branch: unreadable".to_string();
+        }
     };
     let name = super::sanitize(&name); // untrusted (stdin / git ref)
     let format = cfg
@@ -689,7 +692,14 @@ fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Option<PrInfo> {
         .workspace
         .as_ref()
         .and_then(|w| w.current_dir.as_deref())?;
-    let branch = resolve_branch_name(data).ok().flatten()?;
+    // Hidden on a read error, so the branch widget's "branch: unreadable" label is the signal.
+    let branch = match resolve_branch_name(data) {
+        Ok(branch) => branch?,
+        Err(e) => {
+            tracing::error!("statusline pr widget hidden, branch cannot be read: {e}");
+            return None;
+        }
+    };
     derive_pr(
         gh,
         Path::new(dir),

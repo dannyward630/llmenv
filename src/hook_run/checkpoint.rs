@@ -355,7 +355,9 @@ pub(crate) fn spawner_state_dir() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    crate::paths::state_dir().ok()
+    crate::paths::state_dir()
+        .inspect_err(|e| tracing::error!("spawned job has no state dir, so no checkpoint: {e:#}"))
+        .ok()
 }
 
 /// Write the checkpoint of a job that is about to spawn, and return its path. `None` when there
