@@ -44,3 +44,40 @@ pub(crate) fn create_refusing_symlink(path: &std::path::Path) -> std::io::Result
 /// File name used for SessionEnd dedup across hook run and memory CLI.
 /// Shared between `hook_run` and `memory` modules — must not drift.
 pub(crate) const HOOK_STORE_CHUNK: &str = "hook_store_chunk";
+
+/// Keeps a readable directory entry. An unreadable one is logged with its directory and
+/// `purpose`, then skipped, so the loss is visible (#2718).
+pub(crate) fn readable_entry(
+    dir: &std::path::Path,
+    purpose: &str,
+    entry: std::io::Result<std::fs::DirEntry>,
+) -> Option<std::fs::DirEntry> {
+    entry
+        .inspect_err(|e| {
+            tracing::error!(
+                error = %e,
+                dir = %dir.display(),
+                "cannot read a directory entry for {purpose}"
+            );
+        })
+        .ok()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::expect_fun_call)]
+mod readable_entry_tests {
+    use super::readable_entry;
+
+    #[test]
+    fn an_unreadable_entry_is_dropped_and_a_readable_one_is_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("a")).expect("create entry");
+        let entry = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .next()
+            .expect("one entry");
+        assert!(readable_entry(dir.path(), "test", entry).is_some());
+        let err = Err(std::io::Error::other("boom"));
+        assert!(readable_entry(dir.path(), "test", err).is_none());
+    }
+}
