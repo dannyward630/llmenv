@@ -176,6 +176,11 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - A plugin sync fails when `git reset --hard` cannot run, instead of reporting the old checkout as synced (#2737) [fix:plugins]
 - A failed clear or save of the stop reminder state reaches the agent, and an unreadable agent config is reported with a notice [fix:hook]
 - Detached recorders, the ICM store, consolidation, and the checkpoint spawner log a missing state directory instead of dropping it [fix:hook]
+- The session start wake-up includes the session project's own memories. Before, it held only global memories, because the icm budget filled with them first. A memory that icm cut short is dropped whole, not shown half-written (#2756) [fix:memory]
+- Failure recall ranks the session project's memories before other projects' memories. The shared `errors-resolved` fixes still come from every project (#2755) [fix:recall]
+- Allow `icm_memory_related` in the read-only ICM tier, so the agent no longer gets a permission prompt for it (#2758) [fix:adapter]
+- The ICM memory header wraps only ICM memory. llmenv notices, such as the `cd` advisory and the repeat warning, go out without it (#2754) [fix:hook]
+- Recall and agent config notices name the cause and the fix (#2751) [fix:hook]
 
 ### Security
 

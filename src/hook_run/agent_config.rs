@@ -289,7 +289,8 @@ fn write_session_start(state_dir: &Path, session_id: &str, mut doc: AgentConfig)
     else {
         crate::agent_notice::record(
             "llmenv could not update the agent config: it is locked or cannot be opened, so the \
-             model history was not recorded. Fix: run `llmenv doctor` to check the state directory.",
+             model history and creation time were not recorded. Fix: run `llmenv doctor` to check \
+             the state directory.",
         );
         return;
     };
@@ -346,7 +347,8 @@ fn apply_model_switch(
 /// Tells the agent that an unreadable agent config was replaced and lost its model history.
 fn note_history_reset() {
     crate::agent_notice::record(
-        "llmenv: the agent config could not be read, so its model history was reset.",
+        "llmenv: the agent config could not be read, so its model history was reset. Fix: run \
+         `llmenv doctor` to check the state directory.",
     );
 }
 

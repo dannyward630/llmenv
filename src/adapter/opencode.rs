@@ -1257,10 +1257,15 @@ impl AgentAdapter for OpencodeAdapter {
         Some(crate::materialize::schema_gen::with_root_additional_properties(value))
     }
 
-    fn emit_hook_context(&self, hook_event_name: &str, text: &str) -> String {
+    fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String {
         // The generated shim adds SessionStart context to the first message
         // (`session.created` in SHIM_TEMPLATE).
-        super::emit_hook_context(hook_event_name, text, super::SessionStartContext::Accepted)
+        super::emit_hook_context(
+            hook_event_name,
+            memory,
+            notes,
+            super::SessionStartContext::Accepted,
+        )
     }
 }
 
@@ -3899,7 +3904,7 @@ mod tests {
                 .contains(&"PreToolUse")
         );
         // The shim reads hookSpecificOutput.additionalContext on SessionStart.
-        let out = OpencodeAdapter.emit_hook_context("SessionStart", "hi");
+        let out = OpencodeAdapter.emit_hook_context("SessionStart", "hi", "");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["hookSpecificOutput"]["additionalContext"],
