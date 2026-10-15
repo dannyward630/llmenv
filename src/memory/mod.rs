@@ -93,12 +93,7 @@ pub(crate) fn scope_recall_args(
     let Some(dir) = cwd else {
         return Ok(serde_json::json!({ "query": "", "project": "" }));
     };
-    let project = project::session_project(dir)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "cannot tell the project of {}. Run this from a folder with a name, or inside a git repository.",
-            dir.display()
-        )
-    })?;
+    let project = project::session_project(dir)?;
     Ok(serde_json::json!({ "query": "", "project": project }))
 }
 
