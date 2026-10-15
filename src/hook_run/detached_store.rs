@@ -75,7 +75,9 @@ fn run_icm_store_inner(args: serde_json::Value) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let state_dir = crate::paths::state_dir().ok();
+    let state_dir = crate::paths::state_dir()
+        .inspect_err(|e| tracing::error!("ICM store has no state dir, so it skips dedupe: {e:#}"))
+        .ok();
     rt.block_on(store_once(&client, state_dir.as_deref(), args))
 }
 
