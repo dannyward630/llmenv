@@ -75,7 +75,7 @@ pub trait GitBackend {
     fn pull(&self, repo: &Path) -> Result<()>;
 
     /// Resolve the current HEAD sha of the clone at `repo`, or `None`.
-    fn head(&self, repo: &Path) -> Option<String>;
+    fn head(&self, repo: &Path) -> Result<String, String>;
 }
 
 /// `GitBackend` backed by the real `git` binary on `PATH`.
@@ -89,8 +89,8 @@ impl GitBackend for SystemGit {
     fn pull(&self, repo: &Path) -> Result<()> {
         git_pull(repo)
     }
-    fn head(&self, repo: &Path) -> Option<String> {
-        git_head(repo).inspect_err(|e| tracing::warn!("{e}")).ok()
+    fn head(&self, repo: &Path) -> Result<String, String> {
+        git_head(repo)
     }
 }
 
@@ -321,17 +321,19 @@ fn sync_git(
     // the clone is broken and we shouldn't silently cache it with an unstable hash.
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
-    if head.is_none() && dest.join(".git").exists() {
+    if let Err(head_error) = &head
+        && dest.join(".git").exists()
+    {
         let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
-            "marketplace '{}': unable to resolve git HEAD ({note})",
+            "marketplace '{}': unable to resolve git HEAD: {head_error} ({note})",
             m.name
         )));
     }
 
     Ok(MarketplaceState {
         install_location: dest,
-        head,
+        head: head.ok(),
     })
 }
 
@@ -701,16 +703,18 @@ fn sync_external_plugin_with(
     // the clone is broken and we shouldn't silently cache it with an unstable hash.
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
-    if head.is_none() && dest.join(".git").exists() {
+    if let Err(head_error) = &head
+        && dest.join(".git").exists()
+    {
         let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
-            "plugin '{plugin}@{marketplace}': unable to resolve git HEAD ({note})"
+            "plugin '{plugin}@{marketplace}': unable to resolve git HEAD: {head_error} ({note})"
         )));
     }
 
     Ok(MarketplaceState {
         install_location: dest,
-        head,
+        head: head.ok(),
     })
 }
 
@@ -971,8 +975,8 @@ fn git_pull(repo: &Path) -> Result<()> {
         .output()
         .context("spawning git reset")?;
     if !reset_out.status.success() {
-        tracing::warn!(
-            "marketplace refresh did not fast-forward at {}: {}",
+        anyhow::bail!(
+            "git reset --hard @{{u}} failed at {}: {}",
             repo.display(),
             git::git_failure_detail(&reset_out.stderr, &reset_out.stdout, reset_out.status)
         );
@@ -992,10 +996,10 @@ fn git_rev_parse(repo: &Path, ref_name: &str) -> Result<String, String> {
         .output()
         .map_err(|e| format!("git could not start in {}: {e}", repo.display()))?;
     if !output.status.success() {
-        return Err(git::git_failure_detail(
-            &output.stderr,
-            &output.stdout,
-            output.status,
+        return Err(format!(
+            "git rev-parse {ref_name} failed in {}: {}",
+            repo.display(),
+            git::git_failure_detail(&output.stderr, &output.stdout, output.status)
         ));
     }
     let sha = String::from_utf8(output.stdout)
@@ -1094,8 +1098,8 @@ mod tests {
             fn pull(&self, _: &std::path::Path) -> Result<()> {
                 unreachable!("should not attempt pull")
             }
-            fn head(&self, _: &std::path::Path) -> Option<String> {
-                None
+            fn head(&self, _: &std::path::Path) -> Result<String, String> {
+                Err("mock: no HEAD".to_string())
             }
         }
 
@@ -1123,8 +1127,8 @@ mod tests {
             fn pull(&self, _: &std::path::Path) -> Result<()> {
                 unreachable!()
             }
-            fn head(&self, _: &std::path::Path) -> Option<String> {
-                None
+            fn head(&self, _: &std::path::Path) -> Result<String, String> {
+                Err("mock: no HEAD".to_string())
             }
         }
 
@@ -1315,8 +1319,8 @@ mod tests {
                 self.pull_calls.set(self.pull_calls.get() + 1);
                 Ok(())
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("pinned-sha".to_string())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("pinned-sha".to_string())
             }
         }
 
@@ -1366,8 +1370,8 @@ mod tests {
             fn pull(&self, _: &Path) -> Result<()> {
                 Ok(())
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("abc123".to_string())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("abc123".to_string())
             }
         }
 
@@ -1411,8 +1415,8 @@ mod tests {
             self.0.lock().unwrap().push("pull".into());
             Ok(())
         }
-        fn head(&self, _: &Path) -> Option<String> {
-            Some("abc123".into())
+        fn head(&self, _: &Path) -> Result<String, String> {
+            Ok("abc123".into())
         }
     }
 
@@ -1592,8 +1596,8 @@ mod tests {
             fn pull(&self, _: &Path) -> Result<()> {
                 Ok(())
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("abc".into())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("abc".into())
             }
         }
         let cache = tempfile::tempdir().unwrap();
@@ -1635,8 +1639,8 @@ mod tests {
             fn pull(&self, _: &Path) -> Result<()> {
                 Ok(())
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("abc123".to_string())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("abc123".to_string())
             }
         }
 
@@ -1675,8 +1679,8 @@ mod tests {
             fn pull(&self, _: &Path) -> Result<()> {
                 unreachable!("pinned source must never pull")
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("old-sha".to_string())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("old-sha".to_string())
             }
         }
 
@@ -1717,8 +1721,8 @@ mod tests {
                 self.pull_calls.set(self.pull_calls.get() + 1);
                 Ok(())
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("head-sha".to_string())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("head-sha".to_string())
             }
         }
 
@@ -1757,8 +1761,8 @@ mod tests {
             fn pull(&self, _: &std::path::Path) -> Result<()> {
                 unreachable!()
             }
-            fn head(&self, _: &std::path::Path) -> Option<String> {
-                None
+            fn head(&self, _: &std::path::Path) -> Result<String, String> {
+                Err("mock: no HEAD".to_string())
             }
         }
 
@@ -2107,8 +2111,8 @@ mod tests {
             fn pull(&self, _: &Path) -> Result<()> {
                 Ok(())
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("abc".into())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("abc".into())
             }
         }
         let cache = tempfile::tempdir().unwrap();
@@ -2341,8 +2345,8 @@ mod tests {
             fn pull(&self, _: &Path) -> Result<()> {
                 Ok(())
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                Some("abc123".to_string())
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Ok("abc123".to_string())
             }
         }
         let cache = tempfile::tempdir().unwrap();
@@ -2374,8 +2378,8 @@ mod tests {
             fn pull(&self, _: &Path) -> Result<()> {
                 unreachable!()
             }
-            fn head(&self, _: &Path) -> Option<String> {
-                None
+            fn head(&self, _: &Path) -> Result<String, String> {
+                Err("mock: no HEAD".to_string())
             }
         }
         let cache = tempfile::tempdir().unwrap();
@@ -2427,8 +2431,8 @@ mod tests {
             fn pull(&self, _: &std::path::Path) -> Result<()> {
                 unreachable!()
             }
-            fn head(&self, _: &std::path::Path) -> Option<String> {
-                None
+            fn head(&self, _: &std::path::Path) -> Result<String, String> {
+                Err("mock: no HEAD".to_string())
             }
         }
 
@@ -2463,8 +2467,8 @@ mod tests {
             fn pull(&self, _: &std::path::Path) -> Result<()> {
                 unreachable!()
             }
-            fn head(&self, _: &std::path::Path) -> Option<String> {
-                None
+            fn head(&self, _: &std::path::Path) -> Result<String, String> {
+                Err("mock: no HEAD".to_string())
             }
         }
 
@@ -2502,8 +2506,8 @@ mod tests {
             fn pull(&self, _: &std::path::Path) -> Result<()> {
                 unreachable!()
             }
-            fn head(&self, _: &std::path::Path) -> Option<String> {
-                None
+            fn head(&self, _: &std::path::Path) -> Result<String, String> {
+                Err("mock: no HEAD".to_string())
             }
         }
 
