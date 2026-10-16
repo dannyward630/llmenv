@@ -18,6 +18,11 @@ use crate::hook_run::session_ledger::{Ledger, LedgerStore, MAIN_AGENT, record_ha
 use crate::hook_run::session_state::unix_now;
 use crate::hook_run::transcript;
 
+mod cut;
+#[cfg(test)]
+use cut::cut_items_notice;
+use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
+
 const FAILURE_BUDGET_BYTES: usize = 2_000;
 const SUBAGENT_BUDGET_BYTES: usize = 4_000;
 const MAIN_LIMIT: u8 = 10;
@@ -116,48 +121,6 @@ fn report(flow: &str, outcome: &Outcome, budget: &RecallBudget) {
 
 async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow::Result<String>> {
     Some(Action::RecallQuery(q?).run(client, "", "").await)
-}
-
-/// Drops every line that icm cut short. icm ends a cut item with the cut marker, and that item
-/// lost its tail, so the line is removed whole rather than shown half-written (#2756). Returns
-/// the kept text and how many lines were dropped.
-fn drop_cut_items(text: &str) -> (String, usize) {
-    let (kept, cut): (Vec<&str>, Vec<&str>) = text
-        .lines()
-        .partition(|line| !line.trim_end().ends_with(CUT_MARKER));
-    (kept.join("\n"), cut.len())
-}
-
-/// Bytes the wake-up pack takes from the output budget: the pack, or the project memories alone
-/// when the wake-up call failed, plus the blank line that joins them to the scope set.
-fn pack_bytes(wake: &anyhow::Result<String>, own: &str) -> usize {
-    wake.as_ref().map_or(own.len() + 2, |t| t.len() + 2)
-}
-
-/// The notice for wake-up items that icm cut short, or `None` when none were cut (#2756).
-fn cut_items_notice(count: usize) -> Option<String> {
-    (count > 0).then(|| {
-        format!(
-            "llmenv: {count} memory item(s) were dropped because icm cut them short. Fix: store \
-             shorter memories, or run `llmenv doctor` to check the memory server."
-        )
-    })
-}
-
-/// Tells the agent that icm cut some items short, so the drop is not silent (#2756).
-fn note_cut_items(count: usize) {
-    if let Some(notice) = cut_items_notice(count) {
-        agent_notice::record(notice);
-    }
-}
-
-/// Joins the non-empty parts of the wake-up pack with a blank line.
-fn join_sections(first: &str, second: &str) -> String {
-    [first, second]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 /// The session project's own memories for the wake-up pack. The icm wake-up fills its budget
@@ -306,7 +269,7 @@ pub(super) async fn session_start(
     ctx: &AdaptiveCtx<'_>,
     wake: Action,
     scope: Vec<Action>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<super::HookText> {
     let reset = resets_ledger(ctx.payload["source"].as_str());
     let project = match &wake {
         Action::WakeUp(args) => args.project.clone(),
@@ -384,7 +347,7 @@ pub(super) async fn session_start(
     } else {
         vec![wake]
     };
-    Ok(budget.render(passthrough))
+    Ok(budget.hook_text(passthrough))
 }
 
 /// Notice for a ledger update that did not run: the next recall may repeat records (#2729).
@@ -431,9 +394,9 @@ fn ledger_or_skip(store: &LedgerStore, session_id: &str, hook: &str) -> Option<L
 pub(super) async fn turn_start(
     ctx: &AdaptiveCtx<'_>,
     scope: Vec<Action>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<super::HookText> {
     let Some(ledger) = ledger_or_skip(ctx.store, ctx.session_id, "turn_start") else {
-        return Ok(String::new());
+        return Ok(super::HookText::default());
     };
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, ledger.sent_for(MAIN_AGENT));
     let fallback = !ledger.scope_sent(MAIN_AGENT);
@@ -480,7 +443,7 @@ pub(super) async fn turn_start(
         }),
         RECALL_STATE_UNSAVED,
     );
-    Ok(budget.render(Vec::new()))
+    Ok(budget.hook_text(Vec::new()))
 }
 
 /// The ledger key for the context that fired the hook, and whether hashes may be
@@ -494,7 +457,7 @@ fn agent_key(payload: &Value) -> (String, bool) {
 }
 
 /// `PostToolUseFailure`: record the error, then inject related memories once.
-pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String> {
+pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super::HookText> {
     let tool = ctx.payload["tool_name"].as_str().unwrap_or_default();
     let error = ctx.payload["error"].as_str().unwrap_or_default();
     let now = unix_now();
@@ -510,7 +473,7 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
             ctx.session_id
         );
         note_skipped();
-        return Ok(String::new());
+        return Ok(super::HookText::default());
     };
     let (key, record) = agent_key(ctx.payload);
     let sent = ledger.sent_for(&key);
@@ -545,22 +508,22 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String
             RECALL_STATE_UNSAVED,
         );
     }
-    Ok(budget.render(Vec::new()))
+    Ok(budget.hook_text(Vec::new()))
 }
 
 /// `SubagentStart`: task-relevant memories for a fresh subagent context.
-pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<String> {
+pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super::HookText> {
     let (key, record) = agent_key(ctx.payload);
     if !record || key == MAIN_AGENT {
         tracing::warn!("SubagentStart without a usable agent_id, injection skipped");
-        return Ok(String::new());
+        return Ok(super::HookText::default());
     }
     let agent_type = ctx.payload["agent_type"].as_str().unwrap_or_default();
     let now = unix_now();
     // Checked before the take below, which consumes the pending task for good. A failed read
     // after the take would lose that task, and SubagentStart does not fire again.
     if ledger_or_skip(ctx.store, ctx.session_id, "subagent_start").is_none() {
-        return Ok(String::new());
+        return Ok(super::HookText::default());
     }
     // A resumed subagent already has an entry; its task was taken at launch, and
     // the queue now holds tasks for new siblings only.
@@ -577,7 +540,7 @@ pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<Stri
     }
     let task = taken.flatten();
     let Some(ledger) = ledger_or_skip(ctx.store, ctx.session_id, "subagent_start") else {
-        return Ok(String::new());
+        return Ok(super::HookText::default());
     };
     let text = relevance::subagent_query(
         task.as_ref().map(|t| t.task.as_str()),
@@ -598,7 +561,7 @@ pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<Stri
             .update(ctx.session_id, |l| l.mark_sent(&key, kept)),
         RECALL_STATE_UNSAVED,
     );
-    Ok(budget.render(Vec::new()))
+    Ok(budget.hook_text(Vec::new()))
 }
 
 /// Local ledger writes with no MCP call: batch activity and queued subagent tasks.
@@ -763,7 +726,8 @@ mod tests {
             vec![tag_action("proj")],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .text();
         assert!(
             out.contains("wake pack") && out.contains("scope fact"),
             "{out}"
@@ -771,7 +735,8 @@ mod tests {
         let turn = json!({"prompt": "work on recall"});
         let out = turn_start(&ctx(&f, &turn), vec![tag_action("proj")])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert!(out.contains("relevant fact"), "{out}");
         assert!(!out.contains("scope fact"), "already sent: {out}");
     }
@@ -793,7 +758,8 @@ mod tests {
                 vec![tag_action("proj")],
             )
             .await
-            .unwrap();
+            .unwrap()
+            .text();
             outputs.push(out.contains("scope fact"));
         }
         assert_eq!(
@@ -822,7 +788,8 @@ mod tests {
                 vec![tag_action("proj")],
             )
             .await
-            .unwrap();
+            .unwrap()
+            .text();
             assert!(!out.contains("wake pack"), "{source}: {out}");
             server.verify().await;
         }
@@ -835,7 +802,8 @@ mod tests {
         let turn = json!({"prompt": "hi"});
         let out = turn_start(&ctx(&f, &turn), vec![tag_action("proj")])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert!(out.contains("scope fact"), "{out}");
         assert!(f.store.load("s1").unwrap().scope_sent(MAIN_AGENT));
     }
@@ -846,9 +814,9 @@ mod tests {
         let f = fixture(&server);
         f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
         let turn = json!({"prompt": "same"});
-        turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+        turn_start(&ctx(&f, &turn), vec![]).await.unwrap().text();
         let calls_before = server.received_requests().await.unwrap().len();
-        turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+        turn_start(&ctx(&f, &turn), vec![]).await.unwrap().text();
         assert_eq!(
             server.received_requests().await.unwrap().len(),
             calls_before
@@ -865,7 +833,7 @@ mod tests {
         let f = fixture(&server);
         f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
         let turn = json!({"prompt": "why"});
-        let out = turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+        let out = turn_start(&ctx(&f, &turn), vec![]).await.unwrap().text();
         assert!(
             out.contains("main fact") && out.contains("sibling fact"),
             "{out}"
@@ -893,7 +861,7 @@ mod tests {
         let f = fixture(&server);
         f.store.update("s1", |l| l.set_scope_sent(MAIN_AGENT));
         let turn = json!({"prompt": "x"});
-        let out = turn_start(&ctx(&f, &turn), vec![]).await.unwrap();
+        let out = turn_start(&ctx(&f, &turn), vec![]).await.unwrap().text();
         assert!(out.contains("kept fact"), "{out}");
     }
 
@@ -913,10 +881,12 @@ mod tests {
         });
         turn_start(&ctx(&f, &json!({"prompt": "why"})), vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         tool_failure(&ctx(&f, &json!({"tool_name": "Bash", "error": "boom"})))
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         let recalls: Vec<String> = server
             .received_requests()
             .await
@@ -951,7 +921,8 @@ mod tests {
         let f = fixture(&server);
         turn_start(&ctx(&f, &json!({"prompt": "hi"})), vec![tag_action("proj")])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         let ledger = f.store.load("s1").unwrap();
         assert!(
             !ledger.scope_sent(MAIN_AGENT),
@@ -1009,7 +980,8 @@ mod tests {
             vec![tag_action("proj")],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .text();
         assert!(out.contains("wake pack"), "{out}");
         assert!(!f.store.load("s1").unwrap().scope_sent(MAIN_AGENT));
     }
@@ -1030,7 +1002,8 @@ mod tests {
             vec![tag_action("proj")],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .text();
         assert!(out.len() <= RECALL_BUDGET_BYTES + 200, "{}", out.len());
         let sent = f.store.load("s1").unwrap().sent_for(MAIN_AGENT).len();
         assert!(sent < 10, "only records that fit are marked sent: {sent}");
@@ -1048,7 +1021,8 @@ mod tests {
             vec![tag_action("proj")],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .text();
         assert!(
             out.contains("big scope fact"),
             "the record fits: {}",
@@ -1059,7 +1033,7 @@ mod tests {
     async fn start_with_a_failed_wake(
         scope_body: Option<&str>,
         scope: Vec<Action>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<crate::hook_run::HookText> {
         let pairs: Vec<(&str, &str)> = scope_body
             .map(|b| ("llmenv-tag:proj", b))
             .into_iter()
@@ -1079,7 +1053,8 @@ mod tests {
         let out =
             start_with_a_failed_wake(Some("[context-p] scope fact"), vec![tag_action("proj")])
                 .await
-                .unwrap();
+                .unwrap()
+                .text();
         assert!(out.contains("scope fact"), "{out}");
     }
 
@@ -1111,14 +1086,16 @@ mod tests {
         });
         session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert_eq!(
             f.store.load("s1").unwrap().project.as_deref(),
             Some("llmenv")
         );
         let out = turn_start(&ctx(&f, &json!({"prompt": "why"})), vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         let project_at = out.find("project fact").expect("project-scoped record");
         let global_at = out.find("global fact").expect("all-projects record");
         assert!(project_at < global_at, "{out}");
@@ -1129,10 +1106,10 @@ mod tests {
         let server = server_with(&[("errors-resolved", "[errors-resolved] fix: pin mcp<2")]).await;
         let f = fixture(&server);
         let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
-        let first = tool_failure(&ctx(&f, &payload)).await.unwrap();
+        let first = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
         assert!(first.contains("pin mcp<2"), "{first}");
         assert_eq!(f.store.load("s1").unwrap().errors().len(), 1);
-        let second = tool_failure(&ctx(&f, &payload)).await.unwrap();
+        let second = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
         assert!(!second.contains("pin mcp<2"), "already sent: {second}");
     }
 
@@ -1156,7 +1133,8 @@ mod tests {
         });
         let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert!(out.contains("project fact"), "{out}");
         assert!(out.contains("global fact"), "{out}");
         assert!(
@@ -1181,7 +1159,8 @@ mod tests {
         });
         let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert!(out.contains("## Identity"), "{out}");
         assert!(out.contains("kept preference"), "{out}");
         assert!(
@@ -1221,7 +1200,8 @@ mod tests {
         });
         let out = session_start(&ctx(&f, &json!({"source": "resume"})), wake, vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert!(
             !out.contains("project fact"),
             "a resume sends no pack: {out}"
@@ -1238,7 +1218,8 @@ mod tests {
         });
         let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert!(
             out.contains("global fact"),
             "the wake-up pack still goes out: {out}"
@@ -1278,7 +1259,8 @@ mod tests {
         });
         let out = session_start(&ctx(&f, &json!({"source": "startup"})), wake, vec![])
             .await
-            .unwrap();
+            .unwrap()
+            .text();
         assert!(
             out.contains("project fact"),
             "the project memories must survive: {out}"
@@ -1301,7 +1283,7 @@ mod tests {
         f.store
             .update("s1", |l| l.project = Some("proj-a".to_string()));
         let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
-        let out = tool_failure(&ctx(&f, &payload)).await.unwrap();
+        let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
         let own = out.find("[own]");
         let fix = out.find("[fix]");
         assert!(
@@ -1323,7 +1305,7 @@ mod tests {
                 // A directory where the ledger file belongs makes the read fail, not miss.
                 std::fs::create_dir_all(f._dir.path().join("recall_session/s1.json")).unwrap();
                 let payload = json!({"tool_name": "Bash", "error": "boom"});
-                let out = tool_failure(&ctx(&f, &payload)).await.unwrap();
+                let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
                 assert!(out.is_empty(), "{out}");
             });
         });
@@ -1335,7 +1317,7 @@ mod tests {
         let server = server_with(&[("errors-resolved", "[errors-resolved] fix")]).await;
         let f = fixture(&server);
         let payload = json!({"tool_name": "Bash", "error": "boom", "agent_id": "../evil"});
-        let out = tool_failure(&ctx(&f, &payload)).await.unwrap();
+        let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
         assert!(out.contains("fix"));
         assert!(f.store.load("s1").unwrap().sent_for(MAIN_AGENT).is_empty());
     }
@@ -1362,7 +1344,7 @@ mod tests {
                     "tool_input": {"subagent_type": "Explore", "prompt": "map the recall path"}}),
         );
         let payload = json!({"agent_id": "agent-1", "agent_type": "Explore"});
-        let out = subagent_start(&ctx(&f, &payload)).await.unwrap();
+        let out = subagent_start(&ctx(&f, &payload)).await.unwrap().text();
         assert!(out.contains("recall lives in hook_run"), "{out}");
         let ledger = f.store.load("s1").unwrap();
         assert_eq!(ledger.sent_for(MAIN_AGENT).len(), 1, "parent unchanged");
@@ -1383,7 +1365,7 @@ mod tests {
                     "tool_input": {"subagent_type": "Explore", "prompt": "new sibling task"}}),
         );
         let resumed = json!({"agent_id": "agent-1", "agent_type": "Explore"});
-        subagent_start(&ctx(&f, &resumed)).await.unwrap();
+        subagent_start(&ctx(&f, &resumed)).await.unwrap().text();
         let task = f
             .store
             .update("s1", |l| l.take_subagent("Explore", unix_now()))
@@ -1501,7 +1483,7 @@ mod tests {
         let path = f._dir.path().join("recall_session").join("s1.json");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
         let payload = json!({"agent_id": "agent-1", "agent_type": "Explore"});
-        let out = subagent_start(&ctx(&f, &payload)).await.unwrap();
+        let out = subagent_start(&ctx(&f, &payload)).await.unwrap().text();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(out, "", "recall is skipped when the ledger cannot be read");
         // The skipped call must not consume the task, because SubagentStart does not fire again.
@@ -1517,7 +1499,7 @@ mod tests {
         let server = server_with(&[]).await;
         let f = fixture(&server);
         let payload = json!({"agent_type": "Explore"});
-        let out = subagent_start(&ctx(&f, &payload)).await.unwrap();
+        let out = subagent_start(&ctx(&f, &payload)).await.unwrap().text();
         assert!(out.is_empty(), "{out}");
         assert!(
             !f.store.load("s1").unwrap().knows_agent(MAIN_AGENT),
@@ -1538,7 +1520,10 @@ mod tests {
             });
         });
         let payload = json!({"prompt": "work on it"});
-        let out = turn_start(&ctx(&f, &payload), Vec::new()).await.unwrap();
+        let out = turn_start(&ctx(&f, &payload), Vec::new())
+            .await
+            .unwrap()
+            .text();
         assert!(out.contains("keyword fact"), "{out}");
     }
 }

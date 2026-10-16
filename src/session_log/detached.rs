@@ -177,8 +177,11 @@ fn run_record_with(
 ) -> anyhow::Result<()> {
     // The parent can fail to pipe all of the payload, so the checkpoint backs it up.
     let parsed = checkpoint::inputs_or_checkpoint::<RecordPayload>(payload_json, checkpoint);
-    let unparseable = parsed.is_err();
-    let result = parsed.and_then(record);
+    // A checkpoint that could not be read may succeed on a retry, so its file stays (#2779).
+    let unparseable = parsed.as_ref().err().is_some_and(|e| !e.keep_checkpoint);
+    let result = parsed
+        .map_err(checkpoint::InputsError::into_error)
+        .and_then(record);
     match &result {
         Ok(()) => checkpoint::finish(checkpoint),
         Err(_) => {
