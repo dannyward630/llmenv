@@ -189,7 +189,7 @@ The release workflow requires one secret (repo Settings → Secrets and variable
 crates.io needs no secret, because the workflow uses trusted publishing.
 The `forward-merge-release` workflow runs as the `phaedrus-sync` GitHub App (see [Branch Strategy](#branch-strategy)).
 It needs two repository secrets, `SYNC_APP_ID` and `SYNC_APP_PRIVATE_KEY`, for an App installed on this repository.
-The optional `FORWARD_MERGE_PAT` secret is a fallback, used unless both App secrets are set.
+If either secret is missing, the run fails and names it.
 
 **Security notes:**
 
@@ -236,8 +236,8 @@ Each link of the chain merges the previous link, so `main` also receives the com
 - Any other conflict stops the chain and fails the run with the `git merge` command to run by hand.
   Resolve it on the target branch, then push.
 - A `forward-merge/<source>-to-<target>` branch that is left behind is updated with each new source commit.
-  If that update conflicts, the branch has no open pull request, and only the workflow wrote its commits, the workflow resets the branch to a fresh merge and logs the old tip.
-  A branch with a commit from a person, or with an open pull request, is never reset: the run stops as above.
+  If that branch has no open pull request and only the workflow wrote its commits, the workflow first resets it to a fresh merge and logs the old tip, so old cascade merges do not pile up on it.
+  A branch with a commit from a person, or with an open pull request, is never reset: a conflict there stops the run as above.
 
 ## Troubleshooting
 
