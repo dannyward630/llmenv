@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use llmenv_paths::{create_dir_owner_only, state_dir};
 
+use crate::session_log::rotation::{MAX_BYTES, rotate_if_full, rotation_marker};
+
 /// Default file-sink path: `<state_dir>/session-log.jsonl`.
 ///
 /// # Errors
@@ -41,6 +43,19 @@ impl FileSink {
         if let Some(parent) = self.path.parent() {
             create_dir_owner_only(parent)?;
         }
+        // A failed rotation must not stop logging. The event goes to the active file, and the
+        // next append tries the rotation again.
+        let rotated = match rotate_if_full(&self.path, MAX_BYTES) {
+            Ok(rotated) => rotated,
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "session log rotation failed; appending to the active file"
+                );
+                None
+            }
+        };
         let mut opts = OpenOptions::new();
         opts.create(true).append(true);
         #[cfg(unix)]
@@ -60,6 +75,10 @@ impl FileSink {
             use std::os::unix::fs::PermissionsExt;
             f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
+        if let Some(name) = rotated {
+            f.write_all(rotation_marker(&name).as_bytes())?;
+            f.write_all(b"\n")?;
+        }
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")
     }
@@ -69,6 +88,8 @@ impl FileSink {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::session_log::rotation::{KEPT_ROTATIONS, rotation_path};
+    use std::fs::File;
 
     #[test]
     fn append_writes_lines_and_preserves_existing() {
@@ -126,5 +147,36 @@ mod tests {
             0,
             "append must lock down a pre-existing looser-permission file: {mode:o}"
         );
+    }
+
+    #[test]
+    fn an_append_to_a_full_file_starts_the_new_file_with_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        // A sparse file of the real cap: no 64 MiB of data is written.
+        File::create(&path).unwrap().set_len(MAX_BYTES).unwrap();
+        FileSink::new(path.clone()).append("{\"after\":1}");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let mut lines = body.lines();
+        assert_eq!(
+            lines.next(),
+            Some(rotation_marker("session-log.jsonl.1").as_str())
+        );
+        assert_eq!(lines.next(), Some("{\"after\":1}"));
+        assert!(rotation_path(&path, 1).exists());
+    }
+
+    #[test]
+    fn a_failed_rotation_still_appends_the_event_to_the_active_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        File::create(&path).unwrap().set_len(MAX_BYTES).unwrap();
+        // A non-empty directory where the oldest generation belongs makes its removal fail.
+        let oldest = rotation_path(&path, KEPT_ROTATIONS);
+        std::fs::create_dir(&oldest).unwrap();
+        std::fs::write(oldest.join("keep"), b"k").unwrap();
+        FileSink::new(path.clone()).append("{\"after\":1}");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.ends_with("{\"after\":1}\n"), "the event was lost");
     }
 }

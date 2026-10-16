@@ -8,7 +8,9 @@
 #[must_use]
 pub(crate) fn core_instruction_text(redirect: bool) -> String {
     let mut text = String::from(
-        "llmenv task tracking. These rules always apply.\n\
+        "llmenv task tracking. These rules always apply. The tracker has no MCP tool: run every \
+         `llmenv task` command through Bash, such as `llmenv task session start <name> --task \
+         \"<step>\"`.\n\
          1. Open a session when the work has more than one part: `llmenv task session start \
          <name> --task \"<step 1>\" --task \"<step 2>\"`.\n\
          2. A session with no task is an error. Add each step before you start it: `llmenv task \
@@ -51,6 +53,24 @@ mod tests {
             "redirected to `llmenv task`",
         ] {
             assert!(text.contains(needle), "missing {needle:?}: {text}");
+        }
+    }
+
+    /// Agents invented an `mcp__llmenv__*` tool for the tracker (#2827). The sentence that
+    /// rules that out must name the Bash form and the session command together.
+    #[test]
+    fn the_text_says_the_tracker_has_no_mcp_tool_and_names_the_bash_form() {
+        for flag in [true, false] {
+            let text = core_instruction_text(flag);
+            assert!(text.contains("The tracker has no MCP tool"), "{text}");
+            assert!(
+                text.contains("run every `llmenv task` command through Bash"),
+                "{text}"
+            );
+            assert!(
+                text.contains("`llmenv task session start <name> --task"),
+                "{text}"
+            );
         }
     }
 

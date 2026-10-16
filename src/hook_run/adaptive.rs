@@ -19,9 +19,12 @@ use crate::hook_run::session_state::unix_now;
 use crate::hook_run::transcript;
 
 mod cut;
+mod subagent;
 #[cfg(test)]
 use cut::cut_items_notice;
 use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
+use subagent::agent_key;
+pub(super) use subagent::subagent_start;
 
 const FAILURE_BUDGET_BYTES: usize = 2_000;
 const SUBAGENT_BUDGET_BYTES: usize = 4_000;
@@ -446,16 +449,6 @@ pub(super) async fn turn_start(
     Ok(budget.hook_text(Vec::new()))
 }
 
-/// The ledger key for the context that fired the hook, and whether hashes may be
-/// recorded under it. An unsafe `agent_id` filters as `main` and records nothing.
-fn agent_key(payload: &Value) -> (String, bool) {
-    match payload["agent_id"].as_str() {
-        None => (MAIN_AGENT.to_string(), true),
-        Some(id) if crate::paths::is_valid_short_name(id) => (id.to_string(), true),
-        Some(_) => (MAIN_AGENT.to_string(), false),
-    }
-}
-
 /// `PostToolUseFailure`: record the error, then inject related memories once.
 pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super::HookText> {
     let tool = ctx.payload["tool_name"].as_str().unwrap_or_default();
@@ -508,59 +501,6 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super:
             RECALL_STATE_UNSAVED,
         );
     }
-    Ok(budget.hook_text(Vec::new()))
-}
-
-/// `SubagentStart`: task-relevant memories for a fresh subagent context.
-pub(super) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super::HookText> {
-    let (key, record) = agent_key(ctx.payload);
-    if !record || key == MAIN_AGENT {
-        tracing::warn!("SubagentStart without a usable agent_id, injection skipped");
-        return Ok(super::HookText::default());
-    }
-    let agent_type = ctx.payload["agent_type"].as_str().unwrap_or_default();
-    let now = unix_now();
-    // Checked before the take below, which consumes the pending task for good. A failed read
-    // after the take would lose that task, and SubagentStart does not fire again.
-    if ledger_or_skip(ctx.store, ctx.session_id, "subagent_start").is_none() {
-        return Ok(super::HookText::default());
-    }
-    // A resumed subagent already has an entry; its task was taken at launch, and
-    // the queue now holds tasks for new siblings only.
-    let taken = ctx.store.update(ctx.session_id, |l| {
-        if l.knows_agent(&key) {
-            None
-        } else {
-            l.take_subagent(agent_type, now)
-        }
-    });
-    // A failed take is not "no queued task": the subagent query then runs without its task.
-    if taken.is_none() {
-        note_skipped();
-    }
-    let task = taken.flatten();
-    let Some(ledger) = ledger_or_skip(ctx.store, ctx.session_id, "subagent_start") else {
-        return Ok(super::HookText::default());
-    };
-    let text = relevance::subagent_query(
-        task.as_ref().map(|t| t.task.as_str()),
-        agent_type,
-        ledger.activity(),
-    );
-    let mut budget = RecallBudget::new(SUBAGENT_BUDGET_BYTES, ledger.sent_for(&key));
-    let mut outcome = Outcome::default();
-    if !text.is_empty() {
-        let keywords = relevance::fanout_keywords(ledger.activity());
-        (outcome, _) = waves(ctx.client, &text, &keywords, ledger.project.as_deref()).await;
-        outcome.texts.iter().for_each(|t| budget.add_text(t));
-    }
-    report("subagent_start", &outcome, &budget);
-    let kept = budget.kept_hashes();
-    note_unless_saved(
-        ctx.store
-            .update(ctx.session_id, |l| l.mark_sent(&key, kept)),
-        RECALL_STATE_UNSAVED,
-    );
     Ok(budget.hook_text(Vec::new()))
 }
 
@@ -1501,6 +1441,8 @@ mod tests {
         let payload = json!({"agent_type": "Explore"});
         let out = subagent_start(&ctx(&f, &payload)).await.unwrap().text();
         assert!(out.is_empty(), "{out}");
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(notice.contains("has no usable agent_id"), "{notice}");
         assert!(
             !f.store.load("s1").unwrap().knows_agent(MAIN_AGENT),
             "no ledger write"
