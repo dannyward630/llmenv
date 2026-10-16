@@ -107,6 +107,20 @@ fn recorded_inputs<T: serde::de::DeserializeOwned>(
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::inputs_or_checkpoint;
+    use crate::hook_run::checkpoint::{Checkpoint, JobKind, save};
+
+    #[test]
+    fn a_checkpoint_parse_failure_names_its_own_detail() {
+        // The checkpoint parses but its inputs do not fit `u32`. The stdin error never says "invalid
+        // type", so this fails if the checkpoint failure text is dropped (#2779).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cp.json");
+        let cp = Checkpoint::new(JobKind::IcmStore, serde_json::json!("text"), Some("sess"));
+        save(&path, &cp).unwrap();
+        let err = inputs_or_checkpoint::<u32>("x", Some(&path)).unwrap_err();
+        let msg = format!("{:#}", err.into_error());
+        assert!(msg.contains("invalid type"), "{msg}");
+    }
 
     #[test]
     fn inputs_error_names_a_corrupt_checkpoint_too() {
