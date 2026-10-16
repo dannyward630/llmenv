@@ -13,13 +13,9 @@ pub(in crate::hook_run) fn session_cache_path(state_dir: &Path, session_id: &str
     read_once_state_dir(state_dir).join(format!("{session_id}.json"))
 }
 
-/// Clear the entire read-once cache by removing the state directory.
-pub fn clear_cache() -> anyhow::Result<()> {
-    clear_cache_in(&crate::paths::state_dir()?)
-}
-
-/// Remove the read-once folder under `state_dir`, and say on stdout what happened.
-fn clear_cache_in(state_dir: &Path) -> anyhow::Result<()> {
+/// Clear the read-once cache under `state_dir` by removing its folder, and say on stdout what
+/// happened.
+pub fn clear_cache(state_dir: &Path) -> anyhow::Result<()> {
     let ro_dir = read_once_state_dir(state_dir);
     if ro_dir.exists() {
         std::fs::remove_dir_all(&ro_dir)?;
@@ -54,7 +50,7 @@ pub(super) fn cache_key(path: &Path) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{cache_key, clear_cache_in, read_once_state_dir};
+    use super::{cache_key, clear_cache, read_once_state_dir};
 
     #[test]
     fn clear_cache_removes_the_read_once_folder_and_nothing_else() {
@@ -64,7 +60,7 @@ mod tests {
         std::fs::write(ro.join("s.json"), b"{}").unwrap();
         std::fs::write(dir.path().join("keep.txt"), b"k").unwrap();
 
-        clear_cache_in(dir.path()).unwrap();
+        clear_cache(dir.path()).unwrap();
 
         assert!(!ro.exists());
         assert!(dir.path().join("keep.txt").exists());
@@ -73,7 +69,7 @@ mod tests {
     #[test]
     fn clear_cache_with_no_folder_succeeds() {
         let dir = tempfile::tempdir().unwrap();
-        clear_cache_in(dir.path()).unwrap();
+        clear_cache(dir.path()).unwrap();
     }
 
     #[test]
