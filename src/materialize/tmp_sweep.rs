@@ -14,6 +14,31 @@ use crate::materialize::cache::{
 };
 use crate::materialize::open_files::open_paths;
 
+mod claude_root;
+
+use claude_root::{is_claude_root, scan_claude_root};
+
+/// One entry that the scan found old enough to remove, and not in use.
+struct Stale {
+    path: PathBuf,
+    is_dir: bool,
+}
+
+/// What a scan of `state/tmp` found. Nothing is removed by a scan.
+#[derive(Default)]
+struct Scan {
+    stale: Vec<Stale>,
+    kept: usize,
+    failed: Vec<PathBuf>,
+}
+
+/// The stale entries of `state/tmp`: how many, and how many bytes they hold.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StaleSummary {
+    pub count: usize,
+    pub bytes: u64,
+}
+
 /// Remove the entries of `tmp_root` that are older than `older_than` and not in use.
 ///
 /// `in_use` lists paths that a process holds open. An entry that contains one of them is kept,
@@ -27,9 +52,52 @@ pub fn sweep(
     older_than: Duration,
     in_use: &[PathBuf],
 ) -> anyhow::Result<GcReport> {
-    let mut report = GcReport::default();
+    let scan = scan(tmp_root, older_than, in_use)?;
+    let mut report = GcReport {
+        kept: scan.kept,
+        failed: scan.failed,
+        ..GcReport::default()
+    };
+    for stale in &scan.stale {
+        if stale.is_dir {
+            gc_remove_dir(&stale.path, &mut report);
+        } else {
+            gc_remove_link(&stale.path, &mut report);
+        }
+    }
+    Ok(report)
+}
+
+/// Count and size the entries that [`sweep`] would remove, without removing any.
+///
+/// # Errors
+/// Fails when the in-use list cannot be read. See [`open_paths`].
+pub fn stale_summary(state_dir: &Path, older_than: Duration) -> anyhow::Result<StaleSummary> {
+    let in_use = open_paths()?;
+    stale_summary_in(&state_dir.join("tmp"), older_than, &in_use)
+}
+
+/// The summary for `tmp_root`, with the in-use list given by the caller.
+///
+/// # Errors
+/// Fails when `tmp_root` cannot be read or resolved.
+pub fn stale_summary_in(
+    tmp_root: &Path,
+    older_than: Duration,
+    in_use: &[PathBuf],
+) -> anyhow::Result<StaleSummary> {
+    let stale = scan(tmp_root, older_than, in_use)?.stale;
+    Ok(StaleSummary {
+        count: stale.len(),
+        bytes: stale.iter().map(|s| tree_bytes(&s.path)).sum(),
+    })
+}
+
+/// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
+fn scan(tmp_root: &Path, older_than: Duration, in_use: &[PathBuf]) -> anyhow::Result<Scan> {
+    let mut scan = Scan::default();
     let Some(entries) = crate::paths::read_dir_optional(tmp_root)? else {
-        return Ok(report);
+        return Ok(scan);
     };
     let root = std::fs::canonicalize(tmp_root)
         .with_context(|| format!("resolving {}", tmp_root.display()))?;
@@ -39,87 +107,70 @@ pub fn sweep(
         let name = entry.file_name();
         let path = root.join(&name);
         if in_use.iter().any(|used| used.starts_with(&path)) {
-            report.kept += 1;
+            scan.kept += 1;
             continue;
         }
         let is_dir = match entry.file_type() {
             Ok(file_type) => file_type.is_dir(),
             Err(e) => {
-                record_failure(&path, &e, &mut report);
+                record_failure(&path, &e, &mut scan);
                 continue;
             }
         };
         // The per-user TMPDIR root is not judged by its own mtime, because that does not show use
         // (#1379). Its entries are judged one by one instead.
         if is_dir && is_claude_root(&name) {
-            sweep_claude_root(&path, older_than, in_use, now, &mut report);
+            scan_claude_root(&path, older_than, in_use, now, &mut scan);
             continue;
         }
-        judge_entry(&path, is_dir, older_than, now, &mut report);
+        judge_entry(&path, is_dir, older_than, now, &mut scan);
     }
-    Ok(report)
+    Ok(scan)
 }
 
-/// Remove the entries one level down inside Claude Code's `claude-<uid>` root that are older
-/// than `older_than` and not in use. The root itself is never removed.
-fn sweep_claude_root(
-    claude_root: &Path,
-    older_than: Duration,
-    in_use: &[PathBuf],
-    now: SystemTime,
-    report: &mut GcReport,
-) {
-    let entries = match crate::paths::read_dir_optional(claude_root) {
-        Ok(Some(entries)) => entries,
-        Ok(None) => return,
-        Err(e) => {
-            record_failure(claude_root, &e, report);
-            return;
-        }
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                record_failure(claude_root, &e, report);
-                continue;
-            }
-        };
-        let path = claude_root.join(entry.file_name());
-        if in_use.iter().any(|used| used.starts_with(&path)) {
-            report.kept += 1;
-            continue;
-        }
-        match entry.file_type() {
-            Ok(file_type) => judge_entry(&path, file_type.is_dir(), older_than, now, report),
-            Err(e) => record_failure(&path, &e, report),
-        }
-    }
-}
-
-/// Remove one entry when its newest mtime is older than `older_than`. Keep it otherwise.
-fn judge_entry(
-    path: &Path,
-    is_dir: bool,
-    older_than: Duration,
-    now: SystemTime,
-    report: &mut GcReport,
-) {
+/// Mark one entry stale when its newest mtime is older than `older_than`. Keep it otherwise.
+fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime, scan: &mut Scan) {
     let modified = match entry_mtime(path, is_dir) {
         Ok(modified) => modified,
         Err(e) => {
-            record_failure(path, &e, report);
+            record_failure(path, &e, scan);
             return;
         }
     };
     // A future mtime means the clock moved. Keep the entry, because a removal on a bad
     // clock is not reversible.
     if modified > now || !is_expired(now, modified, older_than) {
-        report.kept += 1;
-    } else if is_dir {
-        gc_remove_dir(path, report);
+        scan.kept += 1;
     } else {
-        gc_remove_link(path, report);
+        scan.stale.push(Stale {
+            path: path.to_path_buf(),
+            is_dir,
+        });
+    }
+}
+
+/// The bytes under `path`. A symlink counts as its own size, and it is never followed. An entry
+/// that cannot be read counts as zero bytes, and the failure is logged.
+fn tree_bytes(path: &Path) -> u64 {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "state/tmp size: cannot stat entry");
+            return 0;
+        }
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    match std::fs::read_dir(path) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .map(|entry| tree_bytes(&entry.path()))
+            .sum(),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "state/tmp size: cannot read dir");
+            0
+        }
     }
 }
 
@@ -133,21 +184,14 @@ fn entry_mtime(path: &Path, is_dir: bool) -> anyhow::Result<SystemTime> {
         .with_context(|| format!("stat {}", path.display()))
 }
 
-/// Whether `name` is `claude-<uid>`, the per-user TMPDIR root that Claude Code creates.
-fn is_claude_root(name: &std::ffi::OsStr) -> bool {
-    name.to_str()
-        .and_then(|name| name.strip_prefix("claude-"))
-        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
-}
-
 /// Record an entry the sweep could not read or judge. The entry stays, and the next run retries.
-fn record_failure(path: &Path, error: impl std::fmt::Display, report: &mut GcReport) {
+fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
     tracing::error!(
         path = %path.display(),
         error = %error,
         "state/tmp sweep: cannot read entry; skipping"
     );
-    report.failed.push(path.to_path_buf());
+    scan.failed.push(path.to_path_buf());
 }
 
 /// Sweep `<state_dir>/tmp` with the retention `older_than` (#2814).
@@ -166,12 +210,12 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::sweep;
+    use super::{StaleSummary, stale_summary_in, sweep};
 
-    const DAY: Duration = Duration::from_secs(86_400);
+    pub(super) const DAY: Duration = Duration::from_secs(86_400);
 
     /// Set the mtime of `path` and of everything under it, so the newest mtime is `when`.
-    fn age_tree(path: &Path, when: SystemTime) {
+    pub(super) fn age_tree(path: &Path, when: SystemTime) {
         if path.is_dir() {
             for entry in fs::read_dir(path).unwrap() {
                 age_tree(&entry.unwrap().path(), when);
@@ -180,7 +224,7 @@ mod tests {
         File::open(path).unwrap().set_modified(when).unwrap();
     }
 
-    fn old() -> SystemTime {
+    pub(super) fn old() -> SystemTime {
         SystemTime::now() - 30 * DAY
     }
 
@@ -251,84 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_code_root_is_kept_even_when_old() {
-        let root = tempfile::tempdir().unwrap();
-        let claude = root.path().join("claude-501");
-        fs::create_dir(&claude).unwrap();
-        age_tree(&claude, old());
-
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
-
-        assert!(report.removed.is_empty());
-        assert!(claude.exists(), "the per-user TMPDIR root was removed");
-    }
-
-    #[test]
-    fn an_old_entry_inside_a_claude_code_root_is_removed_and_a_fresh_one_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let claude = root.path().join("claude-501");
-        fs::create_dir(&claude).unwrap();
-        let old_child = claude.join("shell-old");
-        fs::create_dir(&old_child).unwrap();
-        fs::write(old_child.join("snapshot"), b"s").unwrap();
-        age_tree(&old_child, old());
-        let fresh_child = claude.join("shell-fresh");
-        fs::create_dir(&fresh_child).unwrap();
-
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
-
-        assert_eq!(report.removed.len(), 1, "removed: {:?}", report.removed);
-        assert!(
-            !old_child.exists(),
-            "the old entry inside the root survived"
-        );
-        assert!(
-            fresh_child.exists(),
-            "a fresh entry inside the root was removed"
-        );
-        assert!(claude.exists(), "the per-user TMPDIR root was removed");
-    }
-
-    #[test]
-    fn an_old_entry_inside_a_claude_code_root_with_a_path_in_use_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let claude = root.path().join("claude-501");
-        fs::create_dir(&claude).unwrap();
-        let busy = claude.join("shell-busy");
-        fs::create_dir(&busy).unwrap();
-        let cwd_file = busy.join("cwd.txt");
-        fs::write(&cwd_file, b"c").unwrap();
-        age_tree(&busy, old());
-
-        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&cwd_file)).unwrap();
-
-        assert!(
-            report.removed.is_empty(),
-            "removed a busy entry: {:?}",
-            report.removed
-        );
-        assert!(cwd_file.exists());
-    }
-
-    #[test]
-    fn an_entry_with_a_future_mtime_inside_a_claude_code_root_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let claude = root.path().join("claude-501");
-        fs::create_dir(&claude).unwrap();
-        let future = claude.join("future.txt");
-        fs::write(&future, b"f").unwrap();
-        File::open(&future)
-            .unwrap()
-            .set_modified(SystemTime::now() + DAY)
-            .unwrap();
-
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
-
-        assert!(report.removed.is_empty());
-        assert!(future.exists());
-    }
-
-    #[test]
     fn an_entry_with_a_future_mtime_is_kept() {
         let root = tempfile::tempdir().unwrap();
         let future = root.path().join("future.txt");
@@ -391,5 +357,54 @@ mod tests {
         );
         assert!(link.symlink_metadata().is_err(), "the link survived");
         assert!(target.join("data").exists(), "the link target was followed");
+    }
+
+    #[test]
+    fn the_summary_counts_and_sizes_the_stale_entries_and_removes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let old_dir = root.path().join("cargo-old");
+        fs::create_dir(&old_dir).unwrap();
+        fs::write(old_dir.join("a"), [0_u8; 300]).unwrap();
+        fs::write(old_dir.join("b"), [0_u8; 200]).unwrap();
+        age_tree(&old_dir, old());
+        let fresh = root.path().join("fresh");
+        fs::create_dir(&fresh).unwrap();
+        fs::write(fresh.join("x"), [0_u8; 999]).unwrap();
+
+        let summary = stale_summary_in(root.path(), DAY * 7, &[]).unwrap();
+
+        assert_eq!(
+            summary,
+            StaleSummary {
+                count: 1,
+                bytes: 500
+            }
+        );
+        assert!(old_dir.join("a").exists(), "the summary removed an entry");
+    }
+
+    #[test]
+    fn the_summary_skips_a_claude_code_root_and_an_entry_in_use() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude-501");
+        fs::create_dir(&claude).unwrap();
+        age_tree(&claude, old());
+        let busy = root.path().join("cargo-busy");
+        fs::create_dir(&busy).unwrap();
+        age_tree(&busy, old());
+
+        let summary = stale_summary_in(root.path(), DAY * 7, std::slice::from_ref(&busy)).unwrap();
+
+        assert_eq!(summary, StaleSummary { count: 0, bytes: 0 });
+    }
+
+    #[test]
+    fn the_summary_of_a_missing_tmp_root_is_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("no-such-tmp");
+
+        let summary = stale_summary_in(&missing, DAY * 7, &[]).unwrap();
+
+        assert_eq!(summary, StaleSummary { count: 0, bytes: 0 });
     }
 }

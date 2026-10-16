@@ -32,6 +32,7 @@ mod recall;
 mod relevance;
 pub(crate) mod repeat_detect;
 mod session_ledger;
+mod session_notices;
 pub(crate) mod session_state;
 mod shell_split;
 pub(crate) mod slippage;
@@ -1617,12 +1618,7 @@ fn run_inner(
             crate::paths::state_dir(),
         );
         let session_notice = if event == HookEvent::SessionStart {
-            let health = rt
-                .and_then(|rt| mcp_health::session_start_notice(rt, &config, config_dir, &active));
-            match (health, roots_notice) {
-                (Some(h), Some(r)) => Some(format!("{h}{r}")),
-                (h, r) => h.or(r),
-            }
+            session_notices::session_start_notices(rt, &config, config_dir, &active, roots_notice)
         } else {
             None
         };
