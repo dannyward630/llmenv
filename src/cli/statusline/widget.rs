@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod usage_state;
+use usage_state::*;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EngineData {
     pub workspace: Option<Workspace>,
@@ -147,7 +150,14 @@ pub fn render_engine_widget(
     // read + JSON deserialize (and a duplicate `gh` derivation on a cold
     // cache) on every single render.
     if name == "pr" {
-        let pr = resolve_pr(data);
+        let pr = match resolve_pr(data) {
+            Ok(pr) => pr,
+            Err(e) => {
+                tracing::error!("statusline pr cannot read the branch: {e}");
+                let raw = "pr: unreadable".to_string();
+                return Some(super::finish(name, raw, cfg, None, use_color));
+            }
+        };
         let raw = pr
             .as_ref()
             .map_or_else(String::new, |pr| render_pr_info(pr, cfg, use_color));
@@ -514,7 +524,10 @@ fn render_branch_with(
     let label = format.replace("{name}", &name);
     // Link the branch to its PR (OSC 8). Route through resolve_pr so the link
     // derives the PR when the engine sends none (Claude Code), matching {pr}.
+    // A read error is already shown by the branch label above, so it adds no link.
     let pr_url = resolve_pr_with(data, gh)
+        .ok()
+        .flatten()
         .and_then(|p| p.url)
         .map(|u| super::sanitize(&u))
         .unwrap_or_default();
@@ -677,36 +690,36 @@ impl<'a> GhPrCmd<'a> {
 /// `gh` not installed, not authenticated, no remote, or no open PR for the
 /// branch. All of these degrade silently, matching [`render_branch`]'s
 /// fallback.
-fn resolve_pr(data: &EngineData) -> Option<PrInfo> {
+fn resolve_pr(data: &EngineData) -> Result<Option<PrInfo>, String> {
     resolve_pr_with(data, GhPrCmd::new("gh"))
 }
 
 /// [`resolve_pr`]'s backend, with the `gh` invocation injectable so tests can
 /// exercise the full engine-precedence + branch-resolution + derivation chain
 /// against a fake `gh` instead of the real one.
-fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Option<PrInfo> {
+///
+/// A branch read error is returned, not hidden, so the widget can show it (#2749).
+fn resolve_pr_with(data: &EngineData, gh: GhPrCmd<'_>) -> Result<Option<PrInfo>, String> {
     if let Some(pr) = &data.pr {
-        return Some(pr.clone());
+        return Ok(Some(pr.clone()));
     }
-    let dir = data
+    let Some(dir) = data
         .workspace
         .as_ref()
-        .and_then(|w| w.current_dir.as_deref())?;
-    // Hidden on a read error, so the branch widget's "branch: unreadable" label is the signal.
-    let branch = match resolve_branch_name(data) {
-        Ok(branch) => branch?,
-        Err(e) => {
-            tracing::error!("statusline pr widget hidden, branch cannot be read: {e}");
-            return None;
-        }
+        .and_then(|w| w.current_dir.as_deref())
+    else {
+        return Ok(None);
     };
-    derive_pr(
+    let Some(branch) = resolve_branch_name(data)? else {
+        return Ok(None);
+    };
+    Ok(derive_pr(
         gh,
         Path::new(dir),
         &branch,
         usage_state_dir().as_deref(),
         now_unix(),
-    )
+    ))
 }
 
 /// Cache-then-derive backend for [`resolve_pr`]'s fallback path, fully
@@ -1162,81 +1175,6 @@ fn pace_and_target(
     (indicator, marker)
 }
 
-/// Delta from the previously-recorded used percentage for `key`, e.g.
-/// `" (+4.5)"`. Best-effort: reads/writes a small `<state_dir>/<key>` file
-/// (`"<pct> <unix_ts>"`), rewriting at most once a minute so the delta
-/// reflects real change rather than per-render noise. Empty when there's no
-/// state dir, no prior sample, or the change rounds to zero.
-fn usage_delta(state_dir: Option<&Path>, key: &str, pct: f64, now: i64) -> String {
-    let Some(dir) = state_dir else {
-        return String::new();
-    };
-    let path = dir.join(key);
-    let prev = read_usage_state(&path);
-    if prev.is_none_or(|(_, ts)| now - ts >= 60) {
-        write_usage_state(&path, pct, now);
-    }
-    match prev {
-        Some((prev_pct, _)) => format_delta(pct - prev_pct),
-        None => String::new(),
-    }
-}
-
-fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let mut it = contents.split_whitespace();
-    let pct = it.next()?.parse().ok()?;
-    let ts = it.next()?.parse().ok()?;
-    Some((pct, ts))
-}
-
-fn write_usage_state(path: &Path, pct: f64, now: i64) {
-    if let Some(parent) = path.parent()
-        && let Err(e) = crate::paths::create_dir_owner_only(parent)
-    {
-        tracing::debug!("usage delta state dir unavailable (non-fatal): {e}");
-        return;
-    }
-    // Best-effort: a failed write only means the next render's `{delta}`
-    // placeholder is empty, not a broken widget — but still worth a trace.
-    if let Err(e) = crate::paths::write_owner_only(path, format!("{pct} {now}").as_bytes()) {
-        tracing::debug!("usage delta state write failed (non-fatal): {e}");
-    }
-}
-
-fn format_delta(delta: f64) -> String {
-    if delta.abs() < 0.05 {
-        String::new()
-    } else if delta > 0.0 {
-        format!(" (+{delta:.1})")
-    } else {
-        format!(" ({delta:.1})")
-    }
-}
-
-/// Directory for usage delta state, alongside the materialized session data
-/// (`$CLAUDE_CONFIG_DIR/statusline-state`). `None` when the engine didn't
-/// export `CLAUDE_CONFIG_DIR`, which disables delta tracking.
-fn usage_state_dir() -> Option<PathBuf> {
-    // A value that is not UTF-8 turns tracking off, so the log says why (#2607).
-    usage_state_dir_with_env(&|name| {
-        crate::env_var::utf8_var(name)
-            .inspect_err(|e| tracing::warn!("usage state dir: {e:#}"))
-            .ok()
-            .flatten()
-    })
-}
-
-/// [`usage_state_dir`] with an injectable env-var provider so tests can
-/// exercise the set-but-empty case without mutating real process env vars.
-fn usage_state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    // A set-but-empty `CLAUDE_CONFIG_DIR=` must disable delta tracking like an
-    // unset one, not resolve to the relative path `statusline-state` (#1111).
-    get_env("CLAUDE_CONFIG_DIR")
-        .filter(|d| !d.is_empty())
-        .map(|d| PathBuf::from(d).join("statusline-state"))
-}
-
 /// Window durations in seconds for the pace calculation.
 const FIVE_HOUR_SECS: i64 = 5 * 3600;
 const SEVEN_DAY_SECS: i64 = 7 * 86_400;
@@ -1244,6 +1182,7 @@ const SEVEN_DAY_SECS: i64 = 7 * 86_400;
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use proptest::prelude::*;
 
@@ -1756,7 +1695,7 @@ mod tests {
 
     #[test]
     fn resolve_pr_none_when_no_workspace_dir() {
-        assert_eq!(resolve_pr(&EngineData::default()), None);
+        assert_eq!(resolve_pr(&EngineData::default()), Ok(None));
     }
 
     #[cfg(unix)]
@@ -1782,11 +1721,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())),
-            Some(PrInfo {
+            Ok(Some(PrInfo {
                 number: Some(834),
                 url: Some("https://github.com/o/r/pull/834".to_string()),
                 review_state: Some("approved".to_string()),
-            })
+            }))
         );
     }
 
@@ -1811,11 +1750,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())),
-            Some(PrInfo {
+            Ok(Some(PrInfo {
                 number: Some(5),
                 url: Some("https://github.com/o/r/pull/5".to_string()),
                 review_state: None,
-            })
+            }))
         );
     }
 
@@ -1837,7 +1776,23 @@ mod tests {
             "workspace": { "current_dir": dir.path().to_string_lossy() }
         }))
         .unwrap();
-        assert_eq!(resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())), None);
+        assert_eq!(
+            resolve_pr_with(&data, fake_gh(&gh.to_string_lossy())),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn pr_widget_shows_unreadable_when_branch_cannot_be_read() {
+        // A directory where HEAD should be cannot be read as a file (#2710).
+        // The PR widget says so without the branch widget, so it does not hide (#2749).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git").join("HEAD")).unwrap();
+        let data: EngineData = serde_json::from_value(serde_json::json!({
+            "workspace": { "current_dir": dir.path().to_string_lossy() }
+        }))
+        .unwrap();
+        assert_eq!(render_pr(&data, None, false), "pr: unreadable");
     }
 
     #[test]
@@ -1857,7 +1812,8 @@ mod tests {
 
     #[test]
     fn parse_gh_pr_view_maps_fields_and_review_decision() {
-        let json = br#"{"number":834,"url":"https://github.com/o/r/pull/834","reviewDecision":"APPROVED"}"#;
+        let json =
+            br#"{"number":834,"url":"https://github.com/o/r/pull/834","reviewDecision":"APPROVED"}"#;
         assert_eq!(
             parse_gh_pr_view(json),
             Some(PrInfo {
