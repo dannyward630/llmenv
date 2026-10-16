@@ -87,7 +87,7 @@ impl RecallBudget {
 
     /// The passthrough text, then the kept records. The omission notice is not here: it is llmenv
     /// text, so [`Self::hook_text`] sends it apart from the ICM memory (#2764).
-    pub(super) fn render(&self, passthrough: Vec<String>) -> String {
+    fn render(&self, passthrough: Vec<String>) -> String {
         let mut parts = passthrough;
         parts.extend(self.kept.iter().cloned());
         parts.join("\n\n")

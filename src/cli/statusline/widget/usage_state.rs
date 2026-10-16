@@ -22,7 +22,7 @@ pub(super) fn usage_delta(state_dir: Option<&Path>, key: &str, pct: f64, now: i6
     }
 }
 
-pub(super) fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
+fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
     let contents = std::fs::read_to_string(path).ok()?;
     let mut it = contents.split_whitespace();
     let pct = it.next()?.parse().ok()?;
@@ -44,7 +44,7 @@ pub(super) fn write_usage_state(path: &Path, pct: f64, now: i64) {
     }
 }
 
-pub(super) fn format_delta(delta: f64) -> String {
+fn format_delta(delta: f64) -> String {
     if delta.abs() < 0.05 {
         String::new()
     } else if delta > 0.0 {
