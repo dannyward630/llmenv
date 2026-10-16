@@ -383,7 +383,7 @@ fn read_hook_payload(file_path: &str, session_id: &str) -> String {
         "session_id": session_id,
         "tool_name": "Read",
         "tool_input": {
-            "filePath": file_path,
+            "file_path": file_path,
         },
     })
     .to_string()

@@ -32,3 +32,12 @@ pub(super) fn log_notice_without_channel(out: &str, notice: Option<&str>, event:
         );
     }
 }
+
+/// The notice for a session whose ICM transcript could not start. The map cannot save the
+/// link, so the transcript is not started (#2658).
+pub(super) fn transcript_unlinked_notice(error: &anyhow::Error) -> String {
+    format!(
+        "llmenv: no ICM transcript started for this session: {error:#}. \
+         Fix: run `llmenv doctor` to check the state directory."
+    )
+}

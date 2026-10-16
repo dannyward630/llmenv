@@ -1,0 +1,101 @@
+//! The per-session read cache of the read-once hook (#318).
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use super::{ReadEntry, read_once_state_dir, session_cache_path};
+use crate::hook_run::session_state::unix_now;
+
+/// Per-session cache of read-once tracked file reads. Stored as a flat JSON
+/// file under `state_dir/read_once/{session_id}.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionCache {
+    /// Claude Code session id.
+    pub session_id: String,
+    /// Entries keyed by canonicalized file path.
+    pub entries: HashMap<String, ReadEntry>,
+    /// Set when the cache file exists but cannot be read. A save then would replace the
+    /// unread file with an empty cache, so `save` skips the write (#2721).
+    #[serde(skip)]
+    pub(super) read_failed: bool,
+}
+
+impl SessionCache {
+    /// Create a new empty session cache.
+    pub(super) fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            entries: HashMap::new(),
+            read_failed: false,
+        }
+    }
+
+    /// Load the session cache from disk. Returns an empty cache on any IO or
+    /// parse error (fail-soft). A read error also marks the cache so `save` leaves the file alone.
+    pub fn load(state_dir: &Path, session_id: &str, ttl_seconds: u64) -> Self {
+        let path = session_cache_path(state_dir, session_id);
+        let mut cache: Self = match std::fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+                tracing::error!(
+                    "failed to parse read-once cache {}, starting empty: {e}",
+                    path.display()
+                );
+                Self::new(session_id)
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
+            Err(e) => {
+                tracing::error!(
+                    "failed to read read-once cache {}, saves are skipped: {e}",
+                    path.display()
+                );
+                Self {
+                    read_failed: true,
+                    ..Self::new(session_id)
+                }
+            }
+        };
+        cache.prune(ttl_seconds);
+        cache
+    }
+
+    /// Save the session cache atomically to disk. A cache that failed to load is not
+    /// written (#2721). Opportunistically prunes stale session files before writing.
+    pub fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
+        if self.read_failed {
+            tracing::error!(
+                "read-once cache for session {} not saved, the file could not be read",
+                self.session_id
+            );
+            return Ok(());
+        }
+        Self::prune_stale_sessions(state_dir, 7);
+        let path = session_cache_path(state_dir, &self.session_id);
+        let json = serde_json::to_string(&self)?;
+        crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
+        Ok(())
+    }
+
+    /// Remove entries where `now - first_read_at > ttl_seconds`.
+    pub fn prune(&mut self, ttl_seconds: u64) {
+        let now = unix_now();
+        self.entries.retain(|_, entry| {
+            let age = now.saturating_sub(entry.first_read_at);
+            age < ttl_seconds as i64
+        });
+    }
+
+    /// Scan `state_dir/read_once/` and delete `.json` files older than
+    /// `max_age_days`. Runs opportunistically during save().
+    pub fn prune_stale_sessions(state_dir: &Path, max_age_days: u64) {
+        crate::hook_run::session_state::prune_stale_json_files(
+            &read_once_state_dir(state_dir),
+            max_age_days,
+        );
+        crate::hook_run::session_state::prune_orphan_locks(
+            &read_once_state_dir(state_dir),
+            max_age_days,
+        );
+    }
+}
