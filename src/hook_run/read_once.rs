@@ -7,15 +7,16 @@
 //! Fail-soft: any cache/IO error logs to stderr and passes the read through
 //! silently — the optimizer must never block real work.
 
-use std::collections::HashMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::ReadOnce as ReadOnceConfig;
 use crate::config::ReadOnceMode;
 use crate::hook_run::session_state::unix_now;
+
+use cache::within_ttl;
+use state::cache_key;
 
 /// A single tracked file read in the session cache.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,114 +33,11 @@ pub struct ReadEntry {
     pub tokens_saved: u64,
 }
 
-/// Per-session cache of read-once tracked file reads. Stored as a flat JSON
-/// file under `state_dir/read_once/{session_id}.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionCache {
-    /// Claude Code session id.
-    pub session_id: String,
-    /// Entries keyed by canonicalized file path.
-    pub entries: HashMap<String, ReadEntry>,
-    /// Set when the cache file exists but cannot be read. A save then would replace the
-    /// unread file with an empty cache, so `save` skips the write (#2721).
-    #[serde(skip)]
-    read_failed: bool,
-}
-
-impl SessionCache {
-    /// Create a new empty session cache.
-    fn new(session_id: &str) -> Self {
-        Self {
-            session_id: session_id.to_string(),
-            entries: HashMap::new(),
-            read_failed: false,
-        }
-    }
-
-    /// Load the session cache from disk. Returns an empty cache on any IO or
-    /// parse error (fail-soft). A read error also marks the cache so `save` leaves the file alone.
-    pub fn load(state_dir: &Path, session_id: &str, ttl_seconds: u64) -> Self {
-        let path = session_cache_path(state_dir, session_id);
-        let mut cache: Self = match std::fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-                tracing::error!(
-                    "failed to parse read-once cache {}, starting empty: {e}",
-                    path.display()
-                );
-                Self::new(session_id)
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
-            Err(e) => {
-                tracing::error!(
-                    "failed to read read-once cache {}, saves are skipped: {e}",
-                    path.display()
-                );
-                Self {
-                    read_failed: true,
-                    ..Self::new(session_id)
-                }
-            }
-        };
-        cache.prune(ttl_seconds);
-        cache
-    }
-
-    /// Save the session cache atomically to disk. A cache that failed to load is not
-    /// written (#2721). Opportunistically prunes stale session files before writing.
-    pub fn save(&self, state_dir: &Path) -> anyhow::Result<()> {
-        if self.read_failed {
-            tracing::error!(
-                "read-once cache for session {} not saved, the file could not be read",
-                self.session_id
-            );
-            return Ok(());
-        }
-        Self::prune_stale_sessions(state_dir, 7);
-        let path = session_cache_path(state_dir, &self.session_id);
-        let json = serde_json::to_string(&self)?;
-        crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
-        Ok(())
-    }
-
-    /// Remove entries where `now - first_read_at > ttl_seconds`.
-    pub fn prune(&mut self, ttl_seconds: u64) {
-        let now = unix_now();
-        self.entries.retain(|_, entry| {
-            let age = now.saturating_sub(entry.first_read_at);
-            age < ttl_seconds as i64
-        });
-    }
-
-    /// Scan `state_dir/read_once/` and delete `.json` files older than
-    /// `max_age_days`. Runs opportunistically during save().
-    pub fn prune_stale_sessions(state_dir: &Path, max_age_days: u64) {
-        super::session_state::prune_stale_json_files(&read_once_state_dir(state_dir), max_age_days);
-        super::session_state::prune_orphan_locks(&read_once_state_dir(state_dir), max_age_days);
-    }
-}
-
-/// Build the state subdirectory path for read-once cache files.
-pub fn read_once_state_dir(state_dir: &Path) -> PathBuf {
-    state_dir.join("read_once")
-}
-
-/// Build the full path to a session's cache file.
-pub(super) fn session_cache_path(state_dir: &Path, session_id: &str) -> PathBuf {
-    read_once_state_dir(state_dir).join(format!("{session_id}.json"))
-}
-
-/// Clear the entire read-once cache by removing the state directory.
-pub fn clear_cache() -> anyhow::Result<()> {
-    let state_dir = crate::paths::state_dir()?;
-    let ro_dir = read_once_state_dir(&state_dir);
-    if ro_dir.exists() {
-        std::fs::remove_dir_all(&ro_dir)?;
-        writeln!(std::io::stdout(), "Read-once cache cleared")?;
-    } else {
-        writeln!(std::io::stdout(), "No read-once cache to clear")?;
-    }
-    Ok(())
-}
+mod cache;
+mod state;
+pub use cache::SessionCache;
+pub(in crate::hook_run) use state::session_cache_path;
+pub use state::{clear_cache, read_once_state_dir};
 
 /// Handle a PreToolUse event for the read-once feature.
 ///
@@ -182,7 +80,11 @@ pub(crate) fn handle_pre_tool_use(
         .or_else(|| {
             let v = tool_input.get("filePath");
             if v.is_some() {
-                eprintln!("llmenv: read-once using deprecated PascalCase 'filePath' key instead of 'file_path'");
+                // Hook stderr never reaches the agent, so the notice goes to the agent (#2818).
+                crate::agent_notice::record(
+                    "llmenv: read-once used the deprecated 'filePath' key instead of 'file_path'. \
+                     Caching still applied.",
+                );
             }
             v
         })
@@ -233,20 +135,7 @@ pub(crate) fn handle_pre_tool_use(
         tracing::error!("session_id failed path-safety validation for read_once, rejecting");
         return String::new();
     }
-    let canonical = std::fs::canonicalize(path)
-        .inspect_err(|e| {
-            eprintln!(
-                "llmenv: cannot canonicalize read-once cache path {}: {e}, using raw path",
-                path.display()
-            );
-            tracing::warn!(
-                error = %e,
-                path = %path.display(),
-                "cannot canonicalize read-once cache path, using raw path"
-            )
-        })
-        .unwrap_or_else(|_| path.to_path_buf());
-    let path_key = canonical.to_string_lossy().to_string();
+    let path_key = cache_key(path);
     // Load session cache
     // Held from the load to the save, so a concurrent Read hook cannot overwrite the cache (#2678).
     let _lock = super::session_state::lock_state_file(
@@ -262,9 +151,7 @@ pub(crate) fn handle_pre_tool_use(
     let lookup_start = std::time::Instant::now();
     let extra = format!("path={file_path}");
     if let Some(entry) = cache.entries.get_mut(&path_key) {
-        if entry.mtime_unix == mtime
-            && now.saturating_sub(entry.first_read_at) < config.ttl_seconds as i64
-        {
+        if entry.mtime_unix == mtime && within_ttl(now, entry.first_read_at, config.ttl_seconds) {
             // Cache hit within TTL — warn or deny.
             // Don't save on hit — hits/tokens_saved are advisory stats that
             // get accurately written on the next miss-path save.
@@ -310,7 +197,10 @@ pub(crate) fn handle_pre_tool_use(
     crate::cache_trace::emit_cache_trace("read_once", false, lookup_start.elapsed(), Some(&extra));
 
     if let Err(e) = cache.save(state_dir) {
-        eprintln!("llmenv: failed to save read-once cache: {e}");
+        crate::agent_notice::record(format!(
+            "llmenv: the read-once cache could not be saved: {e:#}. Fix: run `llmenv doctor` to \
+             check the state directory."
+        ));
     }
 
     String::new() // Pass through
@@ -395,6 +285,23 @@ mod tests {
             tool_input.get("new_string").is_some(),
             "edit fixture must use snake_case new_string, not newString"
         );
+    }
+
+    #[test]
+    fn a_deprecated_file_path_key_is_noticed_to_the_agent() {
+        let dir = TempDir::new().expect("test");
+        let payload = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {"filePath": dir.path().join("a.txt").display().to_string()},
+        });
+        handle_pre_tool_use(
+            &payload,
+            Some("test-session"),
+            &test_config_warn(),
+            dir.path(),
+        );
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(notice.contains("deprecated 'filePath' key"), "{notice}");
     }
 
     #[test]

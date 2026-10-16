@@ -7,6 +7,7 @@ pub(crate) mod schema_gen;
 pub mod stale;
 pub mod state;
 pub(crate) mod status_data;
+pub(crate) mod tmp_sweep;
 
 pub(crate) use build_manifest::build_manifest;
 pub use stale::{StaleStatus, stale_status};
