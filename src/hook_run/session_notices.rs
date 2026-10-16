@@ -250,3 +250,45 @@ mod unit_tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod failure_tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::SystemTime;
+
+    use super::{HINT_MARKER, stale_tmp_hint};
+
+    #[test]
+    fn a_marker_that_cannot_be_read_is_a_problem_notice() {
+        let state = tempfile::tempdir().unwrap();
+        // A directory where the marker file belongs: reading it fails, and it is not NotFound.
+        fs::create_dir(state.path().join(HINT_MARKER)).unwrap();
+
+        let notice = stale_tmp_hint(state.path(), 168, SystemTime::now())
+            .expect("an unreadable marker is shown, not skipped");
+
+        assert!(notice.contains("cannot read"), "{notice}");
+        assert!(notice.contains("llmenv doctor"), "no fix named: {notice}");
+    }
+
+    #[test]
+    fn an_unreadable_entry_is_counted_in_the_hint() {
+        let state = tempfile::tempdir().unwrap();
+        let locked = state.path().join("tmp").join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("inner"), b"i").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let notice = stale_tmp_hint(state.path(), 168, SystemTime::now());
+
+        // Restore the mode before any assertion, so the tempdir can be removed.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        let notice = notice.expect("an unreadable entry gives a notice");
+        assert!(
+            notice.contains("1 state/tmp entries could not be read"),
+            "{notice}"
+        );
+    }
+}
