@@ -1479,6 +1479,8 @@ The `tasks` widget shows `tasks: unreadable` in place of its count when a sessio
 
 The `branch` widget shows `branch: unreadable` when the repository's `HEAD` exists but cannot be read, instead of hiding the branch (changed in v3.13.0).
 
+The `pr` widget shows `pr: unreadable` when the branch cannot be read, instead of hiding itself (changed in v3.13.0).
+
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
 on `pr`, or `{count}` on `scopes`) is left in the output literally rather than
 being stripped — only the placeholders listed above are substituted.
