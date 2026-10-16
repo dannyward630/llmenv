@@ -84,7 +84,7 @@ Two details the first draft did not cover:
 - The operator (`=`, `^`, `~`, `>=`) must be equal on both sides, and only the numbers are ordered.
 
 The workflow runs the target's own copy of the script, read with `git show HEAD:scripts/forward_merge_manifest.py`, never the source's or the merged tree's.
-The reason is that the job holds `FORWARD_MERGE_PAT` on every release line (#1532, #2171, #2177, #2224).
+The reason is that the job holds a write credential on every release line: the phaedrus-sync App token since #2796, a PAT before that (#1532, #2171, #2177, #2224).
 A target branch that predates the script has no rule to apply, so the caller bails and a human merges once.
 Write the three manifest versions to temp files with `git show <ref>:<path>`.
 
