@@ -67,6 +67,13 @@ Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`, `remote_sync` = `true`. Set
 `cache_retention_hours` to `null` to disable age-based GC.
 
+(added in v3.13.0)
+
+`llmenv doctor --gc` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
+An entry in `state/tmp` is kept while a process holds a file open in it.
+That check uses `lsof`.
+When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
+
 ### `remote_sync` — toggle background remote git operations
 
 When enabled (default), llmenv fetches and pulls config from git on `export`.
@@ -1230,6 +1237,13 @@ session_log:
 | `verbose` | no | Also capture `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop`/`SubagentStop`/`PreCompact` events, not just the lifecycle + scope header; default `false` |
 | `path` | no | Override the file sink's path; default `<state_dir>/session-log.jsonl` |
 | `max_content_bytes` | no | Cap each event's `content` field to this many bytes before it's written/recorded; default `16384` |
+
+(added in v3.13.0)
+
+The file sink rotates `session-log.jsonl` when it reaches 64 MiB.
+It keeps three rotated files, `session-log.jsonl.1` to `session-log.jsonl.3`, and drops the oldest at each rotation.
+The first line of the new file names the rotated file that holds the older lines.
+`llmenv doctor --gc` removes rotated files older than `cache_retention_hours`.
 
 For finer control, `transcript` can be a mapping instead of a boolean:
 

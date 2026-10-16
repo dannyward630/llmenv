@@ -1149,7 +1149,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - `--gc` runs cache garbage collection after the diagnostics. On macOS this also
   drops the keychain credential item belonging to each cache folder it deletes
   (added in v3.8.0); matched by folder path, so your default `~/.claude` login is
-  never affected.
+  never affected. It also sweeps the state temp folder and removes old session-log rotations
+  (added in v3.13.0), with the window set by `cache_retention_hours`.
 - `--probe-mcp` (added in v3.12.0) also starts the stdio MCP servers, to measure their text for the
   MCP text limits check. Starting a server can have side effects, so doctor does it only on request.
 - `--restart-memory-proxy` (added in v3.12.0) replaces the checks; see above.
