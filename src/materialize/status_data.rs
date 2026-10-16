@@ -415,7 +415,7 @@ fn collect_cache(cache_root: &Path, hashing: HashingMode) -> Option<CacheData> {
 /// Symlinks are sized by their own on-disk length rather than followed,
 /// matching `prune`'s own care not to traverse through them. Unreadable
 /// entries are skipped (best-effort estimate, not exact accounting).
-fn dir_size(path: &Path) -> u64 {
+pub(crate) fn dir_size(path: &Path) -> u64 {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         // A missing path (an absent cache root, or an entry removed during the walk) has no size.

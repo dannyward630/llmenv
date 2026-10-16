@@ -13,6 +13,7 @@ use crate::materialize::cache::{
     GcReport, gc_remove_dir, gc_remove_link, is_expired, newest_mtime,
 };
 use crate::materialize::open_files::open_paths;
+use crate::materialize::status_data::dir_size;
 
 mod claude_root;
 
@@ -37,6 +38,8 @@ struct Scan {
 pub struct StaleSummary {
     pub count: usize,
     pub bytes: u64,
+    /// Entries the scan could not read or judge. They are not in `count`.
+    pub unreadable: usize,
 }
 
 /// Remove the entries of `tmp_root` that are older than `older_than` and not in use.
@@ -86,10 +89,11 @@ pub fn stale_summary_in(
     older_than: Duration,
     in_use: &[PathBuf],
 ) -> anyhow::Result<StaleSummary> {
-    let stale = scan(tmp_root, older_than, in_use)?.stale;
+    let scan = scan(tmp_root, older_than, in_use)?;
     Ok(StaleSummary {
-        count: stale.len(),
-        bytes: stale.iter().map(|s| tree_bytes(&s.path)).sum(),
+        count: scan.stale.len(),
+        bytes: scan.stale.iter().map(|s| dir_size(&s.path)).sum(),
+        unreadable: scan.failed.len(),
     })
 }
 
@@ -103,7 +107,13 @@ fn scan(tmp_root: &Path, older_than: Duration, in_use: &[PathBuf]) -> anyhow::Re
         .with_context(|| format!("resolving {}", tmp_root.display()))?;
     let now = SystemTime::now();
     for entry in entries {
-        let entry = entry.with_context(|| format!("reading {}", root.display()))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                record_failure(&root, &e, &mut scan);
+                continue;
+            }
+        };
         let name = entry.file_name();
         let path = root.join(&name);
         if in_use.iter().any(|used| used.starts_with(&path)) {
@@ -146,31 +156,6 @@ fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime,
             path: path.to_path_buf(),
             is_dir,
         });
-    }
-}
-
-/// The bytes under `path`. A symlink counts as its own size, and it is never followed. An entry
-/// that cannot be read counts as zero bytes, and the failure is logged.
-fn tree_bytes(path: &Path) -> u64 {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "state/tmp size: cannot stat entry");
-            return 0;
-        }
-    };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    match std::fs::read_dir(path) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|entry| tree_bytes(&entry.path()))
-            .sum(),
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "state/tmp size: cannot read dir");
-            0
-        }
     }
 }
 
@@ -377,7 +362,8 @@ mod tests {
             summary,
             StaleSummary {
                 count: 1,
-                bytes: 500
+                bytes: 500,
+                unreadable: 0
             }
         );
         assert!(old_dir.join("a").exists(), "the summary removed an entry");
@@ -395,7 +381,14 @@ mod tests {
 
         let summary = stale_summary_in(root.path(), DAY * 7, std::slice::from_ref(&busy)).unwrap();
 
-        assert_eq!(summary, StaleSummary { count: 0, bytes: 0 });
+        assert_eq!(
+            summary,
+            StaleSummary {
+                count: 0,
+                bytes: 0,
+                unreadable: 0
+            }
+        );
     }
 
     #[test]
@@ -405,6 +398,13 @@ mod tests {
 
         let summary = stale_summary_in(&missing, DAY * 7, &[]).unwrap();
 
-        assert_eq!(summary, StaleSummary { count: 0, bytes: 0 });
+        assert_eq!(
+            summary,
+            StaleSummary {
+                count: 0,
+                bytes: 0,
+                unreadable: 0
+            }
+        );
     }
 }

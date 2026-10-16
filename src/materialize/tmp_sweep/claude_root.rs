@@ -137,3 +137,38 @@ mod tests {
         assert!(future.exists());
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod name_tests {
+    use proptest::prelude::*;
+
+    use super::is_claude_root;
+
+    #[test]
+    fn only_a_claude_prefix_with_digits_is_a_root() {
+        for yes in ["claude-501", "claude-0"] {
+            assert!(is_claude_root(std::ffi::OsStr::new(yes)), "{yes}");
+        }
+        for no in [
+            "claude-",
+            "claude-x",
+            "claude-5a",
+            "claude501",
+            "Claude-501",
+            "shell-501",
+        ] {
+            assert!(!is_claude_root(std::ffi::OsStr::new(no)), "{no}");
+        }
+    }
+
+    proptest! {
+        /// A name without the `claude-` prefix is never a root, so the sweep judges it normally.
+        #[test]
+        fn a_name_without_the_prefix_is_never_a_root(name in "[a-z0-9-]{0,12}") {
+            prop_assume!(!name.starts_with("claude-"));
+
+            prop_assert!(!is_claude_root(std::ffi::OsStr::new(&name)));
+        }
+    }
+}

@@ -43,18 +43,21 @@ fn lsof_paths(program: &str) -> anyhow::Result<Vec<PathBuf>> {
             )
         })?;
     // lsof exits 1 on any error, and its list is then incomplete. Only exit 0 counts.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
     if output.status.code() != Some(0) {
         anyhow::bail!(
-            "`{program}` exited with {}; the state/tmp sweep stopped. Fix: check that `{program}` runs",
+            "`{program}` exited with {}: {stderr}; the state/tmp sweep stopped. \
+             Fix: resolve the lsof error above, then run `llmenv doctor --gc` again",
             output.status
         );
     }
     // lsof reports partial results on stderr, for example for a mount it cannot stat. Those
-    // results are routine on some hosts, so they are logged, not fatal.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
+    // results are routine on some hosts, so they are logged, not fatal (#2814). The in-use list
+    // may then miss an entry that is open on that mount.
+    if !stderr.is_empty() {
         tracing::warn!(
-            stderr = %stderr.trim(),
+            stderr,
             "lsof reported a problem; the in-use list may be incomplete"
         );
     }
@@ -127,6 +130,23 @@ mod tests {
             text.contains("state/tmp sweep stopped"),
             "no effect named: {text}"
         );
+    }
+
+    #[test]
+    fn an_lsof_that_writes_to_stderr_keeps_the_names_it_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-lsof");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'cannot stat /mnt/x' >&2\necho 'n/work/open'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let paths = lsof_paths(fake.to_str().unwrap()).unwrap();
+
+        assert_eq!(paths, vec![std::path::PathBuf::from("/work/open")]);
     }
 
     #[test]
