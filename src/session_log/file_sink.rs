@@ -3,7 +3,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use llmenv_paths::{create_dir_owner_only, reject_non_regular_file, state_dir};
 
@@ -14,7 +14,12 @@ use crate::session_log::rotation::{MAX_BYTES, rotate_if_full, rotation_marker};
 /// # Errors
 /// Propagates `state_dir()` resolution failure.
 pub fn default_file_path() -> anyhow::Result<PathBuf> {
-    Ok(state_dir()?.join("session-log.jsonl"))
+    Ok(file_path_in(&state_dir()?))
+}
+
+/// The default file-sink path under `state_dir`.
+pub(crate) fn file_path_in(state_dir: &Path) -> PathBuf {
+    state_dir.join("session-log.jsonl")
 }
 
 /// Appends rendered events to one JSONL file.
