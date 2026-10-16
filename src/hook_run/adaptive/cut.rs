@@ -44,3 +44,25 @@ pub(super) fn join_sections(first: &str, second: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn drop_removes_exactly_the_cut_lines(
+            lines in proptest::collection::vec(("[a-z ]{0,8}", any::<bool>()), 0..20),
+        ) {
+            let text = lines
+                .iter()
+                .map(|(s, cut)| if *cut { format!("{s}{CUT_MARKER}") } else { s.clone() })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (kept, dropped) = drop_cut_items(&text);
+            prop_assert_eq!(dropped, lines.iter().filter(|(_, cut)| *cut).count());
+            prop_assert!(!kept.lines().any(|line| line.trim_end().ends_with(CUT_MARKER)));
+        }
+    }
+}
