@@ -21,7 +21,7 @@ mod notice;
 pub(crate) use event::HOOK_EVENT_NAMES;
 pub(crate) use event::HookEvent;
 use event::engine_event_for;
-use notice::{log_notice_without_channel, write_notice_only};
+use notice::{log_notice_without_channel, write_hook_line, write_notice_only};
 use transcript_link::ensure_transcript_session;
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
@@ -29,8 +29,10 @@ pub(crate) mod mcp_client;
 pub(crate) mod mcp_health;
 pub(crate) mod read_once;
 mod recall;
+mod record_hash;
 mod relevance;
 pub(crate) mod repeat_detect;
+mod resume_cache;
 mod session_ledger;
 mod session_notices;
 pub(crate) mod session_state;
@@ -708,6 +710,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             } else {
                 let notes = join_notes(notice.as_deref(), &text.notes);
                 let out = adapter.emit_hook_context(&hook_event_name, &text.memory, &notes);
+                let out = resume_cache::with_resume_notice(out, &hook_event_name, payload);
                 // The omission notice rides in `notes`, so the log must see the joined text (#2764).
                 log_notice_without_channel(&out, Some(notes.as_str()), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
@@ -3045,19 +3048,6 @@ fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> 
         .create_new(true)
         .mode(0o600)
         .open(path)
-}
-
-/// Writes one hook output line to `w`. Returns the error to report, or `None` when there is no
-/// output or the reader went away. A closed pipe is normal for a hook, so it is not an error.
-fn write_hook_line(w: &mut impl std::io::Write, out: &str) -> Option<std::io::Error> {
-    if out.is_empty() {
-        return None;
-    }
-    match writeln!(w, "{out}") {
-        Ok(()) => None,
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => None,
-        Err(e) => Some(e),
-    }
 }
 
 /// The SessionEnd dedup snapshot path. Other events have none. A missing state directory skips
