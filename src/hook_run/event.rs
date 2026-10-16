@@ -162,3 +162,43 @@ mod tests {
         assert_eq!(HookEvent::PostSession.engine_name(), None);
     }
 }
+
+/// The engine's event name: the stdin payload's name when it has one, else the native name of the
+/// argv event. Unparseable stdin leaves the payload name unknown, so the argv event supplies it
+/// (#2748).
+pub(super) fn engine_event_for(stdin_name: Option<&str>, event: &str) -> String {
+    stdin_name
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            HookEvent::from_str(event)
+                .ok()
+                .and_then(HookEvent::engine_name)
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[cfg(test)]
+mod event_name_tests {
+    use super::engine_event_for;
+
+    #[test]
+    fn the_payload_name_wins_over_the_argv_event() {
+        assert_eq!(engine_event_for(Some("Stop"), "session_start"), "Stop");
+    }
+
+    #[test]
+    fn an_empty_payload_name_falls_back_to_the_argv_event() {
+        assert_eq!(engine_event_for(Some(""), "session_start"), "SessionStart");
+    }
+
+    #[test]
+    fn a_missing_payload_uses_the_argv_event_name() {
+        assert_eq!(engine_event_for(None, "turn_start"), "UserPromptSubmit");
+    }
+
+    #[test]
+    fn an_event_without_a_native_name_gives_an_empty_name() {
+        assert_eq!(engine_event_for(None, "post_session"), "");
+    }
+}

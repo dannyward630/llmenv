@@ -121,6 +121,11 @@ mod tests {
             msg.contains("checkpoint"),
             "error must name the checkpoint: {msg}"
         );
+        // The parser's own detail must reach the message, not just the static text around it.
+        assert!(
+            msg.contains("column"),
+            "error must carry the parse detail: {msg}"
+        );
     }
 
     #[test]

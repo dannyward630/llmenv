@@ -117,6 +117,21 @@ async fn store_once(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_checkpoint_survives_an_unparseable_payload() {
+        // A checkpoint that cannot be read may succeed on a retry, so its file must stay (#2779).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cp.json");
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        let result = run_icm_store_with("{not json", Some(&path), |_| Ok(()));
+        assert!(result.is_err());
+        assert!(
+            std::fs::symlink_metadata(&path).is_ok(),
+            "the checkpoint must not be deleted"
+        );
+    }
+
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};

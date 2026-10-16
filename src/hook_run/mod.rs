@@ -20,6 +20,7 @@ mod notice;
 #[cfg(test)]
 pub(crate) use event::HOOK_EVENT_NAMES;
 pub(crate) use event::HookEvent;
+use event::engine_event_for;
 use notice::{log_notice_without_channel, write_notice_only};
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
@@ -591,16 +592,12 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         })
         .ok();
     // Unparseable stdin leaves the engine's name unknown, so the argv event supplies it (#2748).
-    let hook_event_name: &str = stdin_json
-        .as_ref()
-        .and_then(|v| v["hook_event_name"].as_str())
-        .filter(|name| !name.is_empty())
-        .or_else(|| {
-            HookEvent::from_str(event)
-                .ok()
-                .and_then(HookEvent::engine_name)
-        })
-        .unwrap_or_default();
+    let hook_event_name = engine_event_for(
+        stdin_json
+            .as_ref()
+            .and_then(|v| v["hook_event_name"].as_str()),
+        event,
+    );
     let claude_session_id: Option<&str> =
         stdin_json.as_ref().and_then(|v| v["session_id"].as_str());
     // The version is informational. Failing the hook here would exit 1, which lets the tool call
@@ -622,7 +619,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                 "llmenv hook-run: {e}. Fix: check the hook command's event name."
             ));
             if let Some(notice) = crate::agent_notice::current() {
-                write_notice_only(adapter.as_ref(), hook_event_name, event, &notice);
+                write_notice_only(adapter.as_ref(), &hook_event_name, event, &notice);
             }
             return Ok(HookExit::Success);
         }
@@ -708,7 +705,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                 }
             } else {
                 let notes = join_notes(notice.as_deref(), &text.notes);
-                let out = adapter.emit_hook_context(hook_event_name, &text.memory, &notes);
+                let out = adapter.emit_hook_context(&hook_event_name, &text.memory, &notes);
                 // The omission notice rides in `notes`, so the log must see the joined text (#2764).
                 log_notice_without_channel(&out, Some(notes.as_str()), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
@@ -720,7 +717,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             eprintln!("llmenv: memory {event} skipped: {e}");
             // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
             if let Some(notice) = notice {
-                write_notice_only(adapter.as_ref(), hook_event_name, event, &notice);
+                write_notice_only(adapter.as_ref(), &hook_event_name, event, &notice);
             }
         }
     }
