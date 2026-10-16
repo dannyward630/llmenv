@@ -5,6 +5,7 @@ pub(crate) mod merge_cache;
 pub(crate) mod schema_gen;
 pub mod state;
 mod status_data;
+pub(crate) mod tmp_sweep;
 
 pub(crate) use status_data::{ConfigStaleInputs, collect_status_data};
 

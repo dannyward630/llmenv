@@ -501,7 +501,7 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
 
 /// Check whether `mtime` is older than `older_than` relative to `now`.
 /// Clock skew (mtime in the future) is treated as expired and logged.
-fn is_expired(now: SystemTime, mtime: SystemTime, older_than: Duration) -> bool {
+pub(crate) fn is_expired(now: SystemTime, mtime: SystemTime, older_than: Duration) -> bool {
     match now.duration_since(mtime) {
         Ok(elapsed) => elapsed > older_than,
         Err(e) => {
@@ -600,7 +600,7 @@ pub fn gc(
 /// Same reasoning as [`remove_dir`] (#1372): one undeletable entry must not
 /// abort collection of everything after it, since `doctor --gc` reported only
 /// the bare errno and left the rest of the cache untouched.
-fn gc_remove_dir(p: &Path, report: &mut GcReport) {
+pub(crate) fn gc_remove_dir(p: &Path, report: &mut GcReport) {
     match remove_dir_all_forcing_writable(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
         Err(e) => {
@@ -694,7 +694,7 @@ fn gc_normal_shapes(
 }
 
 /// Newest mtime found anywhere under `dir` (including the dir itself).
-fn newest_mtime(dir: &Path) -> anyhow::Result<SystemTime> {
+pub(crate) fn newest_mtime(dir: &Path) -> anyhow::Result<SystemTime> {
     let mut newest = dir
         .metadata()
         .and_then(|m| m.modified())
