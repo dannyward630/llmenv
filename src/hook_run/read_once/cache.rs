@@ -94,10 +94,8 @@ impl SessionCache {
     /// Remove entries where `now - first_read_at > ttl_seconds`.
     pub fn prune(&mut self, ttl_seconds: u64) {
         let now = unix_now();
-        self.entries.retain(|_, entry| {
-            let age = now.saturating_sub(entry.first_read_at);
-            age < i64::try_from(ttl_seconds).unwrap_or(i64::MAX)
-        });
+        self.entries
+            .retain(|_, entry| within_ttl(now, entry.first_read_at, ttl_seconds));
     }
 
     /// Scan `state_dir/read_once/` and delete `.json` files older than
@@ -111,5 +109,27 @@ impl SessionCache {
             &read_once_state_dir(state_dir),
             max_age_days,
         );
+    }
+}
+
+/// Whether an entry first read at `first_read_at` is still inside the TTL at `now`. An entry
+/// whose age equals the TTL has expired.
+pub(super) fn within_ttl(now: i64, first_read_at: i64, ttl_seconds: u64) -> bool {
+    now.saturating_sub(first_read_at) < i64::try_from(ttl_seconds).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::within_ttl;
+
+    #[test]
+    fn an_entry_exactly_one_ttl_old_has_expired() {
+        assert!(!within_ttl(1000, 900, 100));
+        assert!(within_ttl(999, 900, 100));
+    }
+
+    #[test]
+    fn a_ttl_too_large_for_i64_keeps_every_entry() {
+        assert!(within_ttl(0, 0, u64::MAX));
     }
 }

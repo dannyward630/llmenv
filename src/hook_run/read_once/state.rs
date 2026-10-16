@@ -15,8 +15,12 @@ pub(in crate::hook_run) fn session_cache_path(state_dir: &Path, session_id: &str
 
 /// Clear the entire read-once cache by removing the state directory.
 pub fn clear_cache() -> anyhow::Result<()> {
-    let state_dir = crate::paths::state_dir()?;
-    let ro_dir = read_once_state_dir(&state_dir);
+    clear_cache_in(&crate::paths::state_dir()?)
+}
+
+/// Remove the read-once folder under `state_dir`, and say on stdout what happened.
+fn clear_cache_in(state_dir: &Path) -> anyhow::Result<()> {
+    let ro_dir = read_once_state_dir(state_dir);
     if ro_dir.exists() {
         std::fs::remove_dir_all(&ro_dir)?;
         writeln!(std::io::stdout(), "Read-once cache cleared")?;
@@ -45,4 +49,48 @@ pub(super) fn cache_key(path: &Path) -> String {
         })
         .unwrap_or_else(|_| path.to_path_buf());
     canonical.to_string_lossy().to_string()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{cache_key, clear_cache_in, read_once_state_dir};
+
+    #[test]
+    fn clear_cache_removes_the_read_once_folder_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let ro = read_once_state_dir(dir.path());
+        std::fs::create_dir_all(&ro).unwrap();
+        std::fs::write(ro.join("s.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("keep.txt"), b"k").unwrap();
+
+        clear_cache_in(dir.path()).unwrap();
+
+        assert!(!ro.exists());
+        assert!(dir.path().join("keep.txt").exists());
+    }
+
+    #[test]
+    fn clear_cache_with_no_folder_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        clear_cache_in(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn the_cache_key_of_an_existing_file_is_its_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, b"a").unwrap();
+        assert_eq!(
+            cache_key(&file),
+            file.canonicalize().unwrap().to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn the_cache_key_of_a_missing_path_is_the_raw_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.txt");
+        assert_eq!(cache_key(&missing), missing.to_string_lossy());
+    }
 }

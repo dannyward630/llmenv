@@ -15,6 +15,7 @@ use crate::config::ReadOnce as ReadOnceConfig;
 use crate::config::ReadOnceMode;
 use crate::hook_run::session_state::unix_now;
 
+use cache::within_ttl;
 use state::cache_key;
 
 /// A single tracked file read in the session cache.
@@ -150,10 +151,7 @@ pub(crate) fn handle_pre_tool_use(
     let lookup_start = std::time::Instant::now();
     let extra = format!("path={file_path}");
     if let Some(entry) = cache.entries.get_mut(&path_key) {
-        if entry.mtime_unix == mtime
-            && now.saturating_sub(entry.first_read_at)
-                < i64::try_from(config.ttl_seconds).unwrap_or(i64::MAX)
-        {
+        if entry.mtime_unix == mtime && within_ttl(now, entry.first_read_at, config.ttl_seconds) {
             // Cache hit within TTL — warn or deny.
             // Don't save on hit — hits/tokens_saved are advisory stats that
             // get accurately written on the next miss-path save.

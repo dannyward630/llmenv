@@ -46,3 +46,16 @@ pub(super) fn transcript_unlinked_notice(error: &anyhow::Error) -> String {
 pub(super) fn problem_notice(problem: &str, fix: &str) -> String {
     format!("llmenv: {problem}. Fix: {fix}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::problem_notice;
+
+    #[test]
+    fn a_problem_notice_names_the_problem_then_the_fix() {
+        assert_eq!(
+            problem_notice("the cache is unreadable", "run doctor"),
+            "llmenv: the cache is unreadable. Fix: run doctor"
+        );
+    }
+}
