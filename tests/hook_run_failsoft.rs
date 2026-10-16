@@ -243,17 +243,16 @@ fn assert_unreachable_recall_notice(mut cmd: Command) {
 }
 
 #[test]
-fn unknown_event_exits_zero_with_warning() {
-    // The event name is rejected before any config load, so a near-empty config
-    // is fine here.
-    let dir = TempDir::new().unwrap();
-    let config_path = dir.path().join("config.yaml");
-    fs::write(&config_path, "adapter:\n  engine: claude-code\n").unwrap();
+fn unknown_event_exits_zero_with_notice_on_stdout() {
+    // The event name is rejected before any config load. The agent reads stdout, not stderr,
+    // so the notice goes there (#2748).
+    let (dir, config_path) = setup_config(&config_no_backend());
 
-    assert_fail_soft(
-        hook_cmd(dir.path(), &config_path, "not_a_real_event"),
-        "unknown hook event",
-    );
+    hook_cmd(dir.path(), &config_path, "not_a_real_event")
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unknown hook event"));
 }
 
 #[test]
