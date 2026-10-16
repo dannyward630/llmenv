@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 mod autocompact;
 mod background;
+mod cache_gc;
 mod cbm_index;
 mod cleartext;
 mod instruction_size;
@@ -2188,42 +2189,7 @@ pub(super) fn run_doctor(
     eprintln!("{pass} Doctor check complete.");
 
     if gc {
-        eprintln!("Running garbage collection...");
-        match std::fs::metadata(&cache_dir) {
-            Ok(meta) => {
-                if meta.permissions().readonly() {
-                    eprintln!("{warn} GC failed: cache directory is read-only");
-                } else {
-                    let cache_retention_hours = config.cache.cache_retention_hours.unwrap_or(168);
-                    let retention = std::time::Duration::from_secs(cache_retention_hours * 3600);
-                    match crate::materialize::cache::gc(&cache_dir, retention, config.cache.hashing)
-                    {
-                        Ok(report) => {
-                            eprintln!(
-                                "{pass} GC complete: removed {} entries, kept {}",
-                                report.removed.len(),
-                                report.kept
-                            );
-                            // #1372: a removal failure no longer aborts the walk,
-                            // so the entries it skipped have to be reported here
-                            // or they'd vanish from the summary entirely.
-                            for p in &report.failed {
-                                eprintln!("{warn} GC: could not remove {}", p.display());
-                            }
-                            let forgotten = forget_credentials_for(&report.removed);
-                            if forgotten > 0 {
-                                eprintln!(
-                                    "{pass} GC: dropped {forgotten} orphaned OAuth credential \
-                                     entries"
-                                );
-                            }
-                        }
-                        Err(e) => eprintln!("{warn} GC failed: {}", e),
-                    }
-                }
-            }
-            Err(e) => eprintln!("{warn} GC failed to stat cache directory: {}", e),
-        }
+        cache_gc::run(&cache_dir, &config, &pass, &warn);
     }
 
     Ok(())

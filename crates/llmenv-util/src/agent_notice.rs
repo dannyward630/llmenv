@@ -9,11 +9,36 @@ use std::sync::{Mutex, PoisonError};
 /// failure from filling the agent's context.
 const MAX_NOTICE_CHARS: usize = 1000;
 
+/// Marks the next step in a notice. Every notice that names a fix ends with this marker, so the
+/// cap keeps it (#2820).
+const FIX_MARKER: &str = "Fix:";
+
 /// One line, free of control and bidirectional characters, and at most [`MAX_NOTICE_CHARS`].
+/// When the text is too long, the cause is cut, and a `…` marks the cut. The `Fix:` part is kept
+/// whole. The last `Fix:` marks the fix, so a cause that repeats the marker does not move it.
 fn clean(text: &str) -> String {
     let spaced = text.replace(['\n', '\r'], " ");
     let plain = crate::strip_unsafe_chars(&spaced);
-    plain.chars().take(MAX_NOTICE_CHARS).collect()
+    if plain.chars().count() <= MAX_NOTICE_CHARS {
+        return plain;
+    }
+    match plain.rfind(FIX_MARKER) {
+        // Room for the fix, one separating space, and at least the marker and one cause character.
+        Some(at) if plain[at..].chars().count() + 2 <= MAX_NOTICE_CHARS => {
+            let fix = &plain[at..];
+            let cause = plain[..at].trim_end();
+            let budget = MAX_NOTICE_CHARS - fix.chars().count() - 1;
+            if cause.chars().count() <= budget {
+                return format!("{cause} {fix}");
+            }
+            let kept: String = cause.chars().take(budget - 1).collect();
+            format!("{}… {fix}", kept.trim_end())
+        }
+        _ => {
+            let kept: String = plain.chars().take(MAX_NOTICE_CHARS - 1).collect();
+            format!("{kept}…")
+        }
+    }
 }
 
 /// The notices of one process, in the order they were first raised.
@@ -69,7 +94,7 @@ pub fn current() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NoticeList, current, record};
+    use super::{NoticeList, clean, current, record};
     use proptest::prelude::*;
 
     #[test]
@@ -95,6 +120,47 @@ mod tests {
             first < second,
             "the first raised notice must come first: {text}"
         );
+    }
+
+    #[test]
+    fn a_long_cause_keeps_its_fix_line_whole() {
+        let cause = "e".repeat(2000);
+        let fix = "Fix: run `llmenv doctor` to check the state directory.";
+        let mut list = NoticeList::new();
+        list.record(format!("llmenv: a step failed: {cause}. {fix}"));
+        let text = list.current().unwrap_or_default();
+        assert_eq!(text.chars().count(), 1000);
+        assert!(text.ends_with(fix), "the fix line was cut: {text}");
+        assert!(
+            text.starts_with("llmenv: a step failed: e"),
+            "the cause head was lost: {text}"
+        );
+    }
+
+    #[test]
+    fn a_long_notice_without_a_fix_line_is_cut_from_the_end() {
+        let mut list = NoticeList::new();
+        list.record("x".repeat(2000));
+        assert_eq!(list.current().map(|t| t.chars().count()), Some(1000));
+    }
+
+    #[test]
+    fn a_fix_line_longer_than_the_cap_is_cut_plainly() {
+        let mut list = NoticeList::new();
+        list.record(format!("cause. Fix: {}", "f".repeat(1500)));
+        let text = list.current().unwrap_or_default();
+        assert_eq!(text.chars().count(), 1000);
+        assert!(text.starts_with("cause. Fix: f"));
+    }
+
+    #[test]
+    fn a_capped_notice_stays_in_the_cap_and_keeps_its_fix_line() {
+        const FIX: &str = "Fix: run `llmenv doctor` to check the state directory.";
+        proptest!(|(cause in "(?s).{0,2500}")| {
+            let text = clean(&format!("llmenv: a step failed: {cause}. {FIX}"));
+            prop_assert!(text.chars().count() <= 1000, "over the cap: {}", text.chars().count());
+            prop_assert!(text.ends_with(FIX), "fix line lost: {text}");
+        });
     }
 
     #[test]

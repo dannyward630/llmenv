@@ -118,6 +118,11 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Fixed
 
+- A hook message that went to stderr now reaches the agent as a notice: the deprecated `filePath` key, a session with no ICM transcript, and a subagent start with no usable agent id (#2818) [fix:hook]
+- A notice longer than 1000 characters keeps its `Fix:` line. Only the cause is cut (#2820) [fix:hook]
+- `llmenv doctor --gc` sweeps the state temp folder (`state/tmp`) by age, and skips an entry that a process has open. It stops with a fix when `lsof` cannot run (#2814) [fix:materialize]
+- The session log rotates at 64 MiB and keeps three rotated files. `doctor --gc` removes rotations older than the cache retention (#2816) [fix:hook]
+- The task-tracking rules say the tracker has no MCP tool, and name the Bash command. Agents stop calling `mcp__llmenv__task_session` (#2827) [fix:task]
 - A stateless recall at the start of a turn, with no session id under adaptive recall, scopes to the session project. Before, it searched every project's memories (#2765) [fix:hook]
 - A scope recall that the output budget cuts short leaves a notice that names the count of skipped recalls, instead of dropping them silently (#2766) [fix:hook]
 - A failed first session-start update to the recall ledger leaves a notice for the agent, even when no context reset was requested (#2767) [fix:hook]
