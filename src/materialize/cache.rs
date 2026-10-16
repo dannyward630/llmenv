@@ -615,14 +615,14 @@ pub(crate) fn gc_remove_dir(p: &Path, report: &mut GcReport) {
 }
 
 /// Unlink a symlink for [`gc`], recording rather than propagating a failure.
-fn gc_remove_link(p: &Path, report: &mut GcReport) {
+pub(crate) fn gc_remove_link(p: &Path, report: &mut GcReport) {
     match std::fs::remove_file(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
         Err(e) => {
             tracing::error!(
                 path = %p.display(),
                 error = %e,
-                "gc: failed to unlink cache symlink; skipping"
+                "gc: failed to unlink cache entry; skipping"
             );
             report.failed.push(p.to_path_buf());
         }
