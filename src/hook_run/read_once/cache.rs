@@ -42,6 +42,11 @@ impl SessionCache {
                     "failed to parse read-once cache {}, starting empty: {e}",
                     path.display()
                 );
+                crate::agent_notice::record(format!(
+                    "llmenv: the read-once cache {} could not be parsed, so it starts empty. Fix: \
+                     delete the file; the cache starts again on the next read.",
+                    path.display()
+                ));
                 Self::new(session_id)
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(session_id),
@@ -50,6 +55,11 @@ impl SessionCache {
                     "failed to read read-once cache {}, saves are skipped: {e}",
                     path.display()
                 );
+                crate::agent_notice::record(format!(
+                    "llmenv: the read-once cache {} could not be read, so repeat reads are not \
+                     tracked this session. Fix: run `llmenv doctor` to check the state directory.",
+                    path.display()
+                ));
                 Self {
                     read_failed: true,
                     ..Self::new(session_id)
@@ -68,6 +78,10 @@ impl SessionCache {
                 "read-once cache for session {} not saved, the file could not be read",
                 self.session_id
             );
+            crate::agent_notice::record(
+                "llmenv: the read-once cache for this session was not saved, because its file \
+                 could not be read. Fix: run `llmenv doctor` to check the state directory.",
+            );
             return Ok(());
         }
         Self::prune_stale_sessions(state_dir, 7);
@@ -82,7 +96,7 @@ impl SessionCache {
         let now = unix_now();
         self.entries.retain(|_, entry| {
             let age = now.saturating_sub(entry.first_read_at);
-            age < ttl_seconds as i64
+            age < i64::try_from(ttl_seconds).unwrap_or(i64::MAX)
         });
     }
 

@@ -59,6 +59,12 @@ pub(super) async fn ensure_transcript_session(
     // orphan, and each later event would add another one (#2667).
     if let Err(e) = state::check_writable_at(path) {
         error!(error = %e, "no ICM transcript started: the session map cannot be written");
+        crate::agent_notice::record(notice::problem_notice(
+            &format!(
+                "no ICM transcript started for this session: the session map cannot be written: {e:#}"
+            ),
+            "run `llmenv doctor` to check the state directory.",
+        ));
         return None;
     }
     let metadata = scope_metadata_json(ctx);
@@ -73,6 +79,10 @@ pub(super) async fn ensure_transcript_session(
         Ok(id) => id,
         Err(e) => {
             error!(error = %e, "failed to start ICM transcript session");
+            crate::agent_notice::record(notice::problem_notice(
+                &format!("the ICM transcript for this session could not start: {e:#}"),
+                "run `llmenv doctor` to check the memory server.",
+            ));
             return None;
         }
     };
@@ -82,6 +92,15 @@ pub(super) async fn ensure_transcript_session(
             session_id = %id,
             "ICM transcript started but its link was not recorded, so this event is not logged"
         );
+        crate::agent_notice::record(notice::problem_notice(
+            &format!(
+                "ICM transcript {id} started, but its link to this session was not recorded, so \
+                 this event is not logged and transcript {id} has no link: {e:#}"
+            ),
+            &format!(
+                "run `llmenv doctor` to check the state directory, then remove transcript {id} in ICM."
+            ),
+        ));
         return None;
     }
     Some(id)

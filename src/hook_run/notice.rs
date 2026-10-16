@@ -41,3 +41,8 @@ pub(super) fn transcript_unlinked_notice(error: &anyhow::Error) -> String {
          Fix: run `llmenv doctor` to check the state directory."
     )
 }
+
+/// A notice that names the problem and the fix, in the form every agent notice uses.
+pub(super) fn problem_notice(problem: &str, fix: &str) -> String {
+    format!("llmenv: {problem}. Fix: {fix}")
+}

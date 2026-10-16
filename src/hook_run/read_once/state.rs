@@ -25,3 +25,24 @@ pub fn clear_cache() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// The cache key of `path`: its canonical path. A path that cannot be resolved is keyed by its
+/// raw form, and the agent is told (#2818).
+pub(super) fn cache_key(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path)
+        .inspect_err(|e| {
+            // Hook stderr never reaches the agent, so the notice goes to the agent (#2818).
+            crate::agent_notice::record(format!(
+                "llmenv: read-once could not resolve {}: {e}. Repeat reads use the raw path as the \
+             key. Fix: check the file path and its parent directory.",
+                path.display()
+            ));
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "cannot canonicalize read-once cache path, using raw path"
+            )
+        })
+        .unwrap_or_else(|_| path.to_path_buf());
+    canonical.to_string_lossy().to_string()
+}

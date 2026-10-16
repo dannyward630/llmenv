@@ -15,6 +15,8 @@ use crate::config::ReadOnce as ReadOnceConfig;
 use crate::config::ReadOnceMode;
 use crate::hook_run::session_state::unix_now;
 
+use state::cache_key;
+
 /// A single tracked file read in the session cache.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadEntry {
@@ -132,20 +134,7 @@ pub(crate) fn handle_pre_tool_use(
         tracing::error!("session_id failed path-safety validation for read_once, rejecting");
         return String::new();
     }
-    let canonical = std::fs::canonicalize(path)
-        .inspect_err(|e| {
-            eprintln!(
-                "llmenv: cannot canonicalize read-once cache path {}: {e}, using raw path",
-                path.display()
-            );
-            tracing::warn!(
-                error = %e,
-                path = %path.display(),
-                "cannot canonicalize read-once cache path, using raw path"
-            )
-        })
-        .unwrap_or_else(|_| path.to_path_buf());
-    let path_key = canonical.to_string_lossy().to_string();
+    let path_key = cache_key(path);
     // Load session cache
     // Held from the load to the save, so a concurrent Read hook cannot overwrite the cache (#2678).
     let _lock = super::session_state::lock_state_file(
@@ -162,7 +151,8 @@ pub(crate) fn handle_pre_tool_use(
     let extra = format!("path={file_path}");
     if let Some(entry) = cache.entries.get_mut(&path_key) {
         if entry.mtime_unix == mtime
-            && now.saturating_sub(entry.first_read_at) < config.ttl_seconds as i64
+            && now.saturating_sub(entry.first_read_at)
+                < i64::try_from(config.ttl_seconds).unwrap_or(i64::MAX)
         {
             // Cache hit within TTL — warn or deny.
             // Don't save on hit — hits/tokens_saved are advisory stats that
@@ -209,7 +199,10 @@ pub(crate) fn handle_pre_tool_use(
     crate::cache_trace::emit_cache_trace("read_once", false, lookup_start.elapsed(), Some(&extra));
 
     if let Err(e) = cache.save(state_dir) {
-        eprintln!("llmenv: failed to save read-once cache: {e}");
+        crate::agent_notice::record(format!(
+            "llmenv: the read-once cache could not be saved: {e:#}. Fix: run `llmenv doctor` to \
+             check the state directory."
+        ));
     }
 
     String::new() // Pass through
