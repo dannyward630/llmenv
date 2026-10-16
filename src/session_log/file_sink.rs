@@ -133,7 +133,7 @@ fn rename_if_present(from: &Path, to: &Path) -> std::io::Result<()> {
 ///
 /// # Errors
 /// Propagates a failure to read the directory or to remove a rotated file.
-pub fn prune_rotations(path: &Path, older_than: Duration) -> anyhow::Result<usize> {
+pub(crate) fn prune_rotations(path: &Path, older_than: Duration) -> anyhow::Result<usize> {
     let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
         return Ok(0);
     };
