@@ -23,3 +23,8 @@ A cursor stops working when the index changes; run the query again then.
 After a codebase-memory upgrade, the first index of each project is a full
 rebuild and can take minutes.
 `index_status` showing a run in progress then is expected.
+
+For a large repository, start the index with `index_repository` and `async: true`.
+A synchronous index can exceed a client's per-call deadline.
+Poll with `index_repository` and `status: true` until the run ends.
+Do not combine `async` with `status` or with `mode: "cross-repo-intelligence"`.

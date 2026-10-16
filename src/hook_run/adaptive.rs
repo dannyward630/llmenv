@@ -18,10 +18,12 @@ use crate::hook_run::transcript;
 use llmenv_mcp::mcp_client::McpHttpClient;
 
 mod cut;
+mod session_reset;
 mod subagent;
 #[cfg(test)]
 use cut::cut_items_notice;
 use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
+use session_reset::{first_update_notice, resets_ledger};
 use subagent::agent_key;
 pub(super) use subagent::subagent_start;
 
@@ -206,28 +208,11 @@ async fn waves(
     (outcome, main_ok)
 }
 
-fn resets_ledger(source: Option<&str>) -> bool {
-    super::session_state::context_was_lost(source)
-}
-
 /// Notice for a context reset that the ledger did not apply. Records seen before the
 /// reset stay filtered from recall, so the agent must hear about it.
 const RESET_UNDONE: &str = "llmenv: the recall ledger was not reset after a context reset (the \
      state file was locked or unreadable). Records seen before the reset may stay filtered from \
      recall. Fix: run `llmenv doctor` to check the state directory.";
-
-/// The notice for the first session-start ledger update, or `None` when it saved. The first
-/// update is the only write that carries this session's reset and project, so a failure here
-/// is noticed even when the second update later succeeds (#2767).
-fn first_update_notice(saved: bool, reset: bool) -> Option<&'static str> {
-    if saved {
-        None
-    } else if reset {
-        Some(RESET_UNDONE)
-    } else {
-        Some(RECALL_STATE_UNSAVED)
-    }
-}
 
 /// The notice for scope recalls that the output budget cut off, or `None` when none were cut
 /// (#2766). The recalls are unknown to the agent, not empty, so the notice says so.
@@ -279,7 +264,9 @@ pub(super) async fn session_start(
     };
     let recall_project = project.clone();
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
+    let resume = super::resume_cache::ResumeCache::from_payload(ctx.payload);
     let updated = ctx.store.update(ctx.session_id, |l| {
+        l.resume_cache = Some(resume);
         if reset {
             l.reset();
         }
