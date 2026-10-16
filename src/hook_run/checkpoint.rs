@@ -395,32 +395,8 @@ pub(crate) fn begin(
         .flatten()
 }
 
-/// The inputs of a detached job. `stdin_text` is what the parent piped to the child. When that
-/// text does not parse as `T`, for example because the parent failed to write all of it, the inputs
-/// that the parent recorded in the checkpoint at `path` are used. The job then runs, and a
-/// truncated pipe does not lose it.
-///
-/// # Errors
-/// The text does not parse, and there is no readable checkpoint whose inputs parse.
-pub(crate) fn inputs_or_checkpoint<T: serde::de::DeserializeOwned>(
-    stdin_text: &str,
-    path: Option<&Path>,
-) -> anyhow::Result<T> {
-    let stdin_error = match serde_json::from_str::<T>(stdin_text) {
-        Ok(inputs) => return Ok(inputs),
-        Err(e) => e,
-    };
-    let recorded = path
-        .and_then(|p| load(p).ok())
-        .and_then(|cp| serde_json::from_value::<T>(cp.inputs).ok());
-    match recorded {
-        Some(inputs) => {
-            tracing::error!("job input on stdin is unusable ({stdin_error}); using the checkpoint");
-            Ok(inputs)
-        }
-        None => Err(stdin_error.into()),
-    }
-}
+mod inputs;
+pub(crate) use inputs::inputs_or_checkpoint;
 
 /// Delete the checkpoint of a job that finished, or that cannot succeed on a retry. A job that
 /// failed in a way a later run may fix leaves its file. Fail-soft.
