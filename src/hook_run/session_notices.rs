@@ -14,6 +14,9 @@ use super::notice::problem_notice;
 /// The marker file that holds the UTC day of the last stale-entry hint.
 const HINT_MARKER: &str = "stale-tmp-hint.day";
 
+/// The fix for a problem with the state directory, named in every notice about it.
+const STATE_FIX: &str = "run `llmenv doctor` to check the state directory";
+
 /// The retention that the cache sweep uses when the config leaves it unset (#2814).
 const DEFAULT_RETENTION_HOURS: u64 = 168;
 
@@ -62,7 +65,10 @@ fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<Strin
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            tracing::error!(path = %marker.display(), error = %e, "cannot read the hint marker");
+            return Some(problem_notice(
+                &format!("cannot read {}: {e}", marker.display()),
+                STATE_FIX,
+            ));
         }
     }
     let older_than = Duration::from_secs(hours.saturating_mul(3600));
@@ -71,14 +77,31 @@ fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<Strin
         Err(e) => {
             return Some(problem_notice(
                 &format!("the stale state/tmp check failed: {e:#}"),
-                "run `llmenv doctor` to check the state directory",
+                STATE_FIX,
             ));
         }
     };
-    if let Err(e) = std::fs::write(&marker, day.to_string()) {
-        tracing::error!(path = %marker.display(), error = %e, "cannot write the hint marker");
-    }
-    (summary.count > 0).then(|| stale_tmp_text(&summary, hours))
+    // A failed write repeats the hint in the next session, so the problem is shown each time.
+    let write_problem = std::fs::write(&marker, day.to_string()).err().map(|e| {
+        problem_notice(
+            &format!("cannot write {}: {e}", marker.display()),
+            STATE_FIX,
+        )
+    });
+    let hint = (summary.count > 0).then(|| stale_tmp_text(&summary, hours));
+    let unreadable = (summary.unreadable > 0).then(|| {
+        problem_notice(
+            &format!(
+                "{} state/tmp entries could not be read for the stale check",
+                summary.unreadable
+            ),
+            STATE_FIX,
+        )
+    });
+    [hint, unreadable, write_problem]
+        .into_iter()
+        .flatten()
+        .reduce(|acc, next| format!("{acc}\n{next}"))
 }
 
 /// The one-line hint. It names the count, the size, the retention, and the command.
@@ -149,6 +172,7 @@ mod tests {
         let summary = StaleSummary {
             count: 4,
             bytes: 2 * 1024 * 1024,
+            unreadable: 0,
         };
 
         let text = stale_tmp_text(&summary, 168);
@@ -196,5 +220,33 @@ mod tests {
         fs::create_dir_all(state.path().join("tmp").join("fresh")).unwrap();
 
         assert!(stale_tmp_hint(state.path(), 168, SystemTime::now()).is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod unit_tests {
+    use proptest::prelude::*;
+
+    use super::human_bytes;
+
+    proptest! {
+        /// The number always fits its unit: it is at least 1 in its unit, and below the next one.
+        #[test]
+        fn the_unit_keeps_the_number_in_range(bytes in 1024_u64..u64::MAX) {
+            let text = human_bytes(bytes);
+            let (number, unit) = text.split_once(' ').unwrap();
+            let number: u64 = number.parse().unwrap();
+
+            let (unit_size, next) = match unit {
+                "KiB" => (1 << 10, 1 << 20),
+                "MiB" => (1 << 20, 1 << 30),
+                "GiB" => (1 << 30, u64::MAX),
+                other => panic!("unexpected unit {other}"),
+            };
+            prop_assert!(number >= 1);
+            prop_assert_eq!(number, bytes / unit_size);
+            prop_assert!(bytes < next || next == u64::MAX);
+        }
     }
 }
