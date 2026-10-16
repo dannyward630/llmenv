@@ -15,10 +15,10 @@ const DEFAULT_CACHE_NOTICE_MIN_USD: f64 = 0.50;
 /// when the field is missing or has the wrong type, so a bad field never fails the hook.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ResumeCache {
-    pub(crate) seconds_since_last_response: Option<u64>,
-    pub(crate) context_tokens: Option<u64>,
-    pub(crate) prompt_cache_likely_expired: Option<bool>,
-    pub(crate) estimated_cache_write_usd: Option<f64>,
+    seconds_since_last_response: Option<u64>,
+    context_tokens: Option<u64>,
+    prompt_cache_likely_expired: Option<bool>,
+    estimated_cache_write_usd: Option<f64>,
 }
 
 impl ResumeCache {
@@ -42,7 +42,7 @@ impl ResumeCache {
 
     /// The one-line notice for an expensive resume. `None` when any field is absent, when the
     /// cache is still warm, or when the cost is under [`DEFAULT_CACHE_NOTICE_MIN_USD`].
-    pub(crate) fn notice(&self) -> Option<String> {
+    fn notice(&self) -> Option<String> {
         if self.prompt_cache_likely_expired != Some(true) {
             return None;
         }
