@@ -23,7 +23,15 @@ pub(super) fn usage_delta(state_dir: Option<&Path>, key: &str, pct: f64, now: i6
 }
 
 fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
-    let contents = std::fs::read_to_string(path).ok()?;
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        // A missing file is the first sample. Any other read error is logged, not hidden.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!("usage state {} cannot be read: {e}", path.display());
+            return None;
+        }
+    };
     let mut it = contents.split_whitespace();
     let pct = it.next()?.parse().ok()?;
     let ts = it.next()?.parse().ok()?;
