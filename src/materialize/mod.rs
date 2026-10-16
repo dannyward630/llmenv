@@ -2,6 +2,7 @@ pub mod cache;
 pub(crate) mod inherit;
 pub mod manifest;
 pub(crate) mod merge_cache;
+pub(crate) mod open_files;
 pub(crate) mod schema_gen;
 pub mod state;
 mod status_data;

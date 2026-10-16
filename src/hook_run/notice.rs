@@ -1,7 +1,5 @@
 //! Agent notices written to stdout, where the engine reads hook context (#2658, #2736).
 
-use super::*;
-
 /// Write a notice with no memory text to stdout, where the engine reads hook context (#2658).
 pub(super) fn write_notice_only(
     adapter: &dyn crate::adapter::AgentAdapter,
@@ -40,6 +38,19 @@ pub(super) fn transcript_unlinked_notice(error: &anyhow::Error) -> String {
         "llmenv: no ICM transcript started for this session: {error:#}. \
          Fix: run `llmenv doctor` to check the state directory."
     )
+}
+
+/// Writes one hook output line to `w`. Returns the error to report, or `None` when there is no
+/// output or the reader went away. A closed pipe is normal for a hook, so it is not an error.
+pub(super) fn write_hook_line(w: &mut impl std::io::Write, out: &str) -> Option<std::io::Error> {
+    if out.is_empty() {
+        return None;
+    }
+    match writeln!(w, "{out}") {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => None,
+        Err(e) => Some(e),
+    }
 }
 
 /// A notice that names the problem and the fix, in the form every agent notice uses.

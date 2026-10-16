@@ -74,6 +74,15 @@ An entry in `state/tmp` is kept while a process holds a file open in it.
 That check uses `lsof`.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
+(added in v3.13.0) At session start, llmenv adds a one-line hint when `state/tmp` holds entries older than the retention.
+The hint gives the count, the size, and the command `llmenv doctor --gc`.
+It is shown at most once per UTC day, and not at all when no entry is stale.
+
+(added in v3.13.0) When a session resumes after its prompt cache expired, llmenv shows you a one-line notice if the rewrite is estimated at 0.50 USD or more.
+The notice gives the idle time, the context size, and the estimated cost.
+It goes to you, not to the agent.
+Claude Code sends these values on a `resume` or `fork` start, and no notice is shown when a value is missing.
+
 ### `remote_sync` — toggle background remote git operations
 
 When enabled (default), llmenv fetches and pulls config from git on `export`.
@@ -861,6 +870,10 @@ instead of a plain `grep`/`find` sweep.
 (changed in v3.11.2) The tiers cover codebase-memory-mcp v0.11.0, which added
 two read-only tools: `get_file_outline` and `compare_graphs`. Both are
 pre-approved. Before this change they fell through to a prompt on every call.
+codebase-memory-mcp 0.12.0 marks `ingest_traces` as destructive.
+llmenv keeps it in the mutation tier, because each call adds counts to its run label and does not replace them.
+A call can still evict the oldest run label when the observed-pair cap is reached.
+(changed in v3.13.0)
 
 Two caveats worth knowing before relying on the pre-approved tools:
 
