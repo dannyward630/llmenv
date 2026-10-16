@@ -4,7 +4,7 @@
 //! preview, so the most specific recalls must come first and the total must stay small.
 //! Design: docs/design/issue-2159-2141-icm-recall-prioritization.md
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 
 use crate::hook_run::action::{Action, split_recall_records};
@@ -21,44 +21,8 @@ const MIN_FREE_BYTES: usize = 200;
 /// Bytes the `"\n\n"` join adds after each kept record.
 const SEPARATOR_BYTES: usize = 2;
 
-/// The rank of a tag no scope contributed, such as the OS tag.
-pub(super) const UNSCOPED_RANK: u8 = 6;
-
-/// The rank of every tag from a project scope or `$LLMENV_EXTRA_TAGS`, and of every bundle.
-pub(super) const MOST_SPECIFIC_RANK: u8 = 1;
-
-/// Rank each active tag by how specific its source scope is. A lower rank is more specific
-/// and is recalled first. A tag from several scopes takes the lowest rank among them.
-pub(super) fn tag_specificity(active: &crate::scope::ActiveScopes) -> BTreeMap<String, u8> {
-    let mut ranks: BTreeMap<String, u8> = active
-        .tags
-        .iter()
-        .map(|tag| (tag.clone(), UNSCOPED_RANK))
-        .collect();
-    let mut lower = |tag: &String, rank: u8| {
-        ranks
-            .entry(tag.clone())
-            .and_modify(|current| *current = (*current).min(rank))
-            .or_insert(rank);
-    };
-    for scope in &active.scopes {
-        let rank = match scope.kind {
-            "project" => 1,
-            "content" => 2,
-            "network" => 3,
-            "user" => 4,
-            "host" => 5,
-            _ => UNSCOPED_RANK,
-        };
-        scope.tags.iter().for_each(|tag| lower(tag, rank));
-    }
-    // `extra_tags` stand in for a project's `.llmenv.yaml`, so they rank as project tags.
-    active
-        .extra_tags
-        .iter()
-        .for_each(|tag| lower(tag, MOST_SPECIFIC_RANK));
-    ranks
-}
+mod rank;
+pub(super) use rank::{MOST_SPECIFIC_RANK, UNSCOPED_RANK, tag_specificity};
 
 /// The recall records kept so far, and what did not fit.
 #[derive(Debug, PartialEq, Eq)]
@@ -121,12 +85,21 @@ impl RecallBudget {
         self.kept.iter().map(|r| record_hash(r)).collect()
     }
 
-    /// The passthrough text, then the kept records, then the omission notice.
-    pub(super) fn render(&self, passthrough: Vec<String>) -> String {
+    /// The passthrough text, then the kept records. The omission notice is not here: it is llmenv
+    /// text, so [`Self::hook_text`] sends it apart from the ICM memory (#2764).
+    fn render(&self, passthrough: Vec<String>) -> String {
         let mut parts = passthrough;
         parts.extend(self.kept.iter().cloned());
-        parts.extend(self.notice());
         parts.join("\n\n")
+    }
+
+    /// The memory text with the omission notice in `notes`, so the notice never gets the ICM
+    /// header (#2764).
+    pub(super) fn hook_text(&self, passthrough: Vec<String>) -> super::HookText {
+        super::HookText {
+            memory: self.render(passthrough),
+            notes: self.notice().unwrap_or_default(),
+        }
     }
 
     /// Keep each record that is new and fits. A record that does not fit is counted as
@@ -182,7 +155,7 @@ impl RecallBudget {
     }
 
     /// One line that says what was left out, or `None` when nothing was.
-    fn notice(&self) -> Option<String> {
+    pub(super) fn notice(&self) -> Option<String> {
         let (omitted, skipped) = (self.omitted, self.skipped_actions);
         if skipped > 0 {
             Some(format!(
@@ -267,6 +240,7 @@ where
 #[expect(clippy::expect_used, reason = "test code")]
 mod tests {
     use std::cell::Cell;
+    use std::collections::BTreeMap;
 
     use proptest::prelude::*;
 
@@ -340,10 +314,24 @@ mod tests {
         .await
     }
 
+    #[test]
+    fn hook_text_keeps_the_omission_notice_out_of_memory() {
+        // The notice is llmenv text, so it must not sit under the ICM memory header (#2764).
+        let mut budget = RecallBudget::default();
+        budget.add_records(vec!["x".repeat(RECALL_BUDGET_BYTES + 1)]);
+        let text = budget.hook_text(Vec::new());
+        assert!(!text.memory.contains("omitted"), "{}", text.memory);
+        assert!(
+            text.notes.contains("1 lower-priority memories omitted"),
+            "{}",
+            text.notes
+        );
+    }
+
     #[tokio::test]
     async fn budget_keeps_whole_records_and_reports_the_omitted_count() {
         let (text, budget) = run_texts(vec![records(30, 500, "a")]).await;
-        let notice = text.lines().last().expect("has a notice");
+        let notice = budget.notice().expect("has a notice");
         assert!(
             text.len() <= RECALL_BUDGET_BYTES + notice.len() + SEPARATOR_BYTES,
             "{}",
@@ -407,9 +395,9 @@ mod tests {
         assert_eq!(budget.skipped_actions, 2);
         assert_eq!(budget.omitted, 1);
         assert!(
-            text.ends_with(&format!(
+            budget.notice().unwrap_or_default().ends_with(&format!(
                 "[llmenv] {} lower-priority memories omitted; 2 recall queries skipped to stay \
-                 under the context limit.",
+                     under the context limit.",
                 budget.omitted
             )),
             "{text}"
@@ -501,8 +489,8 @@ mod tests {
             budget.trace_line(true).as_deref(),
             Some(
                 "[LLMENV_CONTEXT] recall_entries=3 recall_bytes=16 injected_entries=2 \
-                 injected_bytes=11 duplicate_records=1 already_sent=0 omitted=0 \
-                 skipped_actions=0"
+                     injected_bytes=11 duplicate_records=1 already_sent=0 omitted=0 \
+                     skipped_actions=0"
             )
         );
     }

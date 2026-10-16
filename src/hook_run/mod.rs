@@ -15,6 +15,13 @@ pub(crate) mod checkpoint;
 pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
+mod event;
+mod notice;
+#[cfg(test)]
+pub(crate) use event::HOOK_EVENT_NAMES;
+pub(crate) use event::HookEvent;
+use event::engine_event_for;
+use notice::{log_notice_without_channel, write_notice_only};
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
 mod launch_client;
@@ -147,128 +154,6 @@ pub fn bundle_recall_queries(bundles: &[String]) -> anyhow::Result<Vec<BundleRec
 /// a slow/dead remote ICM must not stall the agent. 2s balances real round-trips
 /// against not hanging the prompt.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// An engine-neutral lifecycle event. Adapters translate these to native hook
-/// names when wiring them into agent config.
-///
-/// `SessionStart`/`TurnStart`/`SessionEnd` drive ICM memory recall/store (see
-/// `dispatch`) and the baseline session log (see `handle_session_log`). The
-/// rest drive per-turn session-log capture (see `event_to_log_kind`); they
-/// carry no memory actions of their own — Claude's `UserPromptSubmit` native
-/// hook fires both `TurnStart` (memory recall) and `UserPromptSubmit`
-/// (session-log capture) as two separate handlers on the same event (see
-/// adapter wiring, #382 Task 13).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookEvent {
-    /// Session begins (Claude Code: `SessionStart`).
-    SessionStart,
-    /// A user prompt/turn begins (Claude Code: `UserPromptSubmit`).
-    TurnStart,
-    /// Session ends (Claude Code: `SessionEnd`).
-    SessionEnd,
-    /// Post-session consolidation hook (R5). Runs after SessionEnd to
-    /// trigger reflective consolidation on the accumulated conversation.
-    PostSession,
-    /// The raw prompt submission (Claude Code: `UserPromptSubmit`).
-    UserPromptSubmit,
-    /// Before a tool call (Claude Code: `PreToolUse`).
-    PreToolUse,
-    /// After a tool call (Claude Code: `PostToolUse`).
-    PostToolUse,
-    /// A UI notification fired (Claude Code: `Notification`).
-    Notification,
-    /// The main agent finished responding (Claude Code: `Stop`).
-    Stop,
-    /// A subagent finished responding (Claude Code: `SubagentStop`).
-    SubagentStop,
-    /// About to compact the transcript (Claude Code: `PreCompact`).
-    PreCompact,
-    /// A batch of tool calls resolved (Claude Code: `PostToolBatch`).
-    PostToolBatch,
-    /// A tool call failed (Claude Code: `PostToolUseFailure`).
-    PostToolUseFailure,
-    /// A subagent is spawned or resumed (Claude Code: `SubagentStart`).
-    SubagentStart,
-    /// An `Agent` tool call is about to run (Claude Code: `PreToolUse` with the
-    /// `^Agent$` matcher); queues the subagent task for adaptive recall (#2249).
-    SubagentTask,
-    /// The model changed (Claude Code: `PostModelSwitch`); updates the session's
-    /// agent-config document (#2398). Emits nothing.
-    PostModelSwitch,
-}
-
-/// Every event name that `hook-run` accepts. A test keeps this list in step with the parser, and
-/// the `hook-run` help text lists the same names.
-pub(crate) const HOOK_EVENT_NAMES: [&str; 16] = [
-    "session_start",
-    "turn_start",
-    "session_end",
-    "user_prompt_submit",
-    "post_session",
-    "pre_tool_use",
-    "post_tool_use",
-    "notification",
-    "stop",
-    "subagent_stop",
-    "pre_compact",
-    "post_tool_batch",
-    "post_tool_use_failure",
-    "subagent_start",
-    "subagent_task",
-    "post_model_switch",
-];
-
-impl FromStr for HookEvent {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "session_start" => Ok(HookEvent::SessionStart),
-            "turn_start" => Ok(HookEvent::TurnStart),
-            "session_end" => Ok(HookEvent::SessionEnd),
-            "user_prompt_submit" => Ok(HookEvent::UserPromptSubmit),
-            "post_session" => Ok(HookEvent::PostSession),
-            "pre_tool_use" => Ok(HookEvent::PreToolUse),
-            "post_tool_use" => Ok(HookEvent::PostToolUse),
-            "notification" => Ok(HookEvent::Notification),
-            "stop" => Ok(HookEvent::Stop),
-            "subagent_stop" => Ok(HookEvent::SubagentStop),
-            "pre_compact" => Ok(HookEvent::PreCompact),
-            "post_tool_batch" => Ok(HookEvent::PostToolBatch),
-            "post_tool_use_failure" => Ok(HookEvent::PostToolUseFailure),
-            "subagent_start" => Ok(HookEvent::SubagentStart),
-            "subagent_task" => Ok(HookEvent::SubagentTask),
-            "post_model_switch" => Ok(HookEvent::PostModelSwitch),
-            other => Err(anyhow::anyhow!(
-                "unknown hook event '{other}' (expected {})",
-                HOOK_EVENT_NAMES.join("|")
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for HookEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            HookEvent::SessionStart => "session_start",
-            HookEvent::TurnStart => "turn_start",
-            HookEvent::SessionEnd => "session_end",
-            HookEvent::UserPromptSubmit => "user_prompt_submit",
-            HookEvent::PreToolUse => "pre_tool_use",
-            HookEvent::PostToolUse => "post_tool_use",
-            HookEvent::Notification => "notification",
-            HookEvent::Stop => "stop",
-            HookEvent::SubagentStop => "subagent_stop",
-            HookEvent::PreCompact => "pre_compact",
-            HookEvent::PostSession => "post_session",
-            HookEvent::PostToolBatch => "post_tool_batch",
-            HookEvent::PostToolUseFailure => "post_tool_use_failure",
-            HookEvent::SubagentStart => "subagent_start",
-            HookEvent::SubagentTask => "subagent_task",
-            HookEvent::PostModelSwitch => "post_model_switch",
-        };
-        f.write_str(s)
-    }
-}
 
 /// The ordered actions to run for an event, given the active tags' and bundles'
 /// recall queries (built by [`tag_recall_queries`] and [`bundle_recall_queries`],
@@ -586,7 +471,7 @@ struct MemoryCall<'a> {
 
 /// Run the event's memory work: the adaptive flow when it applies, else the
 /// stateless actions. A missing state dir degrades to the stateless actions.
-async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<String> {
+async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<HookText> {
     let Some(session_id) = call.session_id else {
         return Ok(
             run_memory_actions(call.client, call.actions, call.query, call.store_content).await,
@@ -718,10 +603,13 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             }
         })
         .ok();
-    let hook_event_name: &str = stdin_json
-        .as_ref()
-        .and_then(|v| v["hook_event_name"].as_str())
-        .unwrap_or_default();
+    // Unparseable stdin leaves the engine's name unknown, so the argv event supplies it (#2748).
+    let hook_event_name = engine_event_for(
+        stdin_json
+            .as_ref()
+            .and_then(|v| v["hook_event_name"].as_str()),
+        event,
+    );
     let claude_session_id: Option<&str> =
         stdin_json.as_ref().and_then(|v| v["session_id"].as_str());
     // The version is informational. Failing the hook here would exit 1, which lets the tool call
@@ -734,21 +622,27 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         }
     };
 
-    let parsed = match HookEvent::from_str(event) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("llmenv: {e}");
-            return Ok(HookExit::Success);
-        }
-    };
-    let null_payload = serde_json::Value::Null;
-    let payload = stdin_json.as_ref().unwrap_or(&null_payload);
     // Not fail-soft, unlike everything below it: running a hook against the
     // wrong engine's config is worse than not running it (#1386). The CLI
     // boundary rejects an unknown `--engine` before this, so reaching the error
     // arm means an internal caller passed one — surface it rather than sniffing.
     let adapter = crate::adapter::adapter_for_engine(engine)
         .ok_or_else(|| crate::adapter::unknown_engine_error(engine))?;
+    let parsed = match HookEvent::from_str(event) {
+        Ok(e) => e,
+        Err(e) => {
+            // stderr from a hook is dropped by the engine, so the agent gets the notice on stdout (#2748).
+            crate::agent_notice::record(format!(
+                "llmenv hook-run: {e}. Fix: check the hook command's event name."
+            ));
+            if let Some(notice) = crate::agent_notice::current() {
+                write_notice_only(adapter.as_ref(), &hook_event_name, event, &notice);
+            }
+            return Ok(HookExit::Success);
+        }
+    };
+    let null_payload = serde_json::Value::Null;
+    let payload = stdin_json.as_ref().unwrap_or(&null_payload);
 
     // #741: the drift check runs from here rather than from its own
     // `SessionStart` hook. Both were registered unconditionally on the same
@@ -831,8 +725,9 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                 let notes =
                     append_pending_notice(text.notes, launch_client::check_pending_notice());
                 let notes = join_notes(notice.as_deref(), &notes);
-                let out = adapter.emit_hook_context(hook_event_name, &text.memory, &notes);
-                log_notice_without_channel(&out, notice.as_deref(), event);
+                let out = adapter.emit_hook_context(&hook_event_name, &text.memory, &notes);
+                // The omission notice rides in `notes`, so the log must see the joined text (#2764).
+                log_notice_without_channel(&out, Some(notes.as_str()), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -842,27 +737,11 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             eprintln!("llmenv: memory {event} skipped: {e}");
             // stderr from a hook is dropped by the engine, so the notice goes on stdout (#2658).
             if let Some(notice) = notice {
-                let out = adapter.emit_hook_context(hook_event_name, "", &notice);
-                log_notice_without_channel(&out, Some(&notice), event);
-                if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
-                    eprintln!("llmenv: failed to write hook output: {e}");
-                }
+                write_notice_only(adapter.as_ref(), &hook_event_name, event, &notice);
             }
         }
     }
     Ok(HookExit::Success)
-}
-
-/// An engine that takes no hook context, such as the SessionEnd path, gets empty output, so a
-/// notice in it reaches no one. The error log is the only place left for it (#2736).
-fn log_notice_without_channel(out: &str, notice: Option<&str>, event: &str) {
-    if let Some(notice) = notice
-        && out.is_empty()
-    {
-        tracing::error!(
-            "hook-run {event} has no channel to the agent, so the notice is logged only: {notice}"
-        );
-    }
 }
 
 /// Resolve config, find the memory URL, run the event's actions, and return the
@@ -1280,6 +1159,16 @@ impl HookText {
             memory: String::new(),
             notes,
         }
+    }
+
+    /// The memory and the notes as one block, for assertions on the whole output.
+    #[cfg(test)]
+    fn text(&self) -> String {
+        [self.memory.as_str(), self.notes.as_str()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 }
 
@@ -1775,6 +1664,8 @@ fn run_inner(
             Some(rt) => rt.block_on(async {
                 let mut out = String::new();
                 let mut memory = String::new();
+                // llmenv's omission notice rides in `notes`, not in the ICM memory (#2764).
+                let mut memory_notes = String::new();
                 // #866: skip the Store action (and its dedup-snapshot rewrite,
                 // below) when SessionEnd's chunk is unchanged — but still run the
                 // rest of this block (session-log capture) unconditionally.
@@ -1809,7 +1700,10 @@ fn run_inner(
                     })
                     .await
                     {
-                        Ok(text) => text,
+                        Ok(text) => {
+                            memory_notes = text.notes;
+                            text.memory
+                        }
                         // The health notice below still has to reach the agent. So does this error:
                         // the notice may be about another server, and the agent would otherwise
                         // read an empty memory block as "nothing to recall".
@@ -1917,7 +1811,8 @@ fn run_inner(
                     append_read_once_result(&mut out, text);
                 }
 
-                Ok::<HookText, anyhow::Error>(HookText { memory, notes: out })
+                let notes = join_notes(Some(memory_notes.as_str()), &out);
+                Ok::<HookText, anyhow::Error>(HookText { memory, notes })
             }),
             None => Ok(HookText::default()),
         };
@@ -2023,7 +1918,7 @@ async fn run_memory_actions(
     actions: Vec<Action>,
     query: &str,
     chunk: &str,
-) -> String {
+) -> HookText {
     let (text, budget) = recall::run_with_budget(actions, |action| async move {
         action.run(client, query, chunk).await
     })
@@ -2033,7 +1928,10 @@ async fn run_memory_actions(
     if let Some(line) = budget.trace_line(tracing_enabled) {
         eprintln!("{line}");
     }
-    text
+    HookText {
+        memory: text,
+        notes: budget.notice().unwrap_or_default(),
+    }
 }
 
 /// Borrowed inputs `run_session_log` needs, grouped to keep the function under
@@ -3364,6 +3262,7 @@ fn post_session_consolidation_in(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+
     #[test]
     fn a_notice_with_no_channel_is_logged_at_error_level() {
         let logs = crate::test_log_capture::capture_logs(|| {
@@ -3464,7 +3363,7 @@ mod tests {
     fn consolidation_spawns(event: HookEvent, enabled: bool) -> usize {
         let config: crate::config::Config = serde_yaml::from_str(&format!(
             "features:\n  memory:\n    - server_host: h\n      port: 1\n      when: [mem]\n      \
-             consolidation:\n        enabled: {enabled}\n"
+                 consolidation:\n        enabled: {enabled}\n"
         ))
         .unwrap();
         let active = crate::scope::ActiveScopes {
@@ -4318,7 +4217,7 @@ mod tests {
                 settings: DEFAULT_MEMORY_HOOK,
             },
             "memory_url must read the persisted merge cache instead of falling \
-             back to a live merge of a bundle that declares no memory/host"
+                 back to a live merge of a bundle that declares no memory/host"
         );
     }
 
@@ -4517,7 +4416,7 @@ mod tests {
         assert!(
             body.contains("merge signature"),
             "a signature failure must be logged at a level the default EnvFilter \
-             passes, before falling back to a live merge: {body}"
+                 passes, before falling back to a live merge: {body}"
         );
     }
 
@@ -4571,7 +4470,7 @@ mod tests {
             recall_bundle_names(&active),
             vec!["rust-dev".to_string(), "web-dev".to_string()],
             "a disabled bundle must not reach recall queries or the stored chunk, \
-             even when another scope enables it"
+                 even when another scope enables it"
         );
     }
 
@@ -4730,7 +4629,7 @@ mod tests {
                 server_hosts: vec!["still".to_string()]
             },
             "a declared-but-tag-inactive entry must not collapse into \
-             NoBundlesFired, got {resolved:?}"
+                 NoBundlesFired, got {resolved:?}"
         );
         let msg = resolved
             .into_url()
@@ -4839,7 +4738,7 @@ mod tests {
         assert!(
             msg.contains("rejected") && msg.contains("content directory"),
             "the message must not claim 'missing content directory' as the sole \
-             cause when a rejected name is just as plausible: {msg}"
+                 cause when a rejected name is just as plausible: {msg}"
         );
     }
 
@@ -4888,7 +4787,7 @@ mod tests {
             resolved,
             crate::memory::MemoryEndpoint::SuppressedByDisableBundles(vec!["b".to_string()]),
             "the sole source of features.memory being disabled must be reported \
-             as such, not collapsed into `no memory backend active`"
+                 as such, not collapsed into `no memory backend active`"
         );
         let msg = resolved
             .into_url()
@@ -4944,8 +4843,8 @@ mod tests {
             crate::memory::memory_url(&config, config_root.path(), &active).expect("test"),
             crate::memory::MemoryEndpoint::NoBundlesFired,
             "a disabled bundle whose sole memory entry is gated on an inactive \
-             tag would supply nothing even if re-enabled, so it must not be \
-             reported as the (fixable) cause"
+                 tag would supply nothing even if re-enabled, so it must not be \
+                 reported as the (fixable) cause"
         );
     }
 
@@ -5068,7 +4967,7 @@ mod tests {
         assert!(
             !matches!(url, crate::memory::MemoryEndpoint::Active { .. }),
             "a bundle disabled via `disable_bundles` must not contribute its \
-             memory/host entries to memory_url resolution, got {url:?}"
+                 memory/host entries to memory_url resolution, got {url:?}"
         );
     }
 
@@ -5347,12 +5246,12 @@ mod tests {
         assert!(
             !envs.contains_key("CBM_ALLOWED_ROOT"),
             "llmenv must not set CBM_ALLOWED_ROOT (#1495) — \
-             codebase-memory-mcp applies its own default scoping"
+                 codebase-memory-mcp applies its own default scoping"
         );
         assert!(
             !envs.contains_key("CBM_CACHE_DIR"),
             "llmenv must not set CBM_CACHE_DIR by default (#1493) — \
-             codebase-memory-mcp falls back to its own default cache location"
+                 codebase-memory-mcp falls back to its own default cache location"
         );
     }
 
@@ -6159,7 +6058,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(text, "[t] one\n\n[t] two");
+        assert_eq!(text.text(), "[t] one\n\n[t] two");
     }
 
     #[test]
