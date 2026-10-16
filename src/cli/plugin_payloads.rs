@@ -3,14 +3,14 @@
 
 use super::*;
 
-/// Tells the user and the agent that an external plugin is not loaded. A plugin with no install
+/// Tells the user and the agent that a plugin is not loaded. A plugin with no install
 /// path would load from the marketplace path, which does not hold its payload (#2750).
 ///
 /// The cause is a fixed phrase. A lookup error can carry a plugin source URL, and that text
 /// goes into the agent's context, so the error detail is logged by the caller, not here.
 fn note_unloaded_plugin(plugin: &str, marketplace: &str, cause: &str) {
     let notice = format!(
-        "llmenv: external plugin '{plugin}@{marketplace}' was not loaded: {cause}. Fix: run \
+        "llmenv: plugin '{plugin}@{marketplace}' was not loaded: {cause}. Fix: run \
          `llmenv plugin-sync` to refresh the clone."
     );
     eprintln!("warning: {notice}");
@@ -48,8 +48,9 @@ pub(super) fn sync_plugin_payloads(
                 }
             };
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
-                // Kind is unknown without the entry, and an external plugin served from the clone
-                // would load the wrong payload, so it is dropped rather than kept (#2780).
+                // Kind is unknown without the entry. An external plugin served from the clone
+                // would load the wrong payload, so every plugin in this arm is dropped, first-party
+                // ones included (#2780).
                 tracing::warn!(
                     "plugin '{}' not found in marketplace '{}' manifest — verify plugin name, \
                      look for an earlier warning that skipped its entry, or run \
