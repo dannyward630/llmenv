@@ -46,7 +46,7 @@ fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, pass: &st
             // so the entries it skipped have to be reported here
             // or they'd vanish from the summary entirely.
             for p in &report.failed {
-                eprintln!("{warn} GC: could not remove {}", p.display());
+                eprintln!("{warn} GC: could not process {}", p.display());
             }
             let forgotten = forget_credentials_for(&report.removed);
             if forgotten > 0 {
@@ -76,7 +76,7 @@ fn sweep_state_tmp(state_dir: &Path, retention: Duration, pass: &str, warn: &str
                 report.kept
             );
             for p in &report.failed {
-                eprintln!("{warn} GC: could not remove {}", p.display());
+                eprintln!("{warn} GC: could not process {}", p.display());
             }
         }
         Err(e) => eprintln!("{warn} GC of state/tmp skipped: {e:#}"),

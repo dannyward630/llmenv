@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+pub(crate) use super::record_hash::{hash_prefix, record_hash};
+use super::resume_cache::ResumeCache;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// The agent key for the parent conversation.
 pub(crate) const MAIN_AGENT: &str = "main";
@@ -21,8 +22,6 @@ const PENDING_TTL_SECS: i64 = 300;
 const ERROR_HEAD_BYTES: usize = 300;
 const TASK_HEAD_CHARS: usize = 600;
 const STALE_DAYS: u64 = 7;
-/// Hex characters kept from the SHA-256 digest; 64 bits is enough to key one session.
-const HASH_HEX_CHARS: usize = 16;
 
 /// One injected-record set per model context.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,12 +57,14 @@ pub(crate) struct PendingSubagent {
 }
 
 /// The recall state of one Claude Code session.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Ledger {
     epoch: u64,
     agents: BTreeMap<String, AgentState>,
     activity: VecDeque<Activity>,
+    /// The cache fields of the latest `SessionStart`, for the cache verdict (#2384).
+    pub(crate) resume_cache: Option<ResumeCache>,
     errors: VecDeque<ToolError>,
     pub(crate) last_query_hash: Option<String>,
     pub(crate) last_turn_at: i64,
@@ -203,23 +204,6 @@ fn head_bytes(text: &str, max: usize) -> String {
         .to_string()
 }
 
-/// A stable key for one recall record: whitespace layout does not change it.
-pub(crate) fn record_hash(record: &str) -> String {
-    let normalized = record.split_whitespace().collect::<Vec<_>>().join(" ");
-    hash_prefix(normalized.as_bytes())
-}
-
-/// The first [`HASH_HEX_CHARS`] lowercase hex characters of the SHA-256 of `bytes`.
-pub(crate) fn hash_prefix(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
-        .chars()
-        .take(HASH_HEX_CHARS)
-        .collect()
-}
-
 /// The ledger files under `state_dir()/recall_session/`.
 #[derive(Debug, Clone)]
 pub(crate) struct LedgerStore {
@@ -320,6 +304,7 @@ fn note_save_failure(path: &std::path::Path, err: &std::io::Error) {
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+    use crate::hook_run::record_hash::HASH_HEX_CHARS;
 
     fn store() -> (tempfile::TempDir, LedgerStore) {
         let dir = tempfile::tempdir().unwrap();

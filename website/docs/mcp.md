@@ -337,18 +337,18 @@ Multiple `codebase_memory` entries may be active simultaneously — each is an
 independent local process, not a shared resource like the memory backend, so
 there's no "at most one active" restriction.
 
-On `SessionStart`, llmenv fires a fire-and-forget
-`codebase-memory-mcp cli index_repository` call for the active project. This
-registers it with the server's own background auto-watch (`auto_watch`,
-upstream default `true`), which re-indexes on git changes automatically —
-llmenv doesn't implement its own reindex scheduling on top of that.
+On `SessionStart`, llmenv fires a fire-and-forget `codebase-memory-mcp cli index_repository` call for the active project.
+A repository indexed from the CLI is not watched by the server, and `index_status` reports that.
+Freshness comes from the MCP session rooted in the project, which runs the server's background auto-watch (`auto_watch`, upstream default `true`) and re-indexes on git changes.
+llmenv doesn't implement its own reindex scheduling on top of that. (changed in v3.13.0)
 
-(changed in v3.11.2) llmenv's model guidance covers codebase-memory-mcp 0.11.0
-tools, including `get_file_outline` and `compare_graphs` for detailed code
-inspection and change detection.
-After upgrading codebase-memory-mcp from 0.10.8 or earlier, the first session
-in each project rebuilds that project's index once (index format change);
+(changed in v3.11.2) llmenv's model guidance covers codebase-memory-mcp 0.12.0 tools, which are the same 17 tools as 0.11.0.
+They include `get_file_outline` and `compare_graphs` for detailed code inspection and change detection. (changed in v3.13.0)
+
+The index format changed from 1 to 2 in codebase-memory-mcp 0.12.0.
+After an upgrade from 0.11.0 or earlier, the first session in each project rebuilds that project's index once.
 llmenv starts that index at session start, so large repositories are slow once.
+The rebuild drops `CROSS_*` edges until `index_repository(mode="cross-repo-intelligence")` runs again. (changed in v3.13.0)
 
 ### The `index_repository` name guard
 

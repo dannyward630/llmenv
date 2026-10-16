@@ -112,6 +112,16 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv doctor --gc` (#2815) [feat:hooks]
+- A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
+
+### Changed
+
+- The `llmenv doctor --gc` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
+- The codebase-memory-mcp floor is now 0.12.0, and `llmenv doctor` warns below it. The docs say a repo indexed from the CLI is not watched, and that 0.12.0 changes the index format from 1 to 2 (#2853) [fix:mcp]
+
 ### Fixed
 
 - A hook message that went to stderr now reaches the agent as a notice: the deprecated `filePath` key, a session with no ICM transcript, and a subagent start with no usable agent id (#2818) [fix:hook]
