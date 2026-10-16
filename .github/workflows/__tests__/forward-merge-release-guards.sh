@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Tests for forward-merge-release.yml protected-branch fallback guards.
-# Exercises the shell logic extracted from the workflow; stubs git and gh.
+# Tests for forward-merge-release.yml.
+# Exercises shell logic extracted from the workflow; stubs git and gh.
 # Run: bash .github/workflows/__tests__/forward-merge-release-guards.sh
-# Expected: FAIL until Issue #476 and #475 fixes are applied.
-# cascade_block/fallback_block run under `set -euo pipefail`, matching the
-# real workflow (see Issue #1250) — without it, a failing push/fetch/ls-remote
-# captured via `VAR=$(cmd); RC=$?` kills the script before RC is ever read,
-# and these tests wouldn't catch it.
+# Extracted blocks run under `set -euo pipefail`, matching the real workflow
+# (see Issue #1250): without it, a failing push/fetch/ls-remote captured via
+# `VAR=$(cmd); RC=$?` kills the script before RC is ever read, and these
+# tests wouldn't catch it.
 set -uo pipefail
 
 WORKFLOWS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +36,37 @@ cd "$HARNESS_SCRATCH" || exit 1
 
 PASS=0
 FAIL=0
+
+# Extracts one shell function from the workflow by name, so a test runs the
+# shipped code instead of a copy (#2796, #2798). A missing function prints a
+# script that exits 97 with a message, so an empty extraction cannot pass a test.
+workflow_function() {
+  local out
+  out=$(awk -v name="$1" '
+    $0 ~ ("^ *" name "\\(\\) \\{$") { indent = $0; sub(/[^ ].*$/, "", indent); found = 1 }
+    found { print }
+    found && $0 == indent "}" { exit }
+  ' "$WORKFLOW")
+  if [[ -z "$out" ]]; then
+    echo "workflow_function: $1() not found in $WORKFLOW" >&2
+    printf '%s\n' "echo 'workflow_function: $1() not found' >&2; exit 97"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# Runs one helper in a clean environment. Sets RUN_OUT, RUN_ERR, and RUN_RC.
+run_helper() {
+  local helper="$1"
+  local err_file
+  err_file=$(mktemp)
+  RUN_RC=0
+  RUN_OUT=$(env -i PATH="$PATH" "${@:2}" bash -c "$(workflow_function "$helper")
+$helper" 2>"$err_file") || RUN_RC=$?
+  RUN_ERR=$(<"$err_file")
+  rm -f "$err_file"
+}
+
 
 run_test() {
   local name="$1" fn="$2"
@@ -73,255 +103,6 @@ if [[ $FETCH_RC -ne 0 ]]; then
   exit 1
 fi
 SHELL
-}
-
-# Build the fallback script — this mirrors the block at lines 155-182 of
-# forward-merge-release.yml (the protected-branch fallback path).
-# Callers export: CURRENT TARGET MERGE_BRANCH and provide git/gh stubs on PATH.
-fallback_block() {
-  cat <<'SHELL'
-set -euo pipefail
-HALTED=""
-HELD=""
-
-if PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
-  PUSH_RC=0
-else
-  PUSH_RC=$?
-fi
-if [[ $PUSH_RC -eq 0 ]]; then
-  echo "Pushed directly to $TARGET"
-else
-  if [[ -n "$PUSH_STDERR" ]]; then
-    PUSH_STDERR_SAFE="${PUSH_STDERR//$'\n'/ }"
-    PUSH_STDERR_SAFE="${PUSH_STDERR_SAFE//::/  }"
-    echo "::warning::push to $TARGET failed: $PUSH_STDERR_SAFE"
-  else
-    echo "::warning::push to $TARGET failed (exit $PUSH_RC; no stderr)"
-  fi
-  if git ls-remote --exit-code --heads origin "$MERGE_BRANCH" >/dev/null 2>&1; then
-    echo "::warning::$MERGE_BRANCH already exists; not overwriting in-progress resolution"
-    echo "::error::Cascade halted: $TARGET is protected and $MERGE_BRANCH is already open"
-    HALTED="protected branch $TARGET"
-  else
-    git checkout -B "$MERGE_BRANCH"
-    if ! git push origin "$MERGE_BRANCH" --force-with-lease; then
-      echo "::error::Push to merge branch $MERGE_BRANCH failed; cannot open PR"
-      HALTED="protected branch $TARGET"
-    else
-      gh pr create --base "$TARGET" --head "$MERGE_BRANCH" \
-        --title "Forward-merge $CURRENT into $TARGET" \
-        --body "Direct push to $TARGET blocked by branch protection; opening PR." || true
-
-      echo "::error::Cascade halted: $TARGET is protected, opened PR instead"
-      HALTED="protected branch $TARGET"
-    fi
-  fi
-fi
-
-if [[ -n "$HALTED" ]]; then
-  exit 1
-fi
-SHELL
-}
-
-# ---------------------------------------------------------------------------
-# Test 1 (Issue #476): branch-exists guard
-#
-# Scenario: MERGE_BRANCH already exists remotely (a human is resolving a
-# conflict on it). The protected-branch fallback MUST NOT force-push to it
-# (that would overwrite their work).
-#
-# Current behaviour (no guard): push runs → sentinel prints error → FAIL.
-# Expected after fix: ls-remote detects branch exists → push skipped → PASS.
-# ---------------------------------------------------------------------------
-test_476_branch_exists_guard() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  # git stub:
-  #   push HEAD:<target>  → fail  (simulates branch protection)
-  #   ls-remote           → 0     (merge branch already exists)
-  #   push $MERGE_BRANCH  → 99    (sentinel: must NOT be reached)
-  #   checkout            → 0
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "push" && "$2" == "origin" && "$3" == HEAD:* ]]; then
-  exit 1
-fi
-if [[ "$1" == "ls-remote" ]]; then
-  exit 0
-fi
-if [[ "$1" == "push" ]]; then
-  echo "::error::git push to merge branch called despite branch existing" >&2
-  exit 99
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/gh"
-  chmod +x "$tmpdir/gh"
-
-  local script out
-  script=$(fallback_block)
-  export CURRENT="release/2.x" TARGET="main" MERGE_BRANCH="forward-merge/release/2.x-to-main"
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  rm -rf "$tmpdir"
-
-  # Sentinel in output means the guard is missing → FAIL.
-  if echo "$out" | grep -q "despite branch existing"; then
-    return 1
-  fi
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# Test 2 (Issue #475): error annotation on push failure in fallback
-#
-# Scenario: direct push is blocked (branch protection) AND the push of the
-# merge branch also fails (e.g. auth error, network).
-#
-# Current behaviour: push failure is silently ignored; only the generic
-# "Cascade halted: $TARGET is protected" annotation is emitted — nothing
-# flags the push failure itself.
-#
-# Expected after fix: a ::error:: annotation naming the push failure is
-# emitted before the cascade-halted message.
-# ---------------------------------------------------------------------------
-test_475_push_failure_annotation() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  # git stub:
-  #   push HEAD:<target>  → fail  (branch protection)
-  #   ls-remote           → 1     (branch does not exist; won't short-circuit #476 guard)
-  #   push $MERGE_BRANCH  → fail  (e.g. auth/network error)
-  #   checkout            → 0
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "push" && "$2" == "origin" && "$3" == HEAD:* ]]; then
-  exit 1
-fi
-if [[ "$1" == "ls-remote" ]]; then
-  exit 1
-fi
-if [[ "$1" == "push" ]]; then
-  echo "remote: error: push rejected" >&2
-  exit 1
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/gh"
-  chmod +x "$tmpdir/gh"
-
-  local script out
-  script=$(fallback_block)
-  export CURRENT="release/2.x" TARGET="main" MERGE_BRANCH="forward-merge/release/2.x-to-main"
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  rm -rf "$tmpdir"
-
-  # Post-fix: output must include a ::error:: annotation for the push failure.
-  # Current code does NOT emit such an annotation → FAIL.
-  # After fix adds an error handler on the merge-branch push → PASS.
-  if echo "$out" | grep -E '::error::.*([Pp]ush|MERGE_BRANCH|merge.branch)' | grep -qv 'Cascade halted'; then
-    return 0
-  fi
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# Test 3 (Issue #480): initial push stderr is logged for non-protection failures
-#
-# Scenario: direct push fails with a non-protection error (e.g. auth failure).
-# The actual stderr from git must appear in the workflow log so operators can
-# diagnose the real cause rather than assuming branch protection.
-#
-# Before fix: 2>/dev/null swallowed stderr; nothing was logged → FAIL.
-# After fix: stderr captured and emitted via ::warning:: → PASS.
-# ---------------------------------------------------------------------------
-test_480_initial_push_stderr_logged() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  # git stub:
-  #   push HEAD:<target>  → fail with diagnostic stderr (non-protection error)
-  #   ls-remote           → 1     (branch does not exist)
-  #   push $MERGE_BRANCH  → 0     (succeeds so the test isolation is clean)
-  #   checkout            → 0
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "push" && "$2" == "origin" && "$3" == HEAD:* ]]; then
-  echo "fatal: unable to access 'https://github.com/': Could not resolve host" >&2
-  exit 1
-fi
-if [[ "$1" == "ls-remote" ]]; then
-  exit 1
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/gh"
-  chmod +x "$tmpdir/gh"
-
-  local script out
-  script=$(fallback_block)
-  export CURRENT="release/2.x" TARGET="main" MERGE_BRANCH="forward-merge/release/2.x-to-main"
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  rm -rf "$tmpdir"
-
-  # The actual git stderr must surface in the output via ::warning::.
-  if echo "$out" | grep -q "::warning::.*unable to access"; then
-    return 0
-  fi
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# Test 4 (Issue #480): ::warning:: emitted when push fails with empty stderr
-#
-# Scenario: direct push fails with no stderr (e.g. silent rejection).
-# The ::warning:: annotation must still be emitted with the exit code.
-#
-# Before fix: empty-stderr branch was missing; nothing logged.
-# After fix: else branch emits ::warning:: with exit code.
-# ---------------------------------------------------------------------------
-test_480_empty_stderr_push_logged() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "push" && "$2" == "origin" && "$3" == HEAD:* ]]; then
-  exit 1
-fi
-if [[ "$1" == "ls-remote" ]]; then
-  exit 1
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$tmpdir/gh"
-  chmod +x "$tmpdir/gh"
-
-  local script out
-  script=$(fallback_block)
-  export CURRENT="release/2.x" TARGET="main" MERGE_BRANCH="forward-merge/release/2.x-to-main"
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  rm -rf "$tmpdir"
-
-  if echo "$out" | grep -q "::warning::push to main failed (exit"; then
-    return 0
-  fi
-  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -400,64 +181,6 @@ STUB
   return 1
 }
 
-# ---------------------------------------------------------------------------
-# Test 7 (Issue #1380): the cascade is a chain, not a fan-out
-#
-# Scenario: push to release/3.x with release/4.x in between, so TARGETS is
-# (release/4.x main). Each target must be merged from the PREVIOUS link —
-# release/3.x into release/4.x, then release/4.x into main — so main receives
-# release/4.x's own commits along with the 3.x fix.
-#
-# Old behaviour: `git merge origin/$CURRENT` for every target, so main got
-# release/3.x merged directly and 4.x's commits never arrived → FAIL.
-# Expected after fix: the second merge names release/4.x → PASS.
-# ---------------------------------------------------------------------------
-chain_block() {
-  cat <<'SHELL'
-set -euo pipefail
-SOURCE_REF="origin/$CURRENT"
-SOURCE_DESC="$CURRENT"
-for TARGET in $TARGETS; do
-  git merge --no-edit "$SOURCE_REF"
-  git push origin HEAD:"$TARGET"
-  git update-ref "refs/remotes/origin/$TARGET" HEAD
-  SOURCE_REF="origin/$TARGET"
-  SOURCE_DESC="$TARGET"
-done
-SHELL
-}
-
-test_1380_cascade_chains_through_each_target() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  # Stub git: record what each merge was handed, no-op everything else.
-  cat > "$tmpdir/git" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "merge" ]]; then
-  echo "MERGED_FROM:${*: -1}"
-fi
-exit 0
-EOF
-  chmod +x "$tmpdir/git"
-
-  local script out
-  script=$(chain_block)
-  export CURRENT="release/3.x" TARGETS="release/4.x main"
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  rm -rf "$tmpdir"
-
-  # First merge takes the pushed branch; second takes the branch before it.
-  local expected
-  expected=$'MERGED_FROM:origin/release/3.x\nMERGED_FROM:origin/release/4.x'
-  if [[ "$out" == "$expected" ]]; then
-    return 0
-  fi
-  printf '  expected: %s\n' "${expected//$'\n'/ | }" >&2
-  printf '  got:      %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
 # Build the auto-resolution script. The manifest, lockfile and conflict functions
 # are cut out of forward-merge-release.yml itself, so this tests the shipped code
 # and cannot drift from it. Unlike the blocks above this runs against a real git
@@ -478,16 +201,6 @@ fi
 SHELL
 }
 
-# Commit a real copy of scripts/forward_merge_manifest.py into the current
-# directory, staged for the next commit. manifest_keeps_target now reads the
-# target's own copy via `git show HEAD:scripts/forward_merge_manifest.py`
-# (#2177), so every fixture repo's target branch needs the file in its tree —
-# an external path (the old MANIFEST_CHECK env var) is no longer consulted.
-commit_manifest_script() {
-  mkdir -p scripts
-  cp "$REPO_ROOT/scripts/forward_merge_manifest.py" scripts/forward_merge_manifest.py
-  git add scripts/forward_merge_manifest.py
-}
 
 # Build a repo where `source` and `target` both moved their own version, plus
 # whatever extra change `$1` adds to source's Cargo.toml. Leaves the caller
@@ -736,7 +449,7 @@ test_1532_identical_script_runs_target_copy() {
 #
 # Before fix: the script file isn't itself conflicted (only changelog.md is),
 # so the merge silently resolves it to the source's copy, and that untrusted
-# copy runs with FORWARD_MERGE_PAT/GH_TOKEN in env → SOURCE_SCRIPT_RAN, FAIL.
+# copy runs with APP_TOKEN/GH_TOKEN in env → SOURCE_SCRIPT_RAN, FAIL.
 # After fix: source and target copies are diffed explicitly; a mismatch bails
 # before either runs → BAILED, no marker file, PASS.
 # ---------------------------------------------------------------------------
@@ -760,39 +473,26 @@ test_1532_differing_script_bails() {
 }
 
 # ---------------------------------------------------------------------------
-# Test (Issue #1532): FORWARD_MERGE_PAT must not be inherited by any
+# Test (Issue #1532): APP_TOKEN must not be inherited by any
 # subprocess the cascade step spawns (e.g. sync-changelog-doc.sh); only
-# push_with_pat, via a captured local variable, still has access.
+# push_with_app_token, via a captured local variable, still has access.
 #
-# Before fix: FORWARD_MERGE_PAT stays in the step's own env for its whole
+# Before fix: APP_TOKEN stays in the step's own env for its whole
 # duration, so a spawned subprocess inherits it → LEAKED, FAIL.
 # After fix: it's captured into a local variable and unset immediately →
-# NOT_LEAKED, and push_with_pat still authenticates via the local var, PASS.
+# NOT_LEAKED, and push_with_app_token still authenticates via the local var, PASS.
 # ---------------------------------------------------------------------------
-pat_scope_block() {
+app_token_scope_block() {
+  echo 'set -euo pipefail'
+  sed -n '/^ *# #1532, #2796: capture the App token/,/^ *require_app_token$/p' "$WORKFLOW"
+  workflow_function push_with_app_token
   cat <<'SHELL'
-set -euo pipefail
-_merge_credential="${FORWARD_MERGE_PAT:-}"
-unset FORWARD_MERGE_PAT
-
-push_with_pat() {
-  if [[ -n "$_merge_credential" ]]; then
-    local auth
-    auth="$(printf 'x-access-token:%s' "$_merge_credential" | base64 -w0)"
-    echo "::add-mask::$auth"
-    git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
-  else
-    git push "$@"
-  fi
-}
-
-bash -c 'if [[ -n "${FORWARD_MERGE_PAT:-}" ]]; then echo "LEAKED"; else echo "NOT_LEAKED"; fi'
-
-push_with_pat origin HEAD:main
+bash -c 'if [[ -n "${APP_TOKEN:-}" ]]; then echo "LEAKED"; else echo "NOT_LEAKED"; fi'
+push_with_app_token origin HEAD:main
 SHELL
 }
 
-test_1532_merge_credential_not_inherited_by_subprocess() {
+test_1532_app_token_not_inherited_by_subprocess() {
   local tmpdir
   tmpdir=$(mktemp -d)
 
@@ -811,11 +511,11 @@ STUB
   chmod +x "$tmpdir/git"
 
   local script out
-  script=$(pat_scope_block)
-  export FORWARD_MERGE_PAT="fake-token"
+  script=$(app_token_scope_block)
+  export APP_TOKEN="fake-token"
 
   out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  unset FORWARD_MERGE_PAT
+  unset APP_TOKEN
   rm -rf "$tmpdir"
 
   [[ "$out" == *"NOT_LEAKED"* ]] && [[ "$out" == *"::add-mask::"* ]] && [[ "$out" == *"PUSHED_WITH_EXTRAHEADER"* ]]
@@ -1229,183 +929,7 @@ test_2166_target_without_manifest_script_bails() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 10 (Issue #1504): push_with_pat scopes the PAT to just the push
-#
-# Mirrors the push_with_pat() helper in forward-merge-release.yml. Verifies
-# it authenticates with FORWARD_MERGE_PAT (via a per-invocation -c override,
-# not the job-wide persisted credential) when the secret is set, and falls
-# back to a plain `git push` (the checkout's own persisted credential) when
-# it isn't.
-# ---------------------------------------------------------------------------
-push_with_pat_block() {
-  cat <<'SHELL'
-set -euo pipefail
-_merge_credential="${FORWARD_MERGE_PAT:-}"
-unset FORWARD_MERGE_PAT
-
-push_with_pat() {
-  if [[ -n "$_merge_credential" ]]; then
-    local auth
-    auth="$(printf 'x-access-token:%s' "$_merge_credential" | base64 -w0)"
-    echo "::add-mask::$auth"
-    git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"
-  else
-    git push "$@"
-  fi
-}
-
-push_with_pat origin HEAD:main
-SHELL
-}
-
-test_1504_push_with_pat_uses_pat_when_set() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  # git stub: record whether -c http...extraheader was passed before "push".
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "-c" && "$2" == http.https://github.com/.extraheader=* && "$3" == "push" ]]; then
-  echo "PUSHED_WITH_EXTRAHEADER"
-  exit 0
-fi
-if [[ "$1" == "push" ]]; then
-  echo "PUSHED_WITHOUT_EXTRAHEADER"
-  exit 0
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  local script out
-  script=$(push_with_pat_block)
-  export FORWARD_MERGE_PAT="fake-token"
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  unset FORWARD_MERGE_PAT
-  rm -rf "$tmpdir"
-
-  [[ "$out" == *"::add-mask::"* ]] && [[ "$out" == *"PUSHED_WITH_EXTRAHEADER"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# Test 11 (Issue #1504): direct push to $TARGET is never attempted once
-# FORWARD_MERGE_PAT is set.
-#
-# This repo's branch-protection ruleset has an admin bypass_actor with
-# bypass_mode "always" (verified via `gh api repos/.../rulesets`), so an
-# admin-owned PAT could push straight past required checks instead of being
-# rejected the way GITHUB_TOKEN would be. Mirrors the direct-push decision at
-# forward-merge-release.yml's cascade step: once the secret is set, the
-# direct `git push origin HEAD:"$TARGET"` must never run at all — the
-# cascade must go straight to the PR path so required checks still run.
-# ---------------------------------------------------------------------------
-direct_push_decision_block() {
-  cat <<'SHELL'
-set -euo pipefail
-_merge_credential="${FORWARD_MERGE_PAT:-}"
-unset FORWARD_MERGE_PAT
-TARGET="main"
-PUSH_SKIPPED=0
-if [[ -n "$_merge_credential" ]]; then
-  PUSH_SKIPPED=1
-  PUSH_RC=1
-  PUSH_STDERR=""
-elif PUSH_STDERR=$(git push origin HEAD:"$TARGET" 2>&1 >/dev/null); then
-  PUSH_RC=0
-else
-  PUSH_RC=$?
-fi
-if [[ $PUSH_RC -eq 0 ]]; then
-  echo "DIRECT_PUSH_SUCCEEDED"
-elif [[ "$PUSH_SKIPPED" -eq 1 ]]; then
-  echo "SKIPPED_DIRECT_PUSH_OPENING_PR"
-else
-  echo "DIRECT_PUSH_FAILED"
-fi
-SHELL
-}
-
-test_1504_direct_push_never_attempted_with_pat_set() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  # Sentinel: a direct `push origin HEAD:main` call means the skip logic
-  # didn't fire — must never be reached in this test.
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "push" && "$2" == "origin" && "$3" == "HEAD:main" ]]; then
-  echo "::error::direct push attempted despite FORWARD_MERGE_PAT being set" >&2
-  exit 99
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  local script out
-  script=$(direct_push_decision_block)
-  export FORWARD_MERGE_PAT="fake-token"
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  unset FORWARD_MERGE_PAT
-  rm -rf "$tmpdir"
-
-  [[ "$out" == "SKIPPED_DIRECT_PUSH_OPENING_PR" ]]
-}
-
-test_1504_direct_push_still_attempted_without_pat() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "push" && "$2" == "origin" && "$3" == "HEAD:main" ]]; then
-  exit 0
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  local script out
-  script=$(direct_push_decision_block)
-  unset FORWARD_MERGE_PAT
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  rm -rf "$tmpdir"
-
-  [[ "$out" == "DIRECT_PUSH_SUCCEEDED" ]]
-}
-
-test_1504_push_with_pat_falls_back_without_secret() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-
-  cat > "$tmpdir/git" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "-c" ]]; then
-  echo "PUSHED_WITH_EXTRAHEADER"
-  exit 0
-fi
-if [[ "$1" == "push" ]]; then
-  echo "PUSHED_WITHOUT_EXTRAHEADER"
-  exit 0
-fi
-exit 0
-STUB
-  chmod +x "$tmpdir/git"
-
-  local script out
-  script=$(push_with_pat_block)
-  unset FORWARD_MERGE_PAT
-
-  out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
-  rm -rf "$tmpdir"
-
-  [[ "$out" == "PUSHED_WITHOUT_EXTRAHEADER" ]]
-}
-
-# ---------------------------------------------------------------------------
-# Test (Issue #1540): push_with_pat's PAT header must not collide with the
+# Test (Issue #1540): push_with_app_token's App token header must not collide with the
 # persisted GITHUB_TOKEN extraheader that actions/checkout's
 # persist-credentials: true step already wrote into .git/config.
 #
@@ -1414,92 +938,39 @@ STUB
 # it. Verified directly against real git (not a stub) below, since this is a
 # property of git's own config layering, not of this workflow's logic — an
 # empty `-c key=` override does NOT unset a persisted value either, it adds
-# a third, empty entry. Before the fix, invoking push_with_pat while a
+# a third, empty entry. Before the fix, invoking push_with_app_token while a
 # persisted extraheader value exists leaves BOTH values in effect, and
 # GitHub's server rejects the resulting double `Authorization` header with a
 # 400 ("Duplicate header"). The fix must remove the persisted local-config
-# entry before setting the PAT's own header via -c, so exactly one
+# entry before setting the App token's own header via -c, so exactly one
 # Authorization header is in effect.
 #
-# This mirrors push_with_pat with its trailing git subcommand parameterized
+# This mirrors push_with_app_token with its trailing git subcommand parameterized
 # (production hardcodes `push`) so the test can inspect the resulting git
 # config state via `config --get-all` instead of needing a real remote push.
 # ---------------------------------------------------------------------------
-push_with_pat_header_block() {
+# shellcheck disable=SC2016 # literal shell text for the generated script
+push_with_app_token_header_block() {
+  echo 'set -euo pipefail'
+  echo '_app_token="${APP_TOKEN:-}"'
+  echo 'unset APP_TOKEN'
+  workflow_function push_with_app_token
   cat <<'SHELL'
-set -euo pipefail
-_merge_credential="${FORWARD_MERGE_PAT:-}"
-unset FORWARD_MERGE_PAT
-
-push_with_pat() {
-  if [[ "${_push_with_pat_credential_dropped:-0}" -eq 1 ]]; then
-    echo "::error::push_with_pat called more than once in this job after already dropping the persisted checkout credential -- update the caller, this function assumes a single last call"
-    exit 1
+# Print the headers the push would send instead of pushing. `git -c <header>
+# config --get-all` shows the persisted header and the -c header together,
+# as the push itself would send them.
+git() {
+  if [[ "${1:-}" == "-c" && "${3:-}" == "push" ]]; then
+    command git -c "$2" config --get-all http.https://github.com/.extraheader
+    return
   fi
-  if [[ -n "$_merge_credential" ]]; then
-    _push_with_pat_credential_dropped=1
-    local auth
-    auth="$(printf 'x-access-token:%s' "$_merge_credential" | base64 -w0)"
-    echo "::add-mask::$auth"
-    if UNSET_OUT=$(git config --local --unset-all http.https://github.com/.extraheader 2>&1); then
-      UNSET_RC=0
-    else
-      UNSET_RC=$?
-    fi
-    if [[ $UNSET_RC -ne 0 && $UNSET_RC -ne 5 ]]; then
-      echo "::error::failed to clear persisted extraheader before PAT push (git config exit $UNSET_RC): $UNSET_OUT"
-      exit 1
-    fi
-    if INCLUDE_KEYS=$(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>&1); then
-      INCLUDE_KEYS_RC=0
-    else
-      INCLUDE_KEYS_RC=$?
-    fi
-    if [[ $INCLUDE_KEYS_RC -ne 0 && $INCLUDE_KEYS_RC -ne 1 ]]; then
-      echo "::error::failed to enumerate includeIf.gitdir entries before PAT push (git config exit $INCLUDE_KEYS_RC): $INCLUDE_KEYS"
-      exit 1
-    fi
-    if [[ $INCLUDE_KEYS_RC -eq 0 ]]; then
-      while IFS= read -r include_key; do
-        [[ -n "$include_key" ]] || continue
-        if INCLUDE_VALUE=$(git config --local --get-all "$include_key" 2>&1); then
-          INCLUDE_GET_RC=0
-        else
-          INCLUDE_GET_RC=$?
-        fi
-        if [[ $INCLUDE_GET_RC -ne 0 ]]; then
-          echo "::error::failed to read $include_key before removing it (git config exit $INCLUDE_GET_RC): $INCLUDE_VALUE"
-          exit 1
-        fi
-        if INCLUDE_UNSET_OUT=$(git config --local --unset-all "$include_key" 2>&1); then
-          INCLUDE_UNSET_RC=0
-        else
-          INCLUDE_UNSET_RC=$?
-        fi
-        if [[ $INCLUDE_UNSET_RC -ne 0 ]]; then
-          echo "::error::failed to remove $include_key before PAT push (git config exit $INCLUDE_UNSET_RC): $INCLUDE_UNSET_OUT"
-          exit 1
-        fi
-        while IFS= read -r include_value_line; do
-          [[ -n "$include_value_line" ]] || continue
-          if [[ -n "${RUNNER_TEMP:-}" \
-              && "$include_value_line" == "$RUNNER_TEMP"/git-credentials-*.config ]]; then
-            rm -f "$include_value_line"
-          fi
-        done <<< "$INCLUDE_VALUE"
-      done <<< "$INCLUDE_KEYS"
-    fi
-    git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" "$@"
-  else
-    git "$@"
-  fi
+  command git "$@"
 }
-
-push_with_pat config --get-all http.https://github.com/.extraheader
+push_with_app_token origin forward-merge/test
 SHELL
 }
 
-test_1540_push_with_pat_clears_persisted_header_before_setting_new() {
+test_1540_push_with_app_token_clears_persisted_header_before_setting_new() {
   local repo out header_count
   repo=$(mktemp -d)
   (
@@ -1514,8 +985,8 @@ test_1540_push_with_pat_clears_persisted_header_before_setting_new() {
       "AUTHORIZATION: basic PERSISTED_TOKEN"
   )
 
-  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" \
-    bash -c "$(push_with_pat_header_block)" 2>&1)
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" \
+    bash -c "$(push_with_app_token_header_block)" 2>&1)
   header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
   trash "$repo" 2>/dev/null || true
 
@@ -1539,7 +1010,7 @@ test_1540_push_with_pat_clears_persisted_header_before_setting_new() {
 # active via the include — this reproduces that exact shape, not just a
 # directly-set extraheader.
 # ---------------------------------------------------------------------------
-test_1540_push_with_pat_clears_includeif_persisted_credential() {
+test_1540_push_with_app_token_clears_includeif_persisted_credential() {
   local repo credfile out header_count
   repo=$(mktemp -d)
   credfile=$(mktemp)
@@ -1557,8 +1028,8 @@ test_1540_push_with_pat_clears_includeif_persisted_credential() {
     git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
   )
 
-  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" \
-    bash -c "$(push_with_pat_header_block)" 2>&1)
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" \
+    bash -c "$(push_with_app_token_header_block)" 2>&1)
   header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
   trash "$repo" 2>/dev/null || true
   trash "$credfile" 2>/dev/null || true
@@ -1597,16 +1068,16 @@ STUB
   chmod +x "$tmpdir/git"
 
   local script out rc
-  script=$(push_with_pat_header_block)
-  export FORWARD_MERGE_PAT="fake-pat-token"
+  script=$(push_with_app_token_header_block)
+  export APP_TOKEN="fake-app-token"
 
   out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
   rc=$?
-  unset FORWARD_MERGE_PAT
+  unset APP_TOKEN
   rm -rf "$tmpdir"
 
   if [[ $rc -ne 0 ]] \
-      && echo "$out" | grep -q "::error::failed to enumerate includeIf.gitdir entries before PAT push (git config exit 128)" \
+      && echo "$out" | grep -q "::error::failed to enumerate includeIf.gitdir entries before the App push (git config exit 128)" \
       && ! echo "$out" | grep -q "git call reached past"; then
     return 0
   fi
@@ -1616,7 +1087,7 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
-# Test (Issue #1540 follow-up code review): once push_with_pat removes an
+# Test (Issue #1540 follow-up code review): once push_with_app_token removes an
 # includeIf entry pointing at a checkout-created credentials file, it must
 # also delete that file itself — actions/checkout's own Post Checkout
 # cleanup discovers the file path only by reading the includeIf value, so
@@ -1639,8 +1110,8 @@ test_1540_includeif_removal_deletes_the_credentials_file() {
     git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
   )
 
-  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" RUNNER_TEMP="$runner_temp" \
-    bash -c "$(push_with_pat_header_block)" 2>&1)
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" RUNNER_TEMP="$runner_temp" \
+    bash -c "$(push_with_app_token_header_block)" 2>&1)
   file_survived=0
   [[ -f "$credfile" ]] && file_survived=1
   trash "$repo" 2>/dev/null || true
@@ -1657,7 +1128,7 @@ test_1540_includeif_removal_deletes_the_credentials_file() {
 # ---------------------------------------------------------------------------
 # Test (Issue #1540 follow-up code review): a credentials file OUTSIDE
 # $RUNNER_TEMP must never be deleted — the match is deliberately narrow so
-# push_with_pat can't be tricked into removing an unrelated file.
+# push_with_app_token can't be tricked into removing an unrelated file.
 # ---------------------------------------------------------------------------
 test_1540_includeif_removal_does_not_delete_non_matching_files() {
   local runner_temp repo credfile out file_survived
@@ -1676,8 +1147,8 @@ test_1540_includeif_removal_does_not_delete_non_matching_files() {
     git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
   )
 
-  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" RUNNER_TEMP="$runner_temp" \
-    bash -c "$(push_with_pat_header_block)" 2>&1)
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" RUNNER_TEMP="$runner_temp" \
+    bash -c "$(push_with_app_token_header_block)" 2>&1)
   file_survived=0
   [[ -f "$credfile" ]] && file_survived=1
   trash "$repo" 2>/dev/null || true
@@ -1718,16 +1189,16 @@ STUB
   chmod +x "$tmpdir/git"
 
   local script out rc
-  script=$(push_with_pat_header_block)
-  export FORWARD_MERGE_PAT="fake-pat-token"
+  script=$(push_with_app_token_header_block)
+  export APP_TOKEN="fake-app-token"
 
   out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
   rc=$?
-  unset FORWARD_MERGE_PAT
+  unset APP_TOKEN
   rm -rf "$tmpdir"
 
   if [[ $rc -ne 0 ]] \
-      && echo "$out" | grep -q "::error::failed to clear persisted extraheader before PAT push (git config exit 255)" \
+      && echo "$out" | grep -q "::error::failed to clear persisted extraheader before the App push (git config exit 255)" \
       && ! echo "$out" | grep -q "git call reached past"; then
     return 0
   fi
@@ -1739,7 +1210,7 @@ STUB
 # ---------------------------------------------------------------------------
 # Test (Issue #1540 code review): the benign "no such key" case (git config
 # exit 5 — no persisted header at all) must NOT be treated as an error; the
-# PAT push proceeds normally.
+# App push proceeds normally.
 # ---------------------------------------------------------------------------
 test_1540_unset_all_missing_key_is_silently_tolerated() {
   local repo out
@@ -1753,8 +1224,8 @@ test_1540_unset_all_missing_key_is_silently_tolerated() {
     # Deliberately no persisted extraheader entry.
   )
 
-  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" \
-    bash -c "$(push_with_pat_header_block)" 2>&1)
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" \
+    bash -c "$(push_with_app_token_header_block)" 2>&1)
   trash "$repo" 2>/dev/null || true
 
   if echo "$out" | grep -q "^AUTHORIZATION: basic" && ! echo "$out" | grep -q "::error::"; then
@@ -1765,13 +1236,13 @@ test_1540_unset_all_missing_key_is_silently_tolerated() {
 }
 
 # ---------------------------------------------------------------------------
-# Test (Issue #1540 follow-up code review): calling push_with_pat a second
+# Test (Issue #1540 follow-up code review): calling push_with_app_token a second
 # time in the same job -- after it already dropped the persisted checkout
 # credential -- must fail loudly rather than silently push with no
 # credential at all. This enforces the single-last-call invariant the
 # surrounding comment documents but the code didn't check at runtime.
 # ---------------------------------------------------------------------------
-test_1540_push_with_pat_second_call_is_rejected() {
+test_1540_push_with_app_token_second_call_is_rejected() {
   local repo out rc
   repo=$(mktemp -d)
   (
@@ -1783,44 +1254,18 @@ test_1540_push_with_pat_second_call_is_rejected() {
   )
 
   local script
-  script="$(push_with_pat_header_block)
-push_with_pat config --get-all http.https://github.com/.extraheader"
-  out=$(cd "$repo" && FORWARD_MERGE_PAT="fake-pat-token" bash -c "$script" 2>&1)
+  script="$(push_with_app_token_header_block)
+push_with_app_token config --get-all http.https://github.com/.extraheader"
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" bash -c "$script" 2>&1)
   rc=$?
   trash "$repo" 2>/dev/null || true
 
   if [[ $rc -ne 0 ]] \
-      && echo "$out" | grep -q "::error::push_with_pat called more than once"; then
+      && echo "$out" | grep -q "::error::push_with_app_token called more than once"; then
     return 0
   fi
   printf '  rc: %s\n' "$rc" >&2
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# Drift guard (Issue #1540 code review): push_with_pat_header_block above is
-# a hand-maintained mirror of push_with_pat() in forward-merge-release.yml,
-# not an extraction — if production's fix-relevant lines change without this
-# mirror being updated, the tests above would keep passing against stale
-# logic and silently stop covering the real workflow. Assert the exact fixed
-# lines are still present in production so a future edit there fails loudly
-# here instead of drifting unnoticed.
-# ---------------------------------------------------------------------------
-test_1540_test_mirror_matches_production_push_with_pat() {
-  local workflow_file
-  workflow_file="$WORKFLOWS_DIR/forward-merge-release.yml"
-
-  # shellcheck disable=SC2016 # literal grep -F patterns, not expressions to expand
-  if grep -qF 'git config --local --unset-all http.https://github.com/.extraheader 2>&1' "$workflow_file" \
-      && grep -qF "git config --local --name-only --get-regexp '^includeIf\\.gitdir:'" "$workflow_file" \
-      && grep -qF 'git config --local --get-all "$include_key" 2>&1' "$workflow_file" \
-      && grep -qF 'rm -f "$include_value_line"' "$workflow_file" \
-      && grep -qF '_push_with_pat_credential_dropped:-0' "$workflow_file" \
-      && grep -qF 'git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" push "$@"' "$workflow_file"; then
-    return 0
-  fi
-  echo "  production's push_with_pat() no longer matches the lines this file mirrors — update push_with_pat_header_block and push_with_pat_block above" >&2
   return 1
 }
 
@@ -1832,7 +1277,7 @@ test_1540_test_mirror_matches_production_push_with_pat() {
 # release/** controls it (e.g. a crate directory matching
 # `crates/*/Cargo.toml`, or any path falling into the no-auto-resolution
 # case). GitHub Actions' `::add-mask::` (used elsewhere in this same job to
-# mask the PAT in push_with_pat) can be bypassed by an injected
+# mask the token in push_with_app_token) can be bypassed by an injected
 # `::stop-commands::` sequence in log output. Strip any `::` from the copy
 # used in the loop's own echo/error lines so they can never be used to
 # smuggle one in.
@@ -2340,8 +1785,7 @@ new_merge_branch_block() {
 set -euo pipefail
 HALTED=""
 HELD=""
-PUSH_SKIPPED=0
-push_with_pat() { git push "$@"; }
+push_with_app_token() { git push "$@"; }
 approve_pending_runs() { :; }
 enable_auto_merge() { :; }
 for _once in once; do
@@ -2745,7 +2189,7 @@ SOURCE_DESC="release/3.x"
 for TARGET in release/4.x; do
 SHELL
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
-  sed -n '/^ *if ! TARGET_SHA=\$(git rev-parse/,/^ *HALTED="ancestry check failed at \$TARGET"$/p' "$WORKFLOW"
+  sed -n '/^ *# #2280: an unreadable target ref is a failure/,/^ *HALTED="ancestry check failed at \$TARGET"$/p' "$WORKFLOW"
   cat <<'SHELL'
 break
 fi
@@ -2804,57 +2248,6 @@ test_2280_not_an_ancestor_still_merges() {
   return 1
 }
 
-# The docs dispatch after a direct push to main, extracted from production.
-docs_dispatch_block() {
-  cat <<'SHELL'
-set -euo pipefail
-TARGET=main
-TARGET_SHA=deadbeef
-SHELL
-  # shellcheck disable=SC2016 # literal sed address, not an expression to expand
-  sed -n '/^ *if \[\[ "\$TARGET" == "main" \]\] && \[\[ -n "\$TARGET_SHA" \]\] \\$/,/^              fi$/p' "$WORKFLOW"
-  echo 'echo reached-end'
-}
-
-test_2280_failed_docs_dispatch_names_gh_error() {
-  local dir out
-  dir=$(mktemp -d)
-  cat > "$dir/git" <<'STUB'
-#!/usr/bin/env bash
-[[ "$1" == diff ]] && exit 1
-exit 0
-STUB
-  cat > "$dir/gh" <<'STUB'
-#!/usr/bin/env bash
-echo "HTTP 403: Resource not accessible ::stop-commands::tok" >&2
-exit 1
-STUB
-  chmod +x "$dir/git" "$dir/gh"
-  out=$(PATH="$dir:$PATH" bash -c "$(docs_dispatch_block)" 2>&1 || true)
-  trash "$dir" 2>/dev/null || true
-  [[ "$out" == *"::warning::failed to dispatch docs.yml: HTTP 403: Resource not accessible"* ]] \
-    && [[ "$out" != *"::stop-commands::"* ]] && [[ "$out" == *reached-end* ]] && return 0
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
-test_2280_failed_docs_dispatch_without_stderr_says_so() {
-  local dir out
-  dir=$(mktemp -d)
-  cat > "$dir/git" <<'STUB'
-#!/usr/bin/env bash
-[[ "$1" == diff ]] && exit 1
-exit 0
-STUB
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/gh"
-  chmod +x "$dir/git" "$dir/gh"
-  out=$(PATH="$dir:$PATH" bash -c "$(docs_dispatch_block)" 2>&1 || true)
-  trash "$dir" 2>/dev/null || true
-  [[ "$out" == *"::warning::failed to dispatch docs.yml (no stderr)"* ]] && return 0
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
 # The per-target "already contains" check of the cascade loop, extracted from
 # production. After it, the block prints which ref the next merge would use.
 up_to_date_skip_block() {
@@ -2865,7 +2258,7 @@ SOURCE_DESC="release/3.x"
 for TARGET in release/4.x main; do
 SHELL
   # shellcheck disable=SC2016 # literal sed address, not an expression to expand
-  sed -n '/^ *if ! TARGET_SHA=\$(git rev-parse/,/^ *continue$/p' "$WORKFLOW"
+  sed -n '/^ *# #2280: an unreadable target ref is a failure/,/^ *continue$/p' "$WORKFLOW"
   cat <<'SHELL'
 fi
 echo "MERGE_FROM:$SOURCE_REF DESC:$SOURCE_DESC INTO:$TARGET"
@@ -3043,7 +2436,7 @@ test_2272_open_pr_is_updated_in_place() {
   trash "$log" 2>/dev/null || true
   [[ "$out" == *"PUSHED:"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] \
     && [[ "$out" == *"HELD=PR already open for release/4.x (branch updated with release/3.x)"* ]] \
-    && [[ "$calls" == *"pr list --head forward-merge/release/3.x-to-release/4.x --base release/4.x --state open"* ]] \
+    && [[ "$calls" == *"pr list --head forward-merge/release/3.x-to-release/4.x --state open"* ]] \
     && return 0
   printf '  calls: %s\n' "$calls" >&2
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -3111,82 +2504,6 @@ test_2272_pr_lookup_failure_halts() {
   return 1
 }
 
-# GITHUB_TOKEN cannot push a change to .github/workflows/, so without the PAT
-# that is the likely cause of a failed merge-branch push.
-PAT_HINT="set the App secrets SYNC_APP_ID and SYNC_APP_PRIVATE_KEY"
-
-# git and gh stubs for a merge-branch push that fails. `git diff --quiet`
-# exits with $1: 1 means the merge changes .github/workflows/, 0 means it does
-# not. Echoes the stub directory.
-push_failure_stubs() {
-  local dir
-  dir=$(mktemp -d)
-  cat > "$dir/git" <<STUB
-#!/usr/bin/env bash
-case "\$1" in
-  push) exit 1 ;;
-  diff) exit $1 ;;
-  merge-base) exit 1 ;;
-esac
-exit 0
-STUB
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/gh"
-  chmod +x "$dir/git" "$dir/gh"
-  printf '%s\n' "$dir"
-}
-
-test_2271_no_push_hint_without_workflow_change() {
-  local stubs out
-  stubs=$(push_failure_stubs 0)
-  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
-    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
-  trash "$stubs" 2>/dev/null || true
-
-  [[ "$out" == *"::error::Push to merge branch"* ]] && [[ "$out" != *"$PAT_HINT"* ]] && return 0
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
-test_2271_no_push_hint_with_pat_set() {
-  local stubs out
-  stubs=$(push_failure_stubs 1)
-  out=$(PATH="$stubs:$PATH" _merge_credential=set \
-    MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
-    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
-  trash "$stubs" 2>/dev/null || true
-
-  [[ "$out" == *"::error::Push to merge branch"* ]] && [[ "$out" != *"$PAT_HINT"* ]] && return 0
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
-test_2271_push_hint_on_stale_branch_update() {
-  local stubs out
-  stubs=$(push_failure_stubs 1)
-  out=$(PATH="$stubs:$PATH" SOURCE_REF=origin/source TARGET=release/4.x \
-    SOURCE_DESC=release/3.x MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" ls_rc=0 \
-    bash -c "$(existing_branch_update_block)" 2>&1 || true)
-  trash "$stubs" 2>/dev/null || true
-
-  [[ "$out" == *"::error::Push to update existing merge branch"* ]] \
-    && [[ "$out" == *"$PAT_HINT"* ]] && return 0
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-test_2271_push_failure_without_pat_gives_hint() {
-  local stubs out
-  stubs=$(push_failure_stubs 1)
-  out=$(PATH="$stubs:$PATH" MERGE_BRANCH="forward-merge/release/3.x-to-release/4.x" \
-    TARGET=release/4.x SOURCE_DESC=release/3.x bash -c "$(new_merge_branch_block)" 2>&1 || true)
-  trash "$stubs" 2>/dev/null || true
-
-  [[ "$out" == *"::error::Push to merge branch"* ]] \
-    && [[ "$out" == *"$PAT_HINT"* ]] \
-    && [[ "$out" == *"HALTED=merge-branch push failed for release/4.x"* ]] && return 0
-  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
-  return 1
-}
-
 # The merge-branch lookup of the cascade, extracted from production through
 # its failure arm. Prints HALTED.
 ls_remote_block() {
@@ -3230,10 +2547,10 @@ STUB
   return 1
 }
 
-# Build the "update an existing stale merge branch" block: what runs when a
-# direct push to $TARGET fails and $MERGE_BRANCH already exists. Extracted
+# Build the "update an existing stale merge branch" block: what runs when
+# $MERGE_BRANCH already exists. Extracted
 # from production (not hand-copied) so the test can't drift from the real
-# code. push_with_pat/approve_pending_runs are stubbed (their real bodies
+# code. push_with_app_token/approve_pending_runs are stubbed (their real bodies
 # depend on GitHub-credential/API specifics irrelevant to this control flow);
 # bail_on_conflict/auto_resolve_conflicts are the real production functions.
 # Wrapped in a one-iteration for-loop because production's `break` is only
@@ -3243,7 +2560,7 @@ STUB
 existing_branch_update_block() {
   echo 'set -euo pipefail'
   cat <<'SHELL'
-push_with_pat() { git push "$@"; }
+push_with_app_token() { git push "$@"; }
 approve_pending_runs() { :; }
 enable_auto_merge() { :; }
 # A function shadows any real gh on PATH, so a test never reaches GitHub.
@@ -3490,7 +2807,7 @@ test_2504_cascade_only_stale_branch_with_no_pr_is_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ -n "$before" && "$before" != "$after" ]] \
-    && [[ "$out" == *"Resetting stale forward-merge/rel-to-target (old tip $before)"* ]] \
+    && [[ "$out" == *"Reset stale forward-merge/rel-to-target (old tip $before)"* ]] \
     && [[ "$out" == *"REMOTE_SHARED=base|source: older change|source: newer change"* ]] \
     && [[ "$out" == *"GH_CALL:pr create --base target"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -3504,7 +2821,7 @@ test_2504_reset_pr_body_names_the_old_tip_and_dropped_commits() {
   out=$(run_reset_case bot-conflict "[]")
   before=$(reset_case_sha "$out" BEFORE_SHA)
   [[ "$out" == *"(forced update)"* ]] \
-    && [[ "$out" == *"GH_CALL:pr create"*"reset this branch"*"Old tip: $before"*"cascade resolution on the stale branch"* ]] \
+    && [[ "$out" == *"GH_CALL:pr create"*"reset it to a fresh merge"*"Old tip: $before"*"cascade resolution on the stale branch"* ]] \
     && [[ "$out" == *"Restore it with: git push --force-with-lease=forward-merge/rel-to-target:"*" origin $before:refs/heads/forward-merge/rel-to-target"* ]] \
     && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -3517,7 +2834,7 @@ test_2504_stale_branch_with_an_open_pr_is_not_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
-    && [[ "$out" != *"Resetting"* ]] && return 0
+    && [[ "$out" != *"Reset stale"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3528,7 +2845,7 @@ test_2504_stale_branch_with_a_human_commit_is_not_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
-    && [[ "$out" != *"Resetting"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] && return 0
+    && [[ "$out" != *"Reset stale"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3539,7 +2856,7 @@ test_2504_stale_branch_amended_by_a_person_is_not_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
-    && [[ "$out" != *"Resetting"* ]] && return 0
+    && [[ "$out" != *"Reset stale"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3562,20 +2879,21 @@ STUB
   trash "$stubs" 2>/dev/null || true
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
-  [[ "$before" == "$after" ]] && [[ "$out" != *"Resetting"* ]] \
+  [[ "$before" == "$after" ]] && [[ "$out" != *"Reset stale"* ]] \
     && [[ "$out" == *"fatal: bad object deadbeef"* ]] && [[ "$out" == *"Merge conflict"* ]] \
     && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
 
-test_2504_stale_branch_that_merges_cleanly_is_not_reset() {
+# #2795: with no open PR, a cascade-only branch is reset even when the merge
+# would be clean, so old cascade merges do not pile up on it.
+test_2795_stale_branch_that_merges_cleanly_is_reset() {
   local out before after
   out=$(run_reset_case clean "[]")
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
-  [[ "$before" != "$after" ]] && [[ "$out" != *"Resetting"* ]] \
-    && [[ "$out" == *"REMOTE_SHARED=base|source: older change|source: newer change"* ]] && return 0
+  [[ "$before" != "$after" ]] && [[ "$out" == *"Reset stale"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3590,7 +2908,7 @@ test_2220_test_mirror_matches_production_stale_branch_update() {
       && grep -qF 'elif [[ $ls_rc -ne 2 ]]; then' "$WORKFLOW" \
       && grep -qF 'if ! git fetch origin "$MERGE_BRANCH"; then' "$WORKFLOW" \
       && grep -qF 'if ! git checkout -B "$MERGE_BRANCH" "origin/$MERGE_BRANCH"; then' "$WORKFLOW" \
-      && grep -qF 'if ! push_with_pat origin "$MERGE_BRANCH" ${RESET_LEASE:+"$RESET_LEASE"}; then' "$WORKFLOW" \
+      && grep -qF 'if ! push_with_app_token origin "$MERGE_BRANCH" ${RESET_LEASE:+"$RESET_LEASE"}; then' "$WORKFLOW" \
       && grep -qF 'FRESH_SHA=$(git rev-parse HEAD)' "$WORKFLOW" \
       && grep -qF 'RESET_LEASE="--force-with-lease=$MERGE_BRANCH:$OLD_SHA"' "$WORKFLOW"; then
     return 0
@@ -3602,17 +2920,9 @@ test_2220_test_mirror_matches_production_stale_branch_update() {
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
-run_test "Issue #476: branch-exists guard prevents overwrite of in-progress resolution" \
-  test_476_branch_exists_guard
 
-run_test "Issue #475: push failure in fallback emits ::error:: annotation" \
-  test_475_push_failure_annotation
 
-run_test "Issue #480: initial push stderr logged for non-protection failures" \
-  test_480_initial_push_stderr_logged
 
-run_test "Issue #480: ::warning:: emitted when push fails with empty stderr" \
-  test_480_empty_stderr_push_logged
 
 run_test "Issue #482: fetch failure with stderr is logged and cascade halted" \
   test_482_fetch_fail_with_stderr
@@ -3620,8 +2930,6 @@ run_test "Issue #482: fetch failure with stderr is logged and cascade halted" \
 run_test "Issue #482: fetch failure with empty stderr is logged" \
   test_482_fetch_fail_empty_stderr
 
-run_test "Issue #1380: cascade chains 3.x -> 4.x -> main instead of fanning out" \
-  test_1380_cascade_chains_through_each_target
 
 run_test "Issue #1381: version-only manifest conflict keeps the target's version" \
   test_1381_version_only_conflict_keeps_target_version
@@ -3650,17 +2958,9 @@ run_test "Issue #1534: a script missing on both sides skips the check" \
 run_test "Issue #1534: the test mirror still matches production's script-integrity guard" \
   test_1534_test_mirror_matches_production_script_integrity_guard
 
-run_test "Issue #1504: push_with_pat authenticates with the PAT when the secret is set" \
-  test_1504_push_with_pat_uses_pat_when_set
 
-run_test "Issue #1504: push_with_pat falls back to a plain push without the secret" \
-  test_1504_push_with_pat_falls_back_without_secret
 
-run_test "Issue #1504: direct push never attempted once FORWARD_MERGE_PAT is set (bypass risk)" \
-  test_1504_direct_push_never_attempted_with_pat_set
 
-run_test "Issue #1504: direct push still attempted normally without the secret" \
-  test_1504_direct_push_still_attempted_without_pat
 
 run_test "Issue #1532: identical scripts/sync-changelog-doc.sh runs the target's pinned copy" \
   test_1532_identical_script_runs_target_copy
@@ -3668,17 +2968,17 @@ run_test "Issue #1532: identical scripts/sync-changelog-doc.sh runs the target's
 run_test "Issue #1532: a differing scripts/sync-changelog-doc.sh bails instead of running either copy" \
   test_1532_differing_script_bails
 
-run_test "Issue #1532: FORWARD_MERGE_PAT is not inherited by a spawned subprocess" \
-  test_1532_merge_credential_not_inherited_by_subprocess
+run_test "Issue #1532: APP_TOKEN is not inherited by a spawned subprocess" \
+  test_1532_app_token_not_inherited_by_subprocess
 
 run_test "Issue #1532: the real sync-changelog-doc.sh regenerates changelog.md through the pinned-copy path" \
   test_1532_real_script_regenerates_changelog
 
-run_test "Issue #1540: push_with_pat clears the persisted extraheader before setting its own" \
-  test_1540_push_with_pat_clears_persisted_header_before_setting_new
+run_test "Issue #1540: push_with_app_token clears the persisted extraheader before setting its own" \
+  test_1540_push_with_app_token_clears_persisted_header_before_setting_new
 
-run_test "Issue #1540 follow-up: push_with_pat clears an includeIf-referenced persisted credential" \
-  test_1540_push_with_pat_clears_includeif_persisted_credential
+run_test "Issue #1540 follow-up: push_with_app_token clears an includeIf-referenced persisted credential" \
+  test_1540_push_with_app_token_clears_includeif_persisted_credential
 
 run_test "Issue #1540 follow-up: a real includeIf enumeration failure is surfaced and halts" \
   test_1540_includeif_enumeration_real_failure_is_surfaced_and_halts
@@ -3689,8 +2989,8 @@ run_test "Issue #1540 follow-up: removing an includeIf entry also deletes its cr
 run_test "Issue #1540 follow-up: a non-matching credentials file is never deleted" \
   test_1540_includeif_removal_does_not_delete_non_matching_files
 
-run_test "Issue #1540 follow-up: a second push_with_pat call in the same job is rejected" \
-  test_1540_push_with_pat_second_call_is_rejected
+run_test "Issue #1540 follow-up: a second push_with_app_token call in the same job is rejected" \
+  test_1540_push_with_app_token_second_call_is_rejected
 
 run_test "Issue #1540: a real config-write failure while clearing the header is surfaced and halts" \
   test_1540_unset_all_real_failure_is_surfaced_and_halts
@@ -3698,8 +2998,6 @@ run_test "Issue #1540: a real config-write failure while clearing the header is 
 run_test "Issue #1540: the benign no-such-key case is silently tolerated" \
   test_1540_unset_all_missing_key_is_silently_tolerated
 
-run_test "Issue #1540: the test mirror still matches production's push_with_pat()" \
-  test_1540_test_mirror_matches_production_push_with_pat
 
 
 run_test "Issue #1543: a stop-commands sequence in a filename is stripped from log display" \
@@ -3779,18 +3077,10 @@ run_test "Issue #2271: a failed gh pr create is not reported as an opened PR" \
   test_2271_failed_pr_create_is_not_reported_as_opened
 run_test "Issue #2271: a failed ls-remote prints git's sanitized stderr" \
   test_2271_ls_remote_failure_prints_sanitized_stderr
-run_test "Issue #2271: a failed merge-branch push with no PAT names the workflow-file limit" \
-  test_2271_push_failure_without_pat_gives_hint
 run_test "Issue #2271: cargo output from merged manifests is printed with :: removed" \
   test_2271_lockfile_tool_output_is_sanitized
 run_test "Issue #2271: a failed ls-remote with no stderr says so" \
   test_2271_ls_remote_failure_without_stderr_says_so
-run_test "Issue #2271: no push hint when the merge changes no workflow file" \
-  test_2271_no_push_hint_without_workflow_change
-run_test "Issue #2271: no push hint when FORWARD_MERGE_PAT is set" \
-  test_2271_no_push_hint_with_pat_set
-run_test "Issue #2271: a failed stale-branch update push with no PAT gives the hint" \
-  test_2271_push_hint_on_stale_branch_update
 run_test "Issue #2271: a stale-branch merge with no MERGE_HEAD halts with git's reason" \
   test_2271_stale_branch_merge_without_merge_head_names_git_reason
 run_test "Issue #2271: a merge that fails with no MERGE_HEAD halts with git's reason" \
@@ -3852,10 +3142,6 @@ run_test "Issue #2280: a failed ancestry check halts instead of merging" \
   test_2280_ancestry_check_failure_halts
 run_test "Issue #2280: a target that lacks the source still merges" \
   test_2280_not_an_ancestor_still_merges
-run_test "Issue #2280: a failed docs dispatch names gh's error" \
-  test_2280_failed_docs_dispatch_names_gh_error
-run_test "Issue #2280: a failed docs dispatch with no stderr says so" \
-  test_2280_failed_docs_dispatch_without_stderr_says_so
 run_test "Issue #2285: an up-to-date target advances the chain to the next target" \
   test_2285_up_to_date_target_advances_the_chain
 
@@ -3872,48 +3158,16 @@ run_test "Issue #2504: a stale branch with a human commit is not reset" \
   test_2504_stale_branch_with_a_human_commit_is_not_reset
 run_test "Issue #2504: a cascade commit amended by a person is not reset" \
   test_2504_stale_branch_amended_by_a_person_is_not_reset
-run_test "Issue #2504: an unreadable branch history halts and names the git error" \
+run_test "Issue #2504: an unreadable branch history keeps the branch and names the git error" \
   test_2504_unreadable_branch_history_halts_and_names_the_error
-run_test "Issue #2504: a stale branch that merges cleanly is updated, not reset" \
-  test_2504_stale_branch_that_merges_cleanly_is_not_reset
+run_test "Issue #2795: a stale branch that merges cleanly is reset" \
+  test_2795_stale_branch_that_merges_cleanly_is_reset
 
-# ---------------------------------------------------------------------------
-# Issue #2796: the cascade runs as a GitHub App. The helpers below are
-# extracted from the workflow by name, so each test runs the shipped code.
-# ---------------------------------------------------------------------------
-workflow_function() {
-  awk -v name="$1" '
-    $0 ~ ("^ *" name "\\(\\) \\{$") { indent = $0; sub(/[^ ].*$/, "", indent); found = 1 }
-    found { print }
-    found && $0 == indent "}" { exit }
-  ' "$WORKFLOW"
-}
 
-# Runs one helper in a clean environment. Sets RUN_OUT, RUN_ERR, and RUN_RC.
-run_helper() {
-  local helper="$1"
-  local err_file
-  err_file=$(mktemp)
-  RUN_RC=0
-  RUN_OUT=$(env -i PATH="$PATH" "${@:2}" bash -c "$(workflow_function "$helper")
-$helper" 2>"$err_file") || RUN_RC=$?
-  RUN_ERR=$(<"$err_file")
-  rm -f "$err_file"
-}
 
 test_2796_app_credentials_select_the_app() {
   run_helper check_cascade_credential SYNC_APP_ID=1 SYNC_APP_PRIVATE_KEY=k
-  [[ "$RUN_RC" -eq 0 && "$RUN_OUT" == "app" ]]
-}
-
-test_2796_pat_alone_falls_back_with_a_warning() {
-  run_helper check_cascade_credential FORWARD_MERGE_PAT=p
-  [[ "$RUN_RC" -eq 0 && "$RUN_OUT" == "pat" && "$RUN_ERR" == *"::warning::"* ]]
-}
-
-test_2796_app_id_without_key_falls_back_to_the_pat() {
-  run_helper check_cascade_credential SYNC_APP_ID=1 FORWARD_MERGE_PAT=p
-  [[ "$RUN_RC" -eq 0 && "$RUN_OUT" == "pat" ]]
+  [[ "$RUN_RC" -eq 0 && -z "$RUN_ERR" ]]
 }
 
 test_2796_no_credentials_fails_and_names_the_fix() {
@@ -3950,14 +3204,16 @@ test_2796_failed_auto_merge_warns_and_keeps_the_cascade_running() {
   local dir out rc=0
   dir=$(mktemp -d)
   make_gh_stub "$dir"
-  out=$(env -i PATH="$dir:$PATH" GH_LOG="$dir/log" GH_STUB_RC=1 bash -c \
+  out=$(env -i PATH="$dir:$PATH" GH_LOG="$dir/log" GH_STUB_RC=1 GITHUB_STEP_SUMMARY="$dir/summary" bash -c \
     "$(workflow_function enable_auto_merge)
 enable_auto_merge forward-merge/release/3.x-to-main" 2>&1) || rc=$?
-  local logged
+  local logged summary
   logged=$(<"$dir/log")
+  summary=$(<"$dir/summary")
   rm -rf "$dir"
   [[ "$rc" -eq 0 && "$out" == *"::warning::"* && "$out" == *"auto-merge is disabled"* ]] \
-    && [[ "$logged" == *"pr comment forward-merge/release/3.x-to-main"* ]]
+    && [[ "$logged" == *"pr comment forward-merge/release/3.x-to-main"* ]] \
+    && [[ "$summary" == *"Auto-merge refused for forward-merge/release/3.x-to-main"* ]]
 }
 
 test_2796_pr_opened_exits_zero_and_writes_the_summary() {
@@ -3982,10 +3238,6 @@ test_2796_clean_cascade_exits_zero() {
 
 run_test "Issue #2796: App credentials select the App" \
   test_2796_app_credentials_select_the_app
-run_test "Issue #2796: the PAT alone falls back with a warning" \
-  test_2796_pat_alone_falls_back_with_a_warning
-run_test "Issue #2796: an App id without a key falls back to the PAT" \
-  test_2796_app_id_without_key_falls_back_to_the_pat
 run_test "Issue #2796: no credentials fails and names the secrets" \
   test_2796_no_credentials_fails_and_names_the_fix
 run_test "Issue #2796: auto-merge requests a merge commit" \
@@ -3999,52 +3251,171 @@ run_test "Issue #2796: a halted cascade still exits nonzero" \
 run_test "Issue #2796: a clean cascade exits zero" \
   test_2796_clean_cascade_exits_zero
 
-test_2796_missing_app_key_warning_names_the_secret() {
-  run_helper check_cascade_credential SYNC_APP_ID=1 FORWARD_MERGE_PAT=p
-  [[ "$RUN_RC" -eq 0 && "$RUN_ERR" == *"Missing SYNC_APP_PRIVATE_KEY"* ]]
+test_2796_missing_app_key_fails_and_names_the_secret() {
+  run_helper check_cascade_credential SYNC_APP_ID=1
+  [[ "$RUN_RC" -ne 0 && "$RUN_ERR" == *"Missing SYNC_APP_PRIVATE_KEY."* ]]
 }
 
-test_2796_app_mode_without_a_token_refuses_the_pat() {
-  run_helper require_app_token MODE=app
-  [[ "$RUN_RC" -ne 0 && "$RUN_ERR" == *"refusing to fall back"* ]]
+test_2796_missing_app_token_fails() {
+  run_helper require_app_token
+  [[ "$RUN_RC" -ne 0 && "$RUN_ERR" == *"No App token was minted"* ]]
 }
 
 test_2796_app_mode_with_a_token_passes() {
-  run_helper require_app_token MODE=app _app_token=tok
-  [[ "$RUN_RC" -eq 0 ]]
-}
-
-test_2796_pat_mode_passes_without_an_app_token() {
-  run_helper require_app_token MODE=pat
+  run_helper require_app_token _app_token=tok
   [[ "$RUN_RC" -eq 0 ]]
 }
 
 test_2796_unset_step_summary_fails_loudly() {
-  local rc=0
-  env -i PATH="$PATH" HELD="PR opened for release/4.x" bash -c "set -euo pipefail
+  local rc=0 err
+  err=$(env -i PATH="$PATH" HELD="PR opened for release/4.x" bash -c "set -euo pipefail
 $(workflow_function finish_cascade)
-finish_cascade" >/dev/null 2>&1 || rc=$?
-  [[ "$rc" -ne 0 ]]
+finish_cascade" 2>&1 >/dev/null) || rc=$?
+  [[ "$rc" -ne 0 && "$err" == *"GITHUB_STEP_SUMMARY is unset"* ]]
 }
 
 # shellcheck disable=SC2016 # literal workflow text, not an expression to expand
 test_2796_app_token_stays_out_of_checkout_and_step_env() {
-  ! grep -Fq 'token: ${{ steps.app.outputs.token' "$WORKFLOW" \
+  [[ -r "$WORKFLOW" ]] \
+    && grep -Fq 'APP_TOKEN: ${{ steps.app.outputs.token }}' "$WORKFLOW" \
+    && ! grep -Fq 'token: ${{ steps.app.outputs.token' "$WORKFLOW" \
     && ! grep -Fq 'GH_TOKEN: ${{ steps.app.outputs.token' "$WORKFLOW"
 }
 
-run_test "Issue #2796: a missing App key warning names the secret" \
-  test_2796_missing_app_key_warning_names_the_secret
-run_test "Issue #2796: App mode without a token refuses the PAT" \
-  test_2796_app_mode_without_a_token_refuses_the_pat
-run_test "Issue #2796: App mode with a token passes" \
+run_test "Issue #2797: a missing App key fails and names the secret" \
+  test_2796_missing_app_key_fails_and_names_the_secret
+run_test "Issue #2797: a missing App token fails the cascade" \
+  test_2796_missing_app_token_fails
+run_test "Issue #2796: an App token passes" \
   test_2796_app_mode_with_a_token_passes
-run_test "Issue #2796: PAT mode passes without an App token" \
-  test_2796_pat_mode_passes_without_an_app_token
 run_test "Issue #2796: an unset step summary fails loudly" \
   test_2796_unset_step_summary_fails_loudly
 run_test "Issue #2796: the App token stays out of checkout and GH_TOKEN" \
   test_2796_app_token_stays_out_of_checkout_and_step_env
+
+test_2798_missing_workflow_function_fails_loudly() {
+  local out rc=0
+  out=$(workflow_function no_such_helper_2798 2>&1) || rc=$?
+  [[ "$rc" -ne 0 && "$out" == *"no_such_helper_2798() not found"* ]]
+}
+
+# #1564: a reply that jq cannot parse is a failed listing, not "no run waited".
+test_2803_approve_reports_an_unparsable_run_list() {
+  local dir out
+  dir=$(mktemp -d)
+  printf '#!/usr/bin/env bash\necho "this is not json"\n' > "$dir/gh"
+  chmod +x "$dir/gh"
+  out=$(env -i PATH="$dir:$PATH" GITHUB_REPOSITORY=o/r bash -c "sleep() { :; }
+$(workflow_function approve_pending_runs)
+approve_pending_runs 0123456789abcdef0123456789abcdef01234567 forward-merge/x" 2>&1)
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::warning::could not list runs"* && "$out" != *"No run for"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# A reset must name what it drops, so a failed listing halts before the reset.
+test_2803_failed_drop_listing_halts_before_the_reset() {
+  local stubs out before after
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == log && "\$*" == *"--format=- %h %s"* ]]; then
+  echo "fatal: listing broke" >&2
+  exit 128
+fi
+exec "$(command -v git)" "\$@"
+STUB
+  chmod +x "$stubs/git"
+  out=$(RESET_CASE_PATH_PREFIX="$stubs" run_reset_case bot-conflict "[]")
+  trash "$stubs" 2>/dev/null || true
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ -n "$before" && "$before" == "$after" ]] \
+    && [[ "$out" == *"::error::Cannot list the commits a reset of forward-merge/rel-to-target would drop"* ]] \
+    && [[ "$out" != *"Reset stale"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# Generated cases: branch_is_cascade_only is true exactly when every
+# author/committer pair is the cascade pair. Fixed seed, so a failure repeats.
+test_2803_cascade_only_matches_the_author_rule() {
+  local bot='41898282+github-actions[bot]@users.noreply.github.com' human='p@example.com'
+  local fn i n k log expect pair rc
+  fn=$(workflow_function branch_is_cascade_only) || return 1
+  RANDOM=2803
+  for ((i = 0; i < 60; i++)); do
+    n=$((RANDOM % 5))
+    log=""
+    expect=0
+    for ((k = 0; k < n; k++)); do
+      case $((RANDOM % 4)) in
+        0) pair="$bot $bot" ;;
+        1) pair="$human $bot"; expect=1 ;;
+        2) pair="$bot $human"; expect=1 ;;
+        *) pair="$human $human"; expect=1 ;;
+      esac
+      log+="$pair"$'\n'
+    done
+    rc=0
+    FAKE_LOG="$log" bash -c "git() { printf '%s' \"\$FAKE_LOG\"; }
+$fn
+branch_is_cascade_only" >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -ne "$expect" ]]; then
+      printf '  case %d: expected %d, got %d for:\n%s' "$i" "$expect" "$rc" "$log" >&2
+      return 1
+    fi
+  done
+}
+
+# #2280: only exit 1 from merge-base means "not an ancestor"; any other code halts.
+test_2803_ancestry_check_failure_halts_the_update() {
+  local out
+  out=$(run_stale_arm 128)
+  [[ "$out" == *"::error::git merge-base failed for forward-merge/release/3.x-to-release/4.x (exit 128)"* ]] \
+    && [[ "$out" == *"HALTED=ancestry check failed for forward-merge/release/3.x-to-release/4.x"* ]] \
+    && [[ "$out" != *"PUSHED:"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# A failed reset checkout halts and leaves the remote branch as it was.
+test_2803_failed_reset_checkout_halts() {
+  local stubs out before after
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == checkout && "\$2" == -B && "\$4" != origin/* ]]; then
+  echo "error: checkout broke" >&2
+  exit 1
+fi
+exec "$(command -v git)" "\$@"
+STUB
+  chmod +x "$stubs/git"
+  out=$(RESET_CASE_PATH_PREFIX="$stubs" run_reset_case bot-conflict "[]")
+  trash "$stubs" 2>/dev/null || true
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ -n "$before" && "$before" == "$after" ]] \
+    && [[ "$out" == *"::error::Failed to reset forward-merge/rel-to-target to the fresh merge"* ]] \
+    && [[ "$out" != *"Reset stale"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+run_test "Issue #2803: an ancestry check failure halts the update" \
+  test_2803_ancestry_check_failure_halts_the_update
+run_test "Issue #2803: a failed reset checkout halts" \
+  test_2803_failed_reset_checkout_halts
+run_test "Issue #2798: a missing workflow function fails loudly" \
+  test_2798_missing_workflow_function_fails_loudly
+run_test "Issue #2803: approve reports an unparsable run list" \
+  test_2803_approve_reports_an_unparsable_run_list
+run_test "Issue #2803: a failed drop listing halts before the reset" \
+  test_2803_failed_drop_listing_halts_before_the_reset
+run_test "Issue #2803: cascade-only matches the author rule on generated cases" \
+  test_2803_cascade_only_matches_the_author_rule
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
