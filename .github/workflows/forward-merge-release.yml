@@ -56,9 +56,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         (startsWith(github.event.pull_request.base.ref, 'release/') ||
          github.event.pull_request.base.ref == 'main')))
+    # The App token pushes, opens PRs, and merges them (#2796). GITHUB_TOKEN only
+    # fetches, lists PRs, and approves gated runs.
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
       actions: write
     steps:
       # #1675: for a push, the branch that was pushed IS the cascade's
@@ -118,7 +120,7 @@ jobs:
             [[ -n "${SYNC_APP_ID:-}" ]] || missing="SYNC_APP_ID"
             [[ -n "${SYNC_APP_PRIVATE_KEY:-}" ]] || missing="${missing:+$missing and }SYNC_APP_PRIVATE_KEY"
             if [[ -n "$missing" ]]; then
-              echo "::error::Missing $missing. Set the repository secrets SYNC_APP_ID and SYNC_APP_PRIVATE_KEY for the phaedrus-sync App (installed on this repository). See docs/release.md." >&2
+              echo "::error::Missing $missing. Set the repository secrets SYNC_APP_ID and SYNC_APP_PRIVATE_KEY for the phaedrus-sync App (installed on this repository). See website/docs/release.md." >&2
               return 1
             fi
           }
@@ -274,7 +276,12 @@ jobs:
             fi
             _push_with_app_token_credential_dropped=1
             local auth
-            auth="$(printf 'x-access-token:%s' "$_app_token" | base64 -w0)"
+            # Callers run this as `if ! push_with_app_token`, so set -e is off in
+            # here: every step that can fail is checked by hand.
+            if ! auth="$(printf 'x-access-token:%s' "$_app_token" | base64 -w0)" || [[ -z "$auth" ]]; then
+              echo "::error::could not encode the App token for the push header"
+              exit 1
+            fi
             # GitHub's log scrubber masks the literal token value, not its
             # base64 encoding — register the encoded form too, so a stray
             # git trace or `set -x` can't print a trivially-reversible copy.
@@ -350,7 +357,10 @@ jobs:
                   [[ -n "$include_value_line" ]] || continue
                   if [[ -n "${RUNNER_TEMP:-}" \
                       && "$include_value_line" == "$RUNNER_TEMP"/git-credentials-*.config ]]; then
-                    rm -f "$include_value_line"
+                    if ! rm -f "$include_value_line"; then
+                      echo "::error::failed to delete the persisted credentials file $include_value_line"
+                      exit 1
+                    fi
                   fi
                 done <<< "$INCLUDE_VALUE"
               done <<< "$INCLUDE_KEYS"
@@ -367,11 +377,14 @@ jobs:
               echo "Auto-merge enabled for $branch; it merges once its required checks pass."
               return 0
             fi
+            local cerr
             err="${err//::/  }"
             err="${err//$'\n'/ }"
             echo "::warning::Could not enable auto-merge for $branch; merge it by hand once its checks pass: $err"
-            if ! GH_TOKEN="${_app_token:-}" gh pr comment "$branch" --body "Auto-merge was refused: $err. Merge this PR by hand once its checks pass; the cascade resumes when it merges." >/dev/null 2>&1; then
-              echo "::warning::Could not comment on $branch about the refused auto-merge"
+            echo "- Auto-merge refused for $branch ($err). Merge it by hand once its checks pass." >> "${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is unset}"
+            if ! cerr=$(GH_TOKEN="${_app_token:-}" gh pr comment "$branch" --body "Auto-merge was refused: $err. Merge this PR by hand once its checks pass; the cascade resumes when it merges." 2>&1 >/dev/null); then
+              cerr="${cerr//::/  }"
+              echo "::warning::Could not comment on $branch about the refused auto-merge: ${cerr//$'\n'/ }"
             fi
           }
 
@@ -383,7 +396,7 @@ jobs:
             fi
             if [[ -n "${HELD:-}" ]]; then
               echo "Forward-merge cascade waiting on $HELD; the next targets run when it merges"
-              echo "- Forward-merge cascade waiting on $HELD" >> "$GITHUB_STEP_SUMMARY"
+              echo "- Forward-merge cascade waiting on $HELD" >> "${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is unset}"
               return 0
             fi
             echo "Forward-merge cascade completed"
@@ -394,9 +407,8 @@ jobs:
           # fork-PR-only safety gate, but observed firing on this same-repo,
           # non-first-time-contributor PR too (#1564; GitHub-side root cause
           # not confirmed, and reproduction is intermittent -- most cascades
-          # that open a PR don't hit it). The entire reason this cascade opens
-          # a PR instead of pushing directly is so required checks run before
-          # merge, so a run stuck on that gate with nobody watching silently
+          # that open a PR don't hit it). The cascade opens a PR so required
+          # checks run before merge, so a run stuck on that gate with nobody watching silently
           # defeats the point. Poll for runs against $1 (a commit SHA) on
           # branch $2 sitting in that state and approve them. action_required
           # is the fork gate, and a fork can push the same public SHA, so only
@@ -426,11 +438,14 @@ jobs:
               if runs=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" --paginate \
                   -f head_sha="$sha" -f status=action_required -f branch="$branch" \
                   -f per_page=100 2>"$err_file"); then
-                list_ok=1
-                if ! ids=$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" \
+                # A list counts as read only when jq also parses it; a bad reply is
+                # not "no run waited" (#1564).
+                if ids=$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" \
                     '.workflow_runs[] | select(.conclusion == "action_required"
                       and .head_repository.full_name == $repo and .head_branch == $branch) | .id' \
                     <<< "$runs" 2>"$err_file"); then
+                  list_ok=1
+                else
                   last_err="$(<"$err_file")"
                   ids=""
                 fi
@@ -802,10 +817,15 @@ jobs:
 
           # #2504: true when every commit only on the merge branch has the cascade as
           # author and committer. A git error is not a yes: it warns and returns false.
+          # Anyone who can push to the branch can forge that identity. A forged reset
+          # drops only the forger's own commits, and the old tip is logged.
           branch_is_cascade_only() {
             local cascade='41898282+github-actions[bot]@users.noreply.github.com'
             local ids err err_file line
-            err_file=$(mktemp)
+            if ! err_file=$(mktemp); then
+              echo "::warning::Cannot create a temp file, so $MERGE_BRANCH is not reset"
+              return 1
+            fi
             if ! ids=$(git log --format='%ae %ce' "$SOURCE_REF..HEAD" "^origin/$TARGET" 2>"$err_file"); then
               err="$(<"$err_file")"
               rm -f "$err_file"
@@ -1052,7 +1072,9 @@ jobs:
               # leaves it behind. Look for an open PR instead of assuming one.
               # stderr goes to a file, so a gh warning cannot corrupt the list.
               GH_ERR_FILE=$(mktemp)
-              if ! OPEN_PRS_JSON=$(gh pr list --head "$MERGE_BRANCH" --base "$TARGET" --state open \
+              # Any base counts: a PR moved to another base still holds the branch, so
+              # the reset below must not run under it.
+              if ! OPEN_PRS_JSON=$(gh pr list --head "$MERGE_BRANCH" --state open \
                   --json number,isCrossRepository 2>"$GH_ERR_FILE"); then
                 GH_ERR="$(<"$GH_ERR_FILE")"
                 rm -f "$GH_ERR_FILE"
@@ -1084,9 +1106,13 @@ jobs:
               # keeps the branch.
               if [[ "$OPEN_PRS" -eq 0 && "$MERGE_SHA" != "$FRESH_SHA" ]] && branch_is_cascade_only; then
                 OLD_SHA="$MERGE_SHA"
-                DROPPED=$(git log --format='- %h %s' "$FRESH_SHA..HEAD") \
-                  || DROPPED="- (the cascade could not list them)"
-                echo "::warning::Resetting stale $MERGE_BRANCH (old tip $OLD_SHA): no open PR, and only the cascade wrote its commits. Restore it with: git push --force-with-lease=$MERGE_BRANCH:$FRESH_SHA origin $OLD_SHA:refs/heads/$MERGE_BRANCH"
+                # The PR body must name what the reset drops, so a failed listing halts.
+                if ! DROPPED=$(git log --format='- %h %s' "$FRESH_SHA..HEAD"); then
+                  echo "::error::Cannot list the commits a reset of $MERGE_BRANCH would drop; not resetting"
+                  echo "::endgroup::"
+                  HALTED="reset of stale merge branch failed for $TARGET"
+                  break
+                fi
                 if ! git checkout -B "$MERGE_BRANCH" "$FRESH_SHA"; then
                   echo "::error::Failed to reset $MERGE_BRANCH to the fresh merge"
                   echo "::endgroup::"
@@ -1097,10 +1123,23 @@ jobs:
                 MERGE_SHA=$(git rev-parse HEAD)
               fi
               BRANCH_CURRENT=0
-              # A reset branch still needs its push, so it skips the "nothing to update" check.
-              if [[ -z "$RESET_LEASE" ]] && git merge-base --is-ancestor "$SOURCE_REF" HEAD; then
+              # A reset branch still needs its push, so it skips the "nothing to update"
+              # check. Only exit 1 means "not an ancestor"; any other failure halts (#2280).
+              if [[ -z "$RESET_LEASE" ]]; then
+                if git merge-base --is-ancestor "$SOURCE_REF" HEAD; then
+                  BRANCH_CURRENT=1
+                else
+                  ANCESTOR_RC=$?
+                  if [[ $ANCESTOR_RC -ne 1 ]]; then
+                    echo "::error::git merge-base failed for $MERGE_BRANCH (exit $ANCESTOR_RC)"
+                    echo "::endgroup::"
+                    HALTED="ancestry check failed for $MERGE_BRANCH"
+                    break
+                  fi
+                fi
+              fi
+              if [[ "$BRANCH_CURRENT" -eq 1 ]]; then
                 echo "$MERGE_BRANCH already contains $SOURCE_DESC; nothing to update"
-                BRANCH_CURRENT=1
                 if [[ "$OPEN_PRS" -gt 0 ]]; then
                   echo "::endgroup::"
                   HELD="PR already open for $TARGET"
@@ -1135,9 +1174,15 @@ jobs:
                 MERGE_SHA=$(git rev-parse HEAD)
                 if ! push_with_app_token origin "$MERGE_BRANCH" ${RESET_LEASE:+"$RESET_LEASE"}; then
                   echo "::error::Push to update existing merge branch $MERGE_BRANCH failed"
+                  if [[ -n "$RESET_LEASE" ]]; then
+                    echo "::error::The push held a lease on old tip $OLD_SHA, so $MERGE_BRANCH was not reset. Someone may have pushed to it after this run fetched it."
+                  fi
                   echo "::endgroup::"
                   HALTED="merge-branch update push failed for $TARGET"
                   break
+                fi
+                if [[ -n "$RESET_LEASE" ]]; then
+                  echo "::warning::Reset stale $MERGE_BRANCH (old tip $OLD_SHA): no open PR, and only the cascade wrote its commits. Restore it with: git push --force-with-lease=$MERGE_BRANCH:$MERGE_SHA origin $OLD_SHA:refs/heads/$MERGE_BRANCH"
                 fi
                 # With no open PR, no run exists yet to approve.
                 if [[ "$OPEN_PRS" -gt 0 ]]; then
@@ -1152,7 +1197,7 @@ jobs:
                   || BRANCH_OWN="- (the cascade could not list them)"
                 PR_BODY="No open PR existed for $MERGE_BRANCH, so the cascade updated the existing branch and opened this PR."
                 if [[ -n "$RESET_LEASE" ]]; then
-                  PR_BODY+=$'\n\n'"The cascade could not merge $SOURCE_DESC into the old branch, so it reset this branch to a fresh merge. Only the cascade had written the old commits. Old tip: $OLD_SHA"$'\n'"Dropped commits:"$'\n'"$DROPPED"
+                  PR_BODY+=$'\n\n'"No open PR held this branch and only the cascade had written its commits, so the cascade reset it to a fresh merge of $SOURCE_DESC. Old tip: $OLD_SHA"$'\n'"Dropped commits:"$'\n'"$DROPPED"
                 fi
                 if [[ -n "$BRANCH_OWN" ]]; then
                   PR_BODY+=$'\n\n'"The branch also holds these commits, which are not on $SOURCE_DESC or $TARGET. An earlier PR for this branch may have carried them. Review them before you merge:"$'\n'"$BRANCH_OWN"
@@ -1170,7 +1215,7 @@ jobs:
                 echo "::endgroup::"
                 break
               fi
-              echo "::notice::Updated the open PR for $TARGET instead of pushing directly"
+              echo "::notice::Updated the open PR for $TARGET with $SOURCE_DESC"
               echo "::endgroup::"
               HELD="PR already open for $TARGET (branch updated with $SOURCE_DESC)"
               break

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Tests for forward-merge-release.yml protected-branch fallback guards.
-# Exercises the shell logic extracted from the workflow; stubs git and gh.
+# Tests for forward-merge-release.yml.
+# Exercises shell logic extracted from the workflow; stubs git and gh.
 # Run: bash .github/workflows/__tests__/forward-merge-release-guards.sh
-# Expected: FAIL until Issue #476 and #475 fixes are applied.
-# cascade_block/fallback_block run under `set -euo pipefail`, matching the
-# real workflow (see Issue #1250) — without it, a failing push/fetch/ls-remote
-# captured via `VAR=$(cmd); RC=$?` kills the script before RC is ever read,
-# and these tests wouldn't catch it.
+# Extracted blocks run under `set -euo pipefail`, matching the real workflow
+# (see Issue #1250): without it, a failing push/fetch/ls-remote captured via
+# `VAR=$(cmd); RC=$?` kills the script before RC is ever read, and these
+# tests wouldn't catch it.
 set -uo pipefail
 
 WORKFLOWS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,17 +38,21 @@ PASS=0
 FAIL=0
 
 # Extracts one shell function from the workflow by name, so a test runs the
-# shipped code instead of a copy (#2796, #2798).
-# ---------------------------------------------------------------------------
-# Issue #2796: the cascade runs as a GitHub App. The helpers below are
-# extracted from the workflow by name, so each test runs the shipped code.
-# ---------------------------------------------------------------------------
+# shipped code instead of a copy (#2796, #2798). A missing function prints a
+# script that exits 97 with a message, so an empty extraction cannot pass a test.
 workflow_function() {
-  awk -v name="$1" '
+  local out
+  out=$(awk -v name="$1" '
     $0 ~ ("^ *" name "\\(\\) \\{$") { indent = $0; sub(/[^ ].*$/, "", indent); found = 1 }
     found { print }
     found && $0 == indent "}" { exit }
-  ' "$WORKFLOW"
+  ' "$WORKFLOW")
+  if [[ -z "$out" ]]; then
+    echo "workflow_function: $1() not found in $WORKFLOW" >&2
+    printf '%s\n' "echo 'workflow_function: $1() not found' >&2; exit 97"
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 # Runs one helper in a clean environment. Sets RUN_OUT, RUN_ERR, and RUN_RC.
@@ -198,16 +201,6 @@ fi
 SHELL
 }
 
-# Commit a real copy of scripts/forward_merge_manifest.py into the current
-# directory, staged for the next commit. manifest_keeps_target now reads the
-# target's own copy via `git show HEAD:scripts/forward_merge_manifest.py`
-# (#2177), so every fixture repo's target branch needs the file in its tree —
-# an external path (the old MANIFEST_CHECK env var) is no longer consulted.
-commit_manifest_script() {
-  mkdir -p scripts
-  cp "$REPO_ROOT/scripts/forward_merge_manifest.py" scripts/forward_merge_manifest.py
-  git add scripts/forward_merge_manifest.py
-}
 
 # Build a repo where `source` and `target` both moved their own version, plus
 # whatever extra change `$1` adds to source's Cargo.toml. Leaves the caller
@@ -489,7 +482,7 @@ test_1532_differing_script_bails() {
 # After fix: it's captured into a local variable and unset immediately →
 # NOT_LEAKED, and push_with_app_token still authenticates via the local var, PASS.
 # ---------------------------------------------------------------------------
-pat_scope_block() {
+app_token_scope_block() {
   echo 'set -euo pipefail'
   sed -n '/^ *# #1532, #2796: capture the App token/,/^ *require_app_token$/p' "$WORKFLOW"
   workflow_function push_with_app_token
@@ -518,7 +511,7 @@ STUB
   chmod +x "$tmpdir/git"
 
   local script out
-  script=$(pat_scope_block)
+  script=$(app_token_scope_block)
   export APP_TOKEN="fake-token"
 
   out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1 || true)
@@ -936,7 +929,7 @@ test_2166_target_without_manifest_script_bails() {
 }
 
 # ---------------------------------------------------------------------------
-# Test (Issue #1540): push_with_app_token's PAT header must not collide with the
+# Test (Issue #1540): push_with_app_token's App token header must not collide with the
 # persisted GITHUB_TOKEN extraheader that actions/checkout's
 # persist-credentials: true step already wrote into .git/config.
 #
@@ -949,7 +942,7 @@ test_2166_target_without_manifest_script_bails() {
 # persisted extraheader value exists leaves BOTH values in effect, and
 # GitHub's server rejects the resulting double `Authorization` header with a
 # 400 ("Duplicate header"). The fix must remove the persisted local-config
-# entry before setting the PAT's own header via -c, so exactly one
+# entry before setting the App token's own header via -c, so exactly one
 # Authorization header is in effect.
 #
 # This mirrors push_with_app_token with its trailing git subcommand parameterized
@@ -992,7 +985,7 @@ test_1540_push_with_app_token_clears_persisted_header_before_setting_new() {
       "AUTHORIZATION: basic PERSISTED_TOKEN"
   )
 
-  out=$(cd "$repo" && APP_TOKEN="fake-pat-token" \
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" \
     bash -c "$(push_with_app_token_header_block)" 2>&1)
   header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
   trash "$repo" 2>/dev/null || true
@@ -1035,7 +1028,7 @@ test_1540_push_with_app_token_clears_includeif_persisted_credential() {
     git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
   )
 
-  out=$(cd "$repo" && APP_TOKEN="fake-pat-token" \
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" \
     bash -c "$(push_with_app_token_header_block)" 2>&1)
   header_count=$(echo "$out" | grep -c '^AUTHORIZATION: basic')
   trash "$repo" 2>/dev/null || true
@@ -1076,7 +1069,7 @@ STUB
 
   local script out rc
   script=$(push_with_app_token_header_block)
-  export APP_TOKEN="fake-pat-token"
+  export APP_TOKEN="fake-app-token"
 
   out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
   rc=$?
@@ -1117,7 +1110,7 @@ test_1540_includeif_removal_deletes_the_credentials_file() {
     git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
   )
 
-  out=$(cd "$repo" && APP_TOKEN="fake-pat-token" RUNNER_TEMP="$runner_temp" \
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" RUNNER_TEMP="$runner_temp" \
     bash -c "$(push_with_app_token_header_block)" 2>&1)
   file_survived=0
   [[ -f "$credfile" ]] && file_survived=1
@@ -1154,7 +1147,7 @@ test_1540_includeif_removal_does_not_delete_non_matching_files() {
     git config --local "includeIf.gitdir:$repo/.git.path" "$credfile"
   )
 
-  out=$(cd "$repo" && APP_TOKEN="fake-pat-token" RUNNER_TEMP="$runner_temp" \
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" RUNNER_TEMP="$runner_temp" \
     bash -c "$(push_with_app_token_header_block)" 2>&1)
   file_survived=0
   [[ -f "$credfile" ]] && file_survived=1
@@ -1197,7 +1190,7 @@ STUB
 
   local script out rc
   script=$(push_with_app_token_header_block)
-  export APP_TOKEN="fake-pat-token"
+  export APP_TOKEN="fake-app-token"
 
   out=$(PATH="$tmpdir:$PATH" bash -c "$script" 2>&1)
   rc=$?
@@ -1231,7 +1224,7 @@ test_1540_unset_all_missing_key_is_silently_tolerated() {
     # Deliberately no persisted extraheader entry.
   )
 
-  out=$(cd "$repo" && APP_TOKEN="fake-pat-token" \
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" \
     bash -c "$(push_with_app_token_header_block)" 2>&1)
   trash "$repo" 2>/dev/null || true
 
@@ -1263,7 +1256,7 @@ test_1540_push_with_app_token_second_call_is_rejected() {
   local script
   script="$(push_with_app_token_header_block)
 push_with_app_token config --get-all http.https://github.com/.extraheader"
-  out=$(cd "$repo" && APP_TOKEN="fake-pat-token" bash -c "$script" 2>&1)
+  out=$(cd "$repo" && APP_TOKEN="fake-app-token" bash -c "$script" 2>&1)
   rc=$?
   trash "$repo" 2>/dev/null || true
 
@@ -1284,7 +1277,7 @@ push_with_app_token config --get-all http.https://github.com/.extraheader"
 # release/** controls it (e.g. a crate directory matching
 # `crates/*/Cargo.toml`, or any path falling into the no-auto-resolution
 # case). GitHub Actions' `::add-mask::` (used elsewhere in this same job to
-# mask the PAT in push_with_app_token) can be bypassed by an injected
+# mask the token in push_with_app_token) can be bypassed by an injected
 # `::stop-commands::` sequence in log output. Strip any `::` from the copy
 # used in the loop's own echo/error lines so they can never be used to
 # smuggle one in.
@@ -2443,7 +2436,7 @@ test_2272_open_pr_is_updated_in_place() {
   trash "$log" 2>/dev/null || true
   [[ "$out" == *"PUSHED:"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] \
     && [[ "$out" == *"HELD=PR already open for release/4.x (branch updated with release/3.x)"* ]] \
-    && [[ "$calls" == *"pr list --head forward-merge/release/3.x-to-release/4.x --base release/4.x --state open"* ]] \
+    && [[ "$calls" == *"pr list --head forward-merge/release/3.x-to-release/4.x --state open"* ]] \
     && return 0
   printf '  calls: %s\n' "$calls" >&2
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -2554,8 +2547,8 @@ STUB
   return 1
 }
 
-# Build the "update an existing stale merge branch" block: what runs when a
-# direct push to $TARGET fails and $MERGE_BRANCH already exists. Extracted
+# Build the "update an existing stale merge branch" block: what runs when
+# $MERGE_BRANCH already exists. Extracted
 # from production (not hand-copied) so the test can't drift from the real
 # code. push_with_app_token/approve_pending_runs are stubbed (their real bodies
 # depend on GitHub-credential/API specifics irrelevant to this control flow);
@@ -2814,7 +2807,7 @@ test_2504_cascade_only_stale_branch_with_no_pr_is_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ -n "$before" && "$before" != "$after" ]] \
-    && [[ "$out" == *"Resetting stale forward-merge/rel-to-target (old tip $before)"* ]] \
+    && [[ "$out" == *"Reset stale forward-merge/rel-to-target (old tip $before)"* ]] \
     && [[ "$out" == *"REMOTE_SHARED=base|source: older change|source: newer change"* ]] \
     && [[ "$out" == *"GH_CALL:pr create --base target"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -2828,7 +2821,7 @@ test_2504_reset_pr_body_names_the_old_tip_and_dropped_commits() {
   out=$(run_reset_case bot-conflict "[]")
   before=$(reset_case_sha "$out" BEFORE_SHA)
   [[ "$out" == *"(forced update)"* ]] \
-    && [[ "$out" == *"GH_CALL:pr create"*"reset this branch"*"Old tip: $before"*"cascade resolution on the stale branch"* ]] \
+    && [[ "$out" == *"GH_CALL:pr create"*"reset it to a fresh merge"*"Old tip: $before"*"cascade resolution on the stale branch"* ]] \
     && [[ "$out" == *"Restore it with: git push --force-with-lease=forward-merge/rel-to-target:"*" origin $before:refs/heads/forward-merge/rel-to-target"* ]] \
     && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -2841,7 +2834,7 @@ test_2504_stale_branch_with_an_open_pr_is_not_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
-    && [[ "$out" != *"Resetting"* ]] && return 0
+    && [[ "$out" != *"Reset stale"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -2852,7 +2845,7 @@ test_2504_stale_branch_with_a_human_commit_is_not_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
-    && [[ "$out" != *"Resetting"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] && return 0
+    && [[ "$out" != *"Reset stale"* ]] && [[ "$out" != *"GH_CALL:pr create"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -2863,7 +2856,7 @@ test_2504_stale_branch_amended_by_a_person_is_not_reset() {
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
   [[ "$before" == "$after" ]] && [[ "$out" == *"Merge conflict"* ]] \
-    && [[ "$out" != *"Resetting"* ]] && return 0
+    && [[ "$out" != *"Reset stale"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -2886,7 +2879,7 @@ STUB
   trash "$stubs" 2>/dev/null || true
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
-  [[ "$before" == "$after" ]] && [[ "$out" != *"Resetting"* ]] \
+  [[ "$before" == "$after" ]] && [[ "$out" != *"Reset stale"* ]] \
     && [[ "$out" == *"fatal: bad object deadbeef"* ]] && [[ "$out" == *"Merge conflict"* ]] \
     && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
@@ -2900,7 +2893,7 @@ test_2795_stale_branch_that_merges_cleanly_is_reset() {
   out=$(run_reset_case clean "[]")
   before=$(reset_case_sha "$out" BEFORE_SHA)
   after=$(reset_case_sha "$out" AFTER_SHA)
-  [[ "$before" != "$after" ]] && [[ "$out" == *"Resetting stale"* ]] && return 0
+  [[ "$before" != "$after" ]] && [[ "$out" == *"Reset stale"* ]] && return 0
   printf '  out: %s\n' "${out//$'\n'/ | }" >&2
   return 1
 }
@@ -3165,7 +3158,7 @@ run_test "Issue #2504: a stale branch with a human commit is not reset" \
   test_2504_stale_branch_with_a_human_commit_is_not_reset
 run_test "Issue #2504: a cascade commit amended by a person is not reset" \
   test_2504_stale_branch_amended_by_a_person_is_not_reset
-run_test "Issue #2504: an unreadable branch history halts and names the git error" \
+run_test "Issue #2504: an unreadable branch history keeps the branch and names the git error" \
   test_2504_unreadable_branch_history_halts_and_names_the_error
 run_test "Issue #2795: a stale branch that merges cleanly is reset" \
   test_2795_stale_branch_that_merges_cleanly_is_reset
@@ -3211,14 +3204,16 @@ test_2796_failed_auto_merge_warns_and_keeps_the_cascade_running() {
   local dir out rc=0
   dir=$(mktemp -d)
   make_gh_stub "$dir"
-  out=$(env -i PATH="$dir:$PATH" GH_LOG="$dir/log" GH_STUB_RC=1 bash -c \
+  out=$(env -i PATH="$dir:$PATH" GH_LOG="$dir/log" GH_STUB_RC=1 GITHUB_STEP_SUMMARY="$dir/summary" bash -c \
     "$(workflow_function enable_auto_merge)
 enable_auto_merge forward-merge/release/3.x-to-main" 2>&1) || rc=$?
-  local logged
+  local logged summary
   logged=$(<"$dir/log")
+  summary=$(<"$dir/summary")
   rm -rf "$dir"
   [[ "$rc" -eq 0 && "$out" == *"::warning::"* && "$out" == *"auto-merge is disabled"* ]] \
-    && [[ "$logged" == *"pr comment forward-merge/release/3.x-to-main"* ]]
+    && [[ "$logged" == *"pr comment forward-merge/release/3.x-to-main"* ]] \
+    && [[ "$summary" == *"Auto-merge refused for forward-merge/release/3.x-to-main"* ]]
 }
 
 test_2796_pr_opened_exits_zero_and_writes_the_summary() {
@@ -3272,16 +3267,18 @@ test_2796_app_mode_with_a_token_passes() {
 }
 
 test_2796_unset_step_summary_fails_loudly() {
-  local rc=0
-  env -i PATH="$PATH" HELD="PR opened for release/4.x" bash -c "set -euo pipefail
+  local rc=0 err
+  err=$(env -i PATH="$PATH" HELD="PR opened for release/4.x" bash -c "set -euo pipefail
 $(workflow_function finish_cascade)
-finish_cascade" >/dev/null 2>&1 || rc=$?
-  [[ "$rc" -ne 0 ]]
+finish_cascade" 2>&1 >/dev/null) || rc=$?
+  [[ "$rc" -ne 0 && "$err" == *"GITHUB_STEP_SUMMARY is unset"* ]]
 }
 
 # shellcheck disable=SC2016 # literal workflow text, not an expression to expand
 test_2796_app_token_stays_out_of_checkout_and_step_env() {
-  ! grep -Fq 'token: ${{ steps.app.outputs.token' "$WORKFLOW" \
+  [[ -r "$WORKFLOW" ]] \
+    && grep -Fq 'APP_TOKEN: ${{ steps.app.outputs.token }}' "$WORKFLOW" \
+    && ! grep -Fq 'token: ${{ steps.app.outputs.token' "$WORKFLOW" \
     && ! grep -Fq 'GH_TOKEN: ${{ steps.app.outputs.token' "$WORKFLOW"
 }
 
@@ -3295,6 +3292,130 @@ run_test "Issue #2796: an unset step summary fails loudly" \
   test_2796_unset_step_summary_fails_loudly
 run_test "Issue #2796: the App token stays out of checkout and GH_TOKEN" \
   test_2796_app_token_stays_out_of_checkout_and_step_env
+
+test_2798_missing_workflow_function_fails_loudly() {
+  local out rc=0
+  out=$(workflow_function no_such_helper_2798 2>&1) || rc=$?
+  [[ "$rc" -ne 0 && "$out" == *"no_such_helper_2798() not found"* ]]
+}
+
+# #1564: a reply that jq cannot parse is a failed listing, not "no run waited".
+test_2803_approve_reports_an_unparsable_run_list() {
+  local dir out
+  dir=$(mktemp -d)
+  printf '#!/usr/bin/env bash\necho "this is not json"\n' > "$dir/gh"
+  chmod +x "$dir/gh"
+  out=$(env -i PATH="$dir:$PATH" GITHUB_REPOSITORY=o/r bash -c "sleep() { :; }
+$(workflow_function approve_pending_runs)
+approve_pending_runs 0123456789abcdef0123456789abcdef01234567 forward-merge/x" 2>&1)
+  trash "$dir" 2>/dev/null || true
+  [[ "$out" == *"::warning::could not list runs"* && "$out" != *"No run for"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# A reset must name what it drops, so a failed listing halts before the reset.
+test_2803_failed_drop_listing_halts_before_the_reset() {
+  local stubs out before after
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == log && "\$*" == *"--format=- %h %s"* ]]; then
+  echo "fatal: listing broke" >&2
+  exit 128
+fi
+exec "$(command -v git)" "\$@"
+STUB
+  chmod +x "$stubs/git"
+  out=$(RESET_CASE_PATH_PREFIX="$stubs" run_reset_case bot-conflict "[]")
+  trash "$stubs" 2>/dev/null || true
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ -n "$before" && "$before" == "$after" ]] \
+    && [[ "$out" == *"::error::Cannot list the commits a reset of forward-merge/rel-to-target would drop"* ]] \
+    && [[ "$out" != *"Reset stale"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# Generated cases: branch_is_cascade_only is true exactly when every
+# author/committer pair is the cascade pair. Fixed seed, so a failure repeats.
+test_2803_cascade_only_matches_the_author_rule() {
+  local bot='41898282+github-actions[bot]@users.noreply.github.com' human='p@example.com'
+  local fn i n k log expect pair rc
+  fn=$(workflow_function branch_is_cascade_only) || return 1
+  RANDOM=2803
+  for ((i = 0; i < 60; i++)); do
+    n=$((RANDOM % 5))
+    log=""
+    expect=0
+    for ((k = 0; k < n; k++)); do
+      case $((RANDOM % 4)) in
+        0) pair="$bot $bot" ;;
+        1) pair="$human $bot"; expect=1 ;;
+        2) pair="$bot $human"; expect=1 ;;
+        *) pair="$human $human"; expect=1 ;;
+      esac
+      log+="$pair"$'\n'
+    done
+    rc=0
+    FAKE_LOG="$log" bash -c "git() { printf '%s' \"\$FAKE_LOG\"; }
+$fn
+branch_is_cascade_only" >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -ne "$expect" ]]; then
+      printf '  case %d: expected %d, got %d for:\n%s' "$i" "$expect" "$rc" "$log" >&2
+      return 1
+    fi
+  done
+}
+
+# #2280: only exit 1 from merge-base means "not an ancestor"; any other code halts.
+test_2803_ancestry_check_failure_halts_the_update() {
+  local out
+  out=$(run_stale_arm 128)
+  [[ "$out" == *"::error::git merge-base failed for forward-merge/release/3.x-to-release/4.x (exit 128)"* ]] \
+    && [[ "$out" == *"HALTED=ancestry check failed for forward-merge/release/3.x-to-release/4.x"* ]] \
+    && [[ "$out" != *"PUSHED:"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+# A failed reset checkout halts and leaves the remote branch as it was.
+test_2803_failed_reset_checkout_halts() {
+  local stubs out before after
+  stubs=$(mktemp -d)
+  cat > "$stubs/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == checkout && "\$2" == -B && "\$4" != origin/* ]]; then
+  echo "error: checkout broke" >&2
+  exit 1
+fi
+exec "$(command -v git)" "\$@"
+STUB
+  chmod +x "$stubs/git"
+  out=$(RESET_CASE_PATH_PREFIX="$stubs" run_reset_case bot-conflict "[]")
+  trash "$stubs" 2>/dev/null || true
+  before=$(reset_case_sha "$out" BEFORE_SHA)
+  after=$(reset_case_sha "$out" AFTER_SHA)
+  [[ -n "$before" && "$before" == "$after" ]] \
+    && [[ "$out" == *"::error::Failed to reset forward-merge/rel-to-target to the fresh merge"* ]] \
+    && [[ "$out" != *"Reset stale"* ]] && return 0
+  printf '  out: %s\n' "${out//$'\n'/ | }" >&2
+  return 1
+}
+
+run_test "Issue #2803: an ancestry check failure halts the update" \
+  test_2803_ancestry_check_failure_halts_the_update
+run_test "Issue #2803: a failed reset checkout halts" \
+  test_2803_failed_reset_checkout_halts
+run_test "Issue #2798: a missing workflow function fails loudly" \
+  test_2798_missing_workflow_function_fails_loudly
+run_test "Issue #2803: approve reports an unparsable run list" \
+  test_2803_approve_reports_an_unparsable_run_list
+run_test "Issue #2803: a failed drop listing halts before the reset" \
+  test_2803_failed_drop_listing_halts_before_the_reset
+run_test "Issue #2803: cascade-only matches the author rule on generated cases" \
+  test_2803_cascade_only_matches_the_author_rule
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
