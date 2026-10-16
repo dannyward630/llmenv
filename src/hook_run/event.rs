@@ -123,3 +123,42 @@ impl std::fmt::Display for HookEvent {
         f.write_str(s)
     }
 }
+
+impl HookEvent {
+    /// The engine's native name for this event, or `None` when the engine has no name for it.
+    ///
+    /// The match has no catch-all arm, so a new event fails to compile until it is named here.
+    /// `turn_start` fires on each prompt, so the engine calls it `UserPromptSubmit`.
+    pub(crate) fn engine_name(self) -> Option<&'static str> {
+        match self {
+            HookEvent::SessionStart => Some("SessionStart"),
+            HookEvent::SessionEnd => Some("SessionEnd"),
+            HookEvent::TurnStart | HookEvent::UserPromptSubmit => Some("UserPromptSubmit"),
+            HookEvent::PreToolUse => Some("PreToolUse"),
+            HookEvent::PostToolUse => Some("PostToolUse"),
+            HookEvent::PostToolUseFailure => Some("PostToolUseFailure"),
+            HookEvent::Notification => Some("Notification"),
+            HookEvent::Stop => Some("Stop"),
+            HookEvent::SubagentStart => Some("SubagentStart"),
+            HookEvent::SubagentStop => Some("SubagentStop"),
+            HookEvent::PreCompact => Some("PreCompact"),
+            HookEvent::PostModelSwitch => Some("PostModelSwitch"),
+            HookEvent::PostSession | HookEvent::PostToolBatch | HookEvent::SubagentTask => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HookEvent;
+
+    #[test]
+    fn turn_start_maps_to_the_engine_prompt_submit_name() {
+        assert_eq!(HookEvent::TurnStart.engine_name(), Some("UserPromptSubmit"));
+    }
+
+    #[test]
+    fn events_without_a_native_name_return_none() {
+        assert_eq!(HookEvent::PostSession.engine_name(), None);
+    }
+}

@@ -15,11 +15,12 @@ pub(crate) mod checkpoint;
 pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
-mod engine_event;
 mod event;
+mod notice;
 #[cfg(test)]
 pub(crate) use event::HOOK_EVENT_NAMES;
 pub(crate) use event::HookEvent;
+use notice::{log_notice_without_channel, write_notice_only};
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
 pub(crate) mod mcp_client;
@@ -594,7 +595,11 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         .as_ref()
         .and_then(|v| v["hook_event_name"].as_str())
         .filter(|name| !name.is_empty())
-        .or_else(|| engine_event::engine_event_name(event))
+        .or_else(|| {
+            HookEvent::from_str(event)
+                .ok()
+                .and_then(HookEvent::engine_name)
+        })
         .unwrap_or_default();
     let claude_session_id: Option<&str> =
         stdin_json.as_ref().and_then(|v| v["session_id"].as_str());
@@ -704,7 +709,8 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             } else {
                 let notes = join_notes(notice.as_deref(), &text.notes);
                 let out = adapter.emit_hook_context(hook_event_name, &text.memory, &notes);
-                log_notice_without_channel(&out, notice.as_deref(), event);
+                // The omission notice rides in `notes`, so the log must see the joined text (#2764).
+                log_notice_without_channel(&out, Some(notes.as_str()), event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -719,32 +725,6 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
         }
     }
     Ok(HookExit::Success)
-}
-
-/// Write a notice with no memory text to stdout, where the engine reads hook context (#2658).
-fn write_notice_only(
-    adapter: &dyn crate::adapter::AgentAdapter,
-    hook_event_name: &str,
-    event: &str,
-    notice: &str,
-) {
-    let out = adapter.emit_hook_context(hook_event_name, "", notice);
-    log_notice_without_channel(&out, Some(notice), event);
-    if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
-        eprintln!("llmenv: failed to write hook output: {e}");
-    }
-}
-
-/// An engine that takes no hook context, such as the SessionEnd path, gets empty output, so a
-/// notice in it reaches no one. The error log is the only place left for it (#2736).
-fn log_notice_without_channel(out: &str, notice: Option<&str>, event: &str) {
-    if let Some(notice) = notice
-        && out.is_empty()
-    {
-        tracing::error!(
-            "hook-run {event} has no channel to the agent, so the notice is logged only: {notice}"
-        );
-    }
 }
 
 /// Resolve config, find the memory URL, run the event's actions, and return the
