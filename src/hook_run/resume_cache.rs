@@ -64,7 +64,9 @@ fn field<T>(payload: &Value, key: &str, read: fn(&Value) -> Option<T>) -> Option
     let value = payload.get(key)?;
     let parsed = read(value);
     if parsed.is_none() {
-        tracing::debug!(
+        // Visible at the default level: a changed engine field type would otherwise end the
+        // notice for good with no trace.
+        tracing::warn!(
             field = key,
             "SessionStart field has the wrong type; treated as absent"
         );
@@ -88,8 +90,15 @@ fn attach_system_message(out: &str, message: &str) -> String {
     } else {
         match serde_json::from_str::<Value>(out) {
             Ok(Value::Object(object)) => object,
-            _ => {
+            Ok(_) => {
                 tracing::error!("hook output is not a JSON object; the cache notice is not shown");
+                return out.to_string();
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "hook output is not JSON; the cache notice is not shown"
+                );
                 return out.to_string();
             }
         }
@@ -116,6 +125,7 @@ pub(crate) fn with_resume_notice(out: String, hook_event_name: &str, payload: &V
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::{Value, json};
 
     use super::{ResumeCache, attach_system_message, with_resume_notice};
@@ -271,5 +281,63 @@ mod tests {
     #[test]
     fn a_non_object_output_is_returned_unchanged() {
         assert_eq!(attach_system_message("[1,2]", "note"), "[1,2]");
+    }
+
+    #[test]
+    fn a_non_json_output_is_returned_unchanged() {
+        assert_eq!(attach_system_message("not json", "note"), "not json");
+    }
+
+    proptest::proptest! {
+        /// Any payload value never panics the parser, and a field of the wrong type is absent.
+        #[test]
+        fn a_wrong_type_never_fills_a_field(
+            number in any::<u64>(),
+            text in "[a-z0-9]{0,8}",
+            flag in any::<bool>(),
+        ) {
+            let payload = json!({
+                "seconds_since_last_response": text,
+                "context_tokens": number,
+                "prompt_cache_likely_expired": flag,
+                "estimated_cache_write_usd": text,
+            });
+
+            let cache = ResumeCache::from_payload(&payload);
+
+            prop_assert_eq!(cache.seconds_since_last_response, None);
+            prop_assert_eq!(cache.context_tokens, Some(number));
+            prop_assert_eq!(cache.prompt_cache_likely_expired, Some(flag));
+            prop_assert_eq!(cache.estimated_cache_write_usd, None);
+        }
+
+        /// A cost below zero is never read, however large its magnitude.
+        #[test]
+        fn a_negative_cost_is_never_read(cost in -1.0e12f64..-1.0e-9) {
+            let payload = json!({"estimated_cache_write_usd": cost});
+
+            prop_assert_eq!(
+                ResumeCache::from_payload(&payload).estimated_cache_write_usd,
+                None
+            );
+        }
+
+        /// The message lands at `systemMessage`, and every existing key survives.
+        #[test]
+        fn attaching_keeps_existing_keys_and_sets_the_message(
+            key in "[a-z]{1,8}",
+            value in any::<i64>(),
+            message in "[ -~]{0,40}",
+        ) {
+            let mut object = serde_json::Map::new();
+            object.insert(key.clone(), json!(value));
+            let out = Value::Object(object).to_string();
+
+            let attached = attach_system_message(&out, &message);
+            let parsed: Value = serde_json::from_str(&attached).unwrap();
+
+            prop_assert_eq!(&parsed["systemMessage"], &Value::String(message));
+            prop_assert_eq!(&parsed[&key], &json!(value));
+        }
     }
 }
