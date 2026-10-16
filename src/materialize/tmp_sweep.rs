@@ -5,7 +5,6 @@
 //! than the retention, and no process holds a path inside it open.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
@@ -13,6 +12,7 @@ use anyhow::Context;
 use crate::materialize::cache::{
     GcReport, gc_remove_dir, gc_remove_link, is_expired, newest_mtime,
 };
+use crate::materialize::open_files::open_paths;
 
 /// Remove the entries of `tmp_root` that are older than `older_than` and not in use.
 ///
@@ -49,30 +49,78 @@ pub fn sweep(
                 continue;
             }
         };
-        // Claude Code keeps its per-user TMPDIR root here. Its mtime does not show use, so an age
-        // sweep would delete the root of a live shell (#1379).
+        // The per-user TMPDIR root is not judged by its own mtime, because that does not show use
+        // (#1379). Its entries are judged one by one instead.
         if is_dir && is_claude_root(&name) {
-            report.kept += 1;
+            sweep_claude_root(&path, older_than, in_use, now, &mut report);
             continue;
         }
-        let modified = match entry_mtime(&path, is_dir) {
-            Ok(modified) => modified,
+        judge_entry(&path, is_dir, older_than, now, &mut report);
+    }
+    Ok(report)
+}
+
+/// Remove the entries one level down inside Claude Code's `claude-<uid>` root that are older
+/// than `older_than` and not in use. The root itself is never removed.
+fn sweep_claude_root(
+    claude_root: &Path,
+    older_than: Duration,
+    in_use: &[PathBuf],
+    now: SystemTime,
+    report: &mut GcReport,
+) {
+    let entries = match crate::paths::read_dir_optional(claude_root) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => return,
+        Err(e) => {
+            record_failure(claude_root, &e, report);
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
             Err(e) => {
-                record_failure(&path, &e, &mut report);
+                record_failure(claude_root, &e, report);
                 continue;
             }
         };
-        // A future mtime means the clock moved. Keep the entry, because a removal on a bad
-        // clock is not reversible.
-        if modified > now || !is_expired(now, modified, older_than) {
+        let path = claude_root.join(entry.file_name());
+        if in_use.iter().any(|used| used.starts_with(&path)) {
             report.kept += 1;
-        } else if is_dir {
-            gc_remove_dir(&path, &mut report);
-        } else {
-            gc_remove_link(&path, &mut report);
+            continue;
+        }
+        match entry.file_type() {
+            Ok(file_type) => judge_entry(&path, file_type.is_dir(), older_than, now, report),
+            Err(e) => record_failure(&path, &e, report),
         }
     }
-    Ok(report)
+}
+
+/// Remove one entry when its newest mtime is older than `older_than`. Keep it otherwise.
+fn judge_entry(
+    path: &Path,
+    is_dir: bool,
+    older_than: Duration,
+    now: SystemTime,
+    report: &mut GcReport,
+) {
+    let modified = match entry_mtime(path, is_dir) {
+        Ok(modified) => modified,
+        Err(e) => {
+            record_failure(path, &e, report);
+            return;
+        }
+    };
+    // A future mtime means the clock moved. Keep the entry, because a removal on a bad
+    // clock is not reversible.
+    if modified > now || !is_expired(now, modified, older_than) {
+        report.kept += 1;
+    } else if is_dir {
+        gc_remove_dir(path, report);
+    } else {
+        gc_remove_link(path, report);
+    }
 }
 
 /// The newest mtime of an entry. A symlink is judged by its own mtime and never followed.
@@ -111,70 +159,6 @@ pub fn sweep_state_tmp(state_dir: &Path, older_than: Duration) -> anyhow::Result
     sweep(&state_dir.join("tmp"), older_than, &in_use)
 }
 
-/// Paths that a process holds open or uses as its working directory.
-///
-/// # Errors
-/// Fails when `lsof` cannot run or does not exit 0. A sweep without a complete list could
-/// remove an entry that a live process uses, so the sweep stops instead.
-#[cfg(unix)]
-pub fn open_paths() -> anyhow::Result<Vec<PathBuf>> {
-    lsof_paths("lsof")
-}
-
-/// The sweep needs lsof to find the entries in use, and lsof is a unix tool.
-///
-/// # Errors
-/// Always fails, because the in-use list cannot be built on this platform.
-#[cfg(not(unix))]
-pub fn open_paths() -> anyhow::Result<Vec<PathBuf>> {
-    anyhow::bail!("the state/tmp sweep needs lsof, which runs on unix only; the sweep stopped")
-}
-
-/// Run `program -F n` and read the paths it names. `program` is a parameter so a test can
-/// name a binary that fails.
-#[cfg(unix)]
-fn lsof_paths(program: &str) -> anyhow::Result<Vec<PathBuf>> {
-    let output = Command::new(program)
-        .args(["-F", "n"])
-        .output()
-        .with_context(|| {
-            format!(
-                "running `{program}` to find entries in use; the state/tmp sweep stopped. \
-                 Fix: install lsof, then run `llmenv doctor --gc` again"
-            )
-        })?;
-    // lsof exits 1 on any error, and its list is then incomplete. Only exit 0 counts.
-    if output.status.code() != Some(0) {
-        anyhow::bail!(
-            "`{program}` exited with {}; the state/tmp sweep stopped. Fix: check that `{program}` runs",
-            output.status
-        );
-    }
-    // lsof reports partial results on stderr, for example for a mount it cannot stat. Those
-    // results are routine on some hosts, so they are logged, not fatal.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
-        tracing::warn!(
-            stderr = %stderr.trim(),
-            "lsof reported a problem; the in-use list may be incomplete"
-        );
-    }
-    Ok(parse_lsof_names(&output.stdout))
-}
-
-/// The name fields of `lsof -F n` output that are absolute paths. Socket and pipe names do not
-/// start with `/`, so they drop out. Names are kept as bytes, so a non-UTF-8 name still matches.
-#[cfg(unix)]
-fn parse_lsof_names(output: &[u8]) -> Vec<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
-    output
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| line.strip_prefix(b"n"))
-        .filter(|name| name.starts_with(b"/"))
-        .map(|name| PathBuf::from(std::ffi::OsStr::from_bytes(name)))
-        .collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -183,9 +167,6 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::sweep;
-
-    #[cfg(unix)]
-    use super::{lsof_paths, parse_lsof_names};
 
     const DAY: Duration = Duration::from_secs(86_400);
 
@@ -201,68 +182,6 @@ mod tests {
 
     fn old() -> SystemTime {
         SystemTime::now() - 30 * DAY
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_keeps_only_the_absolute_path_names() {
-        let out = b"p123\nfcwd\nn/work/a\nnTCP *:8080\np9\nn/work/b (deleted)\n";
-        let paths = parse_lsof_names(out);
-        assert_eq!(
-            paths,
-            vec![
-                std::path::PathBuf::from("/work/a"),
-                std::path::PathBuf::from("/work/b (deleted)"),
-            ]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_keeps_a_non_utf8_name_byte_for_byte() {
-        use std::os::unix::ffi::OsStrExt;
-        let paths = parse_lsof_names(b"n/tmp/\xff\n");
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_os_str().as_bytes(), b"/tmp/\xff");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_yields_one_path_per_absolute_name_line() {
-        use proptest::prelude::*;
-        proptest!(|(lines in proptest::collection::vec("[pfn/ a-z]{0,10}", 0..12))| {
-            let text = lines.join("\n");
-            let expected: Vec<String> = lines
-                .iter()
-                .filter(|line| line.starts_with("n/"))
-                .map(|line| line[1..].to_owned())
-                .collect();
-            let got: Vec<String> = parse_lsof_names(text.as_bytes())
-                .into_iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect();
-            prop_assert_eq!(got, expected);
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_missing_lsof_is_an_error_that_names_the_fix() {
-        let err = lsof_paths("llmenv-no-such-lsof-binary").unwrap_err();
-        let text = format!("{err:#}");
-        assert!(text.contains("Fix:"), "no fix named: {text}");
-        assert!(
-            text.contains("state/tmp sweep stopped"),
-            "no effect named: {text}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_lsof_exit_other_than_zero_is_an_error_even_with_empty_output() {
-        // `false` exits 1 and prints nothing. An exit 1 is a failure, not an empty list.
-        let err = lsof_paths("false").unwrap_err();
-        assert!(format!("{err:#}").contains("exited with"), "{err:#}");
     }
 
     #[test]
@@ -342,6 +261,71 @@ mod tests {
 
         assert!(report.removed.is_empty());
         assert!(claude.exists(), "the per-user TMPDIR root was removed");
+    }
+
+    #[test]
+    fn an_old_entry_inside_a_claude_code_root_is_removed_and_a_fresh_one_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude-501");
+        fs::create_dir(&claude).unwrap();
+        let old_child = claude.join("shell-old");
+        fs::create_dir(&old_child).unwrap();
+        fs::write(old_child.join("snapshot"), b"s").unwrap();
+        age_tree(&old_child, old());
+        let fresh_child = claude.join("shell-fresh");
+        fs::create_dir(&fresh_child).unwrap();
+
+        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+
+        assert_eq!(report.removed.len(), 1, "removed: {:?}", report.removed);
+        assert!(
+            !old_child.exists(),
+            "the old entry inside the root survived"
+        );
+        assert!(
+            fresh_child.exists(),
+            "a fresh entry inside the root was removed"
+        );
+        assert!(claude.exists(), "the per-user TMPDIR root was removed");
+    }
+
+    #[test]
+    fn an_old_entry_inside_a_claude_code_root_with_a_path_in_use_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude-501");
+        fs::create_dir(&claude).unwrap();
+        let busy = claude.join("shell-busy");
+        fs::create_dir(&busy).unwrap();
+        let cwd_file = busy.join("cwd.txt");
+        fs::write(&cwd_file, b"c").unwrap();
+        age_tree(&busy, old());
+
+        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&cwd_file)).unwrap();
+
+        assert!(
+            report.removed.is_empty(),
+            "removed a busy entry: {:?}",
+            report.removed
+        );
+        assert!(cwd_file.exists());
+    }
+
+    #[test]
+    fn an_entry_with_a_future_mtime_inside_a_claude_code_root_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude-501");
+        fs::create_dir(&claude).unwrap();
+        let future = claude.join("future.txt");
+        fs::write(&future, b"f").unwrap();
+        File::open(&future)
+            .unwrap()
+            .set_modified(SystemTime::now() + DAY)
+            .unwrap();
+
+        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+
+        assert!(report.removed.is_empty());
+        assert!(future.exists());
     }
 
     #[test]
