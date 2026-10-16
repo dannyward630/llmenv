@@ -129,7 +129,7 @@ impl HookEvent {
     ///
     /// The match has no catch-all arm, so a new event fails to compile until it is named here.
     /// `turn_start` fires on each prompt, so the engine calls it `UserPromptSubmit`.
-    pub(crate) fn engine_name(self) -> Option<&'static str> {
+    fn engine_name(self) -> Option<&'static str> {
         match self {
             HookEvent::SessionStart => Some("SessionStart"),
             HookEvent::SessionEnd => Some("SessionEnd"),
