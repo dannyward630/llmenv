@@ -14,7 +14,8 @@ const MAX_NOTICE_CHARS: usize = 1000;
 const FIX_MARKER: &str = "Fix:";
 
 /// One line, free of control and bidirectional characters, and at most [`MAX_NOTICE_CHARS`].
-/// When the text is too long, the cause is cut and the `Fix:` part is kept whole.
+/// When the text is too long, the cause is cut, and a `…` marks the cut. The `Fix:` part is kept
+/// whole. The last `Fix:` marks the fix, so a cause that repeats the marker does not move it.
 fn clean(text: &str) -> String {
     let spaced = text.replace(['\n', '\r'], " ");
     let plain = crate::util::strip_unsafe_chars(&spaced);
@@ -22,13 +23,21 @@ fn clean(text: &str) -> String {
         return plain;
     }
     match plain.rfind(FIX_MARKER) {
-        Some(at) if plain[at..].chars().count() < MAX_NOTICE_CHARS => {
+        // Room for the fix, one separating space, and at least the marker and one cause character.
+        Some(at) if plain[at..].chars().count() + 2 <= MAX_NOTICE_CHARS => {
             let fix = &plain[at..];
+            let cause = plain[..at].trim_end();
             let budget = MAX_NOTICE_CHARS - fix.chars().count() - 1;
-            let cause: String = plain[..at].trim_end().chars().take(budget).collect();
-            format!("{} {fix}", cause.trim_end())
+            if cause.chars().count() <= budget {
+                return format!("{cause} {fix}");
+            }
+            let kept: String = cause.chars().take(budget - 1).collect();
+            format!("{}… {fix}", kept.trim_end())
         }
-        _ => plain.chars().take(MAX_NOTICE_CHARS).collect(),
+        _ => {
+            let kept: String = plain.chars().take(MAX_NOTICE_CHARS - 1).collect();
+            format!("{kept}…")
+        }
     }
 }
 
@@ -85,7 +94,7 @@ pub(crate) fn current() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NoticeList, current, record};
+    use super::{NoticeList, clean, current, record};
     use proptest::prelude::*;
 
     #[test]
@@ -142,6 +151,16 @@ mod tests {
         let text = list.current().unwrap_or_default();
         assert_eq!(text.chars().count(), 1000);
         assert!(text.starts_with("cause. Fix: f"));
+    }
+
+    #[test]
+    fn a_capped_notice_stays_in_the_cap_and_keeps_its_fix_line() {
+        const FIX: &str = "Fix: run `llmenv doctor` to check the state directory.";
+        proptest!(|(cause in "(?s).{0,2500}")| {
+            let text = clean(&format!("llmenv: a step failed: {cause}. {FIX}"));
+            prop_assert!(text.chars().count() <= 1000, "over the cap: {}", text.chars().count());
+            prop_assert!(text.ends_with(FIX), "fix line lost: {text}");
+        });
     }
 
     #[test]
