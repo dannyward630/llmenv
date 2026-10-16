@@ -20,3 +20,7 @@ future design docs and err on the side of too much detail.
   compaction and forgetting posts, salience and subliminal-learning papers) against
   llmenv: technique inventory, gaps found, fit per goal, and an ordered recommendation
   (#2377).
+- [opencode-v2-parity.md](./opencode-v2-parity.md) — gaps between the Claude Code
+  engine and the opencode engine under opencode v2.0.31: the plugin API rewrite,
+  config schema changes, hook-run tool-name mismatches, and the work to reach
+  parity.
