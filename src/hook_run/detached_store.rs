@@ -46,8 +46,11 @@ fn run_icm_store_with(
 ) -> anyhow::Result<()> {
     // The parent can fail to pipe all of the payload, so the checkpoint backs it up.
     let parsed = checkpoint::inputs_or_checkpoint::<serde_json::Value>(payload_json, checkpoint);
-    let unparseable = parsed.is_err();
-    let result = parsed.and_then(store);
+    // A checkpoint that could not be read may succeed on a retry, so its file stays (#2779).
+    let unparseable = parsed.as_ref().err().is_some_and(|e| !e.keep_checkpoint);
+    let result = parsed
+        .map_err(checkpoint::InputsError::into_error)
+        .and_then(store);
     match &result {
         // A payload that does not parse cannot succeed on a retry, so its checkpoint goes too.
         Ok(()) => checkpoint::finish(checkpoint),

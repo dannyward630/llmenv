@@ -396,7 +396,7 @@ pub(crate) fn begin(
 }
 
 mod inputs;
-pub(crate) use inputs::inputs_or_checkpoint;
+pub(crate) use inputs::{InputsError, inputs_or_checkpoint};
 
 /// Delete the checkpoint of a job that finished, or that cannot succeed on a retry. A job that
 /// failed in a way a later run may fix leaves its file. Fail-soft.
