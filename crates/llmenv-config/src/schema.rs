@@ -1978,6 +1978,17 @@ pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    proptest::proptest! {
+        #[test]
+        fn gc_retention_is_hours_in_seconds_and_monotone(h1 in proptest::num::u64::ANY, h2 in proptest::num::u64::ANY) {
+            let at = |hours| Cache { cache_retention_hours: Some(hours), ..Cache::default() }.gc_retention();
+            proptest::prop_assert_eq!(at(h1).map(|d| d.as_secs()), Some(h1.saturating_mul(3600)));
+            if h1 <= h2 {
+                proptest::prop_assert!(at(h1) <= at(h2));
+            }
+        }
+    }
+
     #[test]
     fn gc_retention_is_off_only_for_an_explicit_null() {
         let explicit_null: Cache = serde_yaml::from_str("cache_retention_hours: null").unwrap();
