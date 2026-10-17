@@ -31,6 +31,19 @@ pub(super) fn log_notice_without_channel(out: &str, notice: Option<&str>, event:
     }
 }
 
+/// An engine that takes no context for this event, such as Crush on `SessionStart`, gets empty
+/// output, so the recalled memories reach no one. The error log records how much was dropped,
+/// because the agent cannot be told (#2770).
+pub(super) fn log_memory_without_channel(out: &str, memory: &str, event: &str) {
+    if out.is_empty() && !memory.trim().is_empty() {
+        tracing::error!(
+            "hook-run {event} has no channel to the agent, so {} bytes of recalled memory were \
+             dropped",
+            memory.len()
+        );
+    }
+}
+
 /// The notice for a session whose ICM transcript could not start. The map cannot save the
 /// link, so the transcript is not started (#2658).
 pub(super) fn transcript_unlinked_notice(error: &anyhow::Error) -> String {

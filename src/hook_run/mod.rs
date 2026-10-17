@@ -21,7 +21,9 @@ mod notice;
 pub(crate) use event::HOOK_EVENT_NAMES;
 pub(crate) use event::HookEvent;
 use event::engine_event_for;
-use notice::{log_notice_without_channel, write_hook_line, write_notice_only};
+use notice::{
+    log_memory_without_channel, log_notice_without_channel, write_hook_line, write_notice_only,
+};
 use transcript_link::ensure_transcript_session;
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
@@ -713,6 +715,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                 let out = resume_cache::with_resume_notice(out, &hook_event_name, payload);
                 // The omission notice rides in `notes`, so the log must see the joined text (#2764).
                 log_notice_without_channel(&out, Some(notes.as_str()), event);
+                log_memory_without_channel(&out, &text.memory, event);
                 if let Some(e) = write_hook_line(&mut std::io::stdout(), &out) {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
@@ -3629,6 +3632,22 @@ mod tests {
         });
         assert!(logs.contains("ERROR"), "{logs}");
         assert!(logs.contains("the session map is locked"), "{logs}");
+    }
+
+    #[test]
+    fn memory_with_no_channel_is_logged_and_memory_with_one_is_not() {
+        let dropped = crate::test_log_capture::capture_logs(|| {
+            log_memory_without_channel("", "project memory text", "session_start");
+        });
+        assert!(
+            dropped.contains("ERROR") && dropped.contains("19 bytes"),
+            "{dropped}"
+        );
+        let delivered = crate::test_log_capture::capture_logs(|| {
+            log_memory_without_channel("{}", "project memory text", "session_start");
+            log_memory_without_channel("", "  ", "session_start");
+        });
+        assert!(delivered.is_empty(), "{delivered}");
     }
 
     #[test]
