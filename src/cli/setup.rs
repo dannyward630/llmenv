@@ -300,12 +300,18 @@ fn engine_handoff_prompt(
 
 /// Probe PATH for supported engines.
 /// Returns adapter IDs of engines found (e.g. "claude_code", "crush").
-fn probe_engines() -> Vec<String> {
-    crate::adapter::registered_adapters()
-        .iter()
-        .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
-        .map(|a| crate::adapter::engine_id(a.as_ref()))
-        .collect()
+///
+/// # Errors
+/// The PATH check cannot run. Setup would otherwise disable every engine it could not check
+/// (#2753).
+fn probe_engines() -> anyhow::Result<Vec<String>> {
+    let mut found = Vec::new();
+    for adapter in crate::adapter::registered_adapters() {
+        if crate::adapter::binary_on_path(adapter.binary_name())? {
+            found.push(crate::adapter::engine_id(adapter.as_ref()));
+        }
+    }
+    Ok(found)
 }
 
 /// Compute which engines should be disabled given which are available.
@@ -554,7 +560,7 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
     }
 
     // Probe engines
-    let available = probe_engines();
+    let available = probe_engines()?;
     if available.is_empty() {
         eprintln!(
             "  No supported AI engines found on PATH ({}).",
@@ -661,7 +667,7 @@ pub(super) fn run_setup(
     }
 
     // Probe engines and set up disabled_engines
-    let available = probe_engines();
+    let available = probe_engines()?;
     if available.is_empty() {
         eprintln!(
             "  No supported AI engines found on PATH ({}).",
@@ -867,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_probe_engines_does_not_panic() {
-        let engines = probe_engines();
+        let engines = probe_engines().unwrap();
         let known = crate::adapter::known_engine_ids();
         for e in &engines {
             assert!(known.contains(e), "unexpected engine: {e}");

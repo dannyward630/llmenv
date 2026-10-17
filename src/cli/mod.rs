@@ -1195,7 +1195,10 @@ fn warn_dead_config(
         None => (&config.capabilities, &config.native),
     };
     warn_dead_native_keys(capabilities, native, prefix);
-    let opencode_active = engine_is_active(config, "opencode");
+    let opencode_active = engine_is_active(config, "opencode").unwrap_or_else(|e| {
+        eprintln!("{prefix} cannot check whether opencode is installed, so it is skipped: {e:#}");
+        false
+    });
     for hit in doctor::claude_only_colon_permission_patterns(capabilities, opencode_active) {
         eprintln!("{prefix} {}", hit.message());
     }
@@ -1213,18 +1216,23 @@ fn warn_dead_config(
 /// engine doesn't duplicate that output. Resolves the binary name through the
 /// registry rather than hardcoding it, so an adapter rename can't silently
 /// desynchronize the two.
-fn engine_is_active(config: &Config, engine: &str) -> bool {
+///
+/// # Errors
+/// The PATH check for the engine binary cannot run (#2753).
+fn engine_is_active(config: &Config, engine: &str) -> anyhow::Result<bool> {
     if config
         .disabled_engines
         .iter()
         .any(|e| e.eq_ignore_ascii_case(engine))
     {
-        return false;
+        return Ok(false);
     }
-    crate::adapter::registered_adapters().into_iter().any(|a| {
-        crate::adapter::engine_id(a.as_ref()) == engine
-            && crate::adapter::binary_on_path(a.binary_name())
-    })
+    for adapter in crate::adapter::registered_adapters() {
+        if crate::adapter::engine_id(adapter.as_ref()) == engine {
+            return crate::adapter::binary_on_path(adapter.binary_name());
+        }
+    }
+    Ok(false)
 }
 
 /// Registered adapters whose binary is present on `PATH` and that aren't
@@ -1239,7 +1247,11 @@ fn engine_is_active(config: &Config, engine: &str) -> bool {
 /// isn't run on every export/regenerate/doctor invocation.
 ///
 /// Empty or whitespace-only entries are silently skipped (#566).
-fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdapter>> + '_ {
+///
+/// # Errors
+/// The PATH check for an adapter binary cannot run. A failed check must not read as "not
+/// installed", because the adapter would then be skipped with no word (#2753).
+fn installed_adapters(config: &Config) -> anyhow::Result<Vec<Box<dyn AgentAdapter>>> {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
         if engine.trim().is_empty() {
@@ -1254,33 +1266,38 @@ fn installed_adapters(config: &Config) -> impl Iterator<Item = Box<dyn AgentAdap
             );
         }
     }
-    crate::adapter::registered_adapters()
-        .into_iter()
-        .filter(move |adapter| {
-            let on_path = crate::adapter::binary_on_path(adapter.binary_name());
-            if !on_path {
-                tracing::debug!(
-                    adapter = adapter.name(),
-                    binary = adapter.binary_name(),
-                    "adapter binary not on PATH — skipping"
-                );
-                return false;
-            }
-            let adapter_id = crate::adapter::engine_id(adapter.as_ref());
-            if let Some(matched_entry) = config
-                .disabled_engines
-                .iter()
-                .find(|entry| entry.eq_ignore_ascii_case(&adapter_id))
-            {
-                tracing::info!(
-                    adapter = adapter.name(),
-                    config_entry = matched_entry.as_str(),
-                    "adapter disabled via config.disabled_engines — skipping"
-                );
-                return false;
-            }
-            true
-        })
+    let mut installed = Vec::new();
+    for adapter in crate::adapter::registered_adapters() {
+        let on_path = crate::adapter::binary_on_path(adapter.binary_name()).with_context(|| {
+            format!(
+                "checking whether the {} engine is installed",
+                adapter.name()
+            )
+        })?;
+        if !on_path {
+            tracing::debug!(
+                adapter = adapter.name(),
+                binary = adapter.binary_name(),
+                "adapter binary not on PATH — skipping"
+            );
+            continue;
+        }
+        let adapter_id = crate::adapter::engine_id(adapter.as_ref());
+        if let Some(matched_entry) = config
+            .disabled_engines
+            .iter()
+            .find(|entry| entry.eq_ignore_ascii_case(&adapter_id))
+        {
+            tracing::info!(
+                adapter = adapter.name(),
+                config_entry = matched_entry.as_str(),
+                "adapter disabled via config.disabled_engines — skipping"
+            );
+            continue;
+        }
+        installed.push(adapter);
+    }
+    Ok(installed)
 }
 
 /// What [`ensure_local_memory_proxy`] did.
@@ -1464,7 +1481,7 @@ fn run_export(
 
     let mut failed_adapters: Vec<&str> = Vec::new();
     let mut any_adapter_eligible = false;
-    for adapter in installed_adapters(&config) {
+    for adapter in installed_adapters(&config)? {
         any_adapter_eligible = true;
 
         let result = match &shared_manifest {
@@ -1751,7 +1768,7 @@ fn run_regenerate() -> anyhow::Result<()> {
 
     let mut materialized_any = false;
     let mut failed_adapters: Vec<&str> = Vec::new();
-    for adapter in installed_adapters(&config) {
+    for adapter in installed_adapters(&config)? {
         let result = match &shared_manifest {
             Some((m, cache_root)) => {
                 let mut cloned = m.clone();
@@ -6368,7 +6385,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).count(),
+            installed_adapters(&config).unwrap().len(),
             0,
             "disabling every known engine id must yield no installed adapters"
         );
@@ -6386,7 +6403,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).count(),
+            installed_adapters(&config).unwrap().len(),
             0,
             "disabled_engines with different casing must still disable engines"
         );
@@ -6398,14 +6415,14 @@ mod tests {
         // and must not print confusing "unknown engine" warnings.
         let on_path_count = crate::adapter::registered_adapters()
             .iter()
-            .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
+            .filter(|a| crate::adapter::binary_on_path(a.binary_name()).unwrap())
             .count();
         let config = Config {
             disabled_engines: vec!["".to_string(), "  ".to_string(), "\t".to_string()],
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).count(),
+            installed_adapters(&config).unwrap().len(),
             on_path_count,
             "empty/whitespace disabled_engine entries should not disable adapters"
         );
@@ -6418,7 +6435,7 @@ mod tests {
             disabled_engines: vec!["  ".to_string(), "\t\t".to_string()],
             ..Config::default()
         };
-        let count = installed_adapters(&config).count();
+        let count = installed_adapters(&config).unwrap().len();
         let _ = count;
     }
 
