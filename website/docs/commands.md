@@ -1156,6 +1156,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   `state/codebase-memory` (added in v3.13.0). Since v3.11.1 (#1493) codebase-memory-mcp keeps
   its indexes in its own cache unless `index_path` is set, so those files are left from an
   older setup. A folder that a `features.codebase_memory` `index_path` names is never swept.
+  A database and its `-wal` and `-shm` files go together, judged by the newest of them, and a
+  database that a process holds open is kept.
   Claude Code transcripts under `state/projects` are not swept: Claude Code removes them
   itself after `cleanupPeriodDays` (set it under `native.claude_code`).
 - `--probe-mcp` (added in v3.12.0) also starts the stdio MCP servers, to measure their text for the

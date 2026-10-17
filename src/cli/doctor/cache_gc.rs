@@ -1,7 +1,7 @@
 //! The sweeps behind `llmenv doctor --gc`: the hashed cache, then `state/tmp`, then session-log
 //! rotations (#2814, #2816).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::Config;
@@ -92,7 +92,7 @@ fn sweep_state_tmp(state_dir: &Path, retention: Duration, pass: &str, warn: &str
 }
 
 /// Remove old index databases from `state/codebase-memory`, unless a configured `index_path`
-/// names that folder as the live cache (#2817).
+/// names that folder as the live cache (#2817). A database that a process holds open is kept.
 fn sweep_cbm_indexes(
     state_dir: &Path,
     config: &Config,
@@ -101,14 +101,30 @@ fn sweep_cbm_indexes(
     warn: &str,
 ) {
     let dir = state_dir.join("codebase-memory");
-    if names_live_cache(config, &dir) {
-        eprintln!(
-            "{pass} GC of {} skipped: a features.codebase_memory index_path uses it",
-            dir.display()
-        );
-        return;
+    match cache_use(config, &dir) {
+        CacheUse::Unused => {}
+        CacheUse::Live => {
+            eprintln!(
+                "{pass} GC of {} skipped: a features.codebase_memory index_path uses it",
+                dir.display()
+            );
+            return;
+        }
+        CacheUse::Unknown(cause) => {
+            eprintln!("{warn} GC of {} skipped: {cause}", dir.display());
+            return;
+        }
     }
-    match crate::materialize::cbm_sweep::sweep_legacy_indexes(&dir, retention) {
+    let in_use = match crate::materialize::open_files::open_paths() {
+        Ok(in_use) => in_use,
+        Err(e) => {
+            eprintln!("{warn} GC of old codebase-memory indexes skipped: {e:#}");
+            return;
+        }
+    };
+    // lsof reports resolved paths, so the folder is resolved too before the paths are compared.
+    let resolved = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+    match crate::materialize::cbm_sweep::sweep_legacy_indexes(&resolved, retention, &in_use) {
         Ok(report) => {
             eprintln!(
                 "{pass} GC complete for old codebase-memory indexes: removed {} files, kept {}",
@@ -123,24 +139,34 @@ fn sweep_cbm_indexes(
     }
 }
 
-/// Whether a `features.codebase_memory` entry sets `index_path` to `dir`. A path that cannot be
-/// expanded counts as a match, so a doubt keeps the files.
-fn names_live_cache(config: &Config, dir: &Path) -> bool {
-    let entries = config
+/// Whether a configured `index_path` names the codebase-memory folder.
+#[derive(Debug, PartialEq, Eq)]
+enum CacheUse {
+    Unused,
+    Live,
+    /// An `index_path` cannot be expanded, so the answer is not known.
+    Unknown(String),
+}
+
+fn cache_use(config: &Config, dir: &Path) -> CacheUse {
+    let canonical_dir = std::fs::canonicalize(dir).ok();
+    let raws = config
         .features
-        .as_ref()
-        .map_or(&[][..], |f| &f.codebase_memory[..]);
-    entries
         .iter()
-        .filter_map(|cm| cm.index_path.as_deref())
-        .any(|raw| {
-            paths::expand_tilde(raw).map_or(true, |expanded| {
-                let expanded = Path::new(&expanded);
-                expanded == dir
-                    || std::fs::canonicalize(expanded).ok() == std::fs::canonicalize(dir).ok()
-                        && expanded.exists()
-            })
-        })
+        .flat_map(|f| &f.codebase_memory)
+        .filter_map(|cm| cm.index_path.as_deref());
+    for raw in raws {
+        let expanded = match paths::expand_tilde(raw) {
+            Ok(expanded) => PathBuf::from(expanded),
+            Err(e) => return CacheUse::Unknown(format!("cannot expand index_path {raw}: {e:#}")),
+        };
+        let same = expanded == dir
+            || (canonical_dir.is_some() && std::fs::canonicalize(&expanded).ok() == canonical_dir);
+        if same {
+            return CacheUse::Live;
+        }
+    }
+    CacheUse::Unused
 }
 
 /// Remove session-log rotations older than the retention (#2816). The active file is kept.
@@ -174,12 +200,13 @@ mod tests {
             ))
             .unwrap()
         };
-        assert!(super::names_live_cache(
-            &with(&dir.display().to_string()),
-            &dir
-        ));
-        assert!(!super::names_live_cache(&with("/elsewhere/cbm"), &dir));
-        assert!(!super::names_live_cache(&Config::default(), &dir));
+        use super::{CacheUse, cache_use};
+        assert_eq!(
+            cache_use(&with(&dir.display().to_string()), &dir),
+            CacheUse::Live
+        );
+        assert_eq!(cache_use(&with("/elsewhere/cbm"), &dir), CacheUse::Unused);
+        assert_eq!(cache_use(&Config::default(), &dir), CacheUse::Unused);
     }
 
     #[test]
