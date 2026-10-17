@@ -385,17 +385,32 @@ const DEPENDENT_TOOLS: &[(&str, UpdatePath)] = &[
 /// covers them rather than a per-tool format string — the fragile thing the
 /// issue was worried about. A tool whose output doesn't fit is reported as
 /// "version unknown" rather than guessed at.
+///
+/// A hung tool must not hang doctor, so the call stops after [`DEFAULT_TOOL_VERSION_TIMEOUT`].
+/// A failed call is logged with its cause.
 fn tool_version(binary: &str) -> Option<String> {
-    let out = std::process::Command::new(binary)
-        .arg("--version")
+    let mut cmd = std::process::Command::new(binary);
+    cmd.arg("--version")
         .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = match crate::process::run_with_timeout(cmd, DEFAULT_TOOL_VERSION_TIMEOUT) {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::error!("`{binary} --version` failed: {e}");
+            return None;
+        }
+    };
     if !out.status.success() {
+        tracing::error!("`{binary} --version` exited with {}", out.status);
         return None;
     }
     parse_version_line(&String::from_utf8_lossy(&out.stdout), binary)
 }
+
+/// A `--version` call answers at once. Ten seconds covers a slow first start; the value is
+/// fixed, because only doctor uses it.
+const DEFAULT_TOOL_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The version token in `--version` output, or `None` when the output doesn't
 /// look like a version at all.
