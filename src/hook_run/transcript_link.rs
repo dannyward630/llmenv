@@ -211,8 +211,8 @@ mod tests {
         note_pending(5_000, 5_000 + STALE_PENDING_SECS - 1);
         let quiet = crate::agent_notice::current().unwrap_or_default();
         assert!(!quiet.contains("pending for 59 s"), "{quiet}");
-        note_pending(5_000, 5_000 + 61);
+        note_pending(5_000, 5_000 + STALE_PENDING_SECS);
         let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains("pending for 61 s"), "{notices}");
+        assert!(notices.contains("pending for 60 s"), "{notices}");
     }
 }

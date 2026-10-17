@@ -85,6 +85,15 @@ mod tests {
     use super::problem_notice;
 
     #[test]
+    fn the_map_unreadable_notice_names_the_cause_the_sink_and_the_fix() {
+        let notice =
+            super::session_map_unreadable_notice(&anyhow::anyhow!("permission denied on map"));
+        assert!(notice.contains("permission denied on map"), "{notice}");
+        assert!(notice.contains("ICM transcript"), "{notice}");
+        assert!(notice.contains("Fix: run `llmenv doctor`"), "{notice}");
+    }
+
+    #[test]
     fn a_problem_notice_names_the_problem_then_the_fix() {
         assert_eq!(
             problem_notice("the cache is unreadable", "run doctor"),

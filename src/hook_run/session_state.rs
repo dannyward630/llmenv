@@ -74,7 +74,7 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
             continue;
         }
         match file_age(&path) {
-            Ok(Some(age)) if age > max_age => {
+            Ok(Some(age)) if is_stale(age, max_age) => {
                 if let Some(e) = removal_error_to_log(std::fs::remove_file(&path)) {
                     note_prune_failure("cannot prune the stale state file", &path, &e);
                 }
@@ -83,6 +83,11 @@ pub(crate) fn prune_stale_json_files(dir: &Path, max_age_days: u64) {
             Err(e) => note_prune_failure("cannot read the age of the state file", &path, &e),
         }
     }
+}
+
+/// Whether a file of `age` is past `max_age`. A file exactly at the limit is kept.
+fn is_stale(age: Duration, max_age: Duration) -> bool {
+    age > max_age
 }
 
 /// The age of `path`. `None` for a file that is gone, which is the normal outcome of a race.
@@ -192,7 +197,7 @@ pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
         }
         // A lock whose age cannot be read is kept, and the cause is logged (#2858).
         let stale = match file_age(&path) {
-            Ok(age) => age.is_some_and(|age| age > max_age),
+            Ok(age) => age.is_some_and(|age| is_stale(age, max_age)),
             Err(e) => {
                 note_prune_failure("cannot read the age of the lock", &path, &e);
                 false
@@ -317,6 +322,14 @@ mod tests {
             notices.contains(&stale.display().to_string()) && notices.contains("Fix:"),
             "{notices}"
         );
+    }
+
+    #[test]
+    fn a_file_at_the_limit_is_kept() {
+        let day = Duration::from_secs(86_400);
+        assert!(!is_stale(day, day));
+        assert!(is_stale(day + Duration::from_secs(1), day));
+        assert!(!is_stale(Duration::ZERO, day));
     }
 
     #[test]

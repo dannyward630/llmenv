@@ -188,6 +188,22 @@ mod tests {
     }
 
     #[test]
+    fn read_tail_logs_an_unopenable_file_but_not_a_missing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.jsonl");
+        std::fs::write(&file, "x").unwrap();
+        let missing = crate::test_log_capture::capture_logs(|| {
+            assert!(super::read_tail(&dir.path().join("absent.jsonl")).is_none());
+        });
+        assert!(missing.is_empty(), "{missing}");
+        // A path under a regular file fails to open with ENOTDIR, not NotFound.
+        let unopenable = crate::test_log_capture::capture_logs(|| {
+            assert!(super::read_tail(&file.join("child.jsonl")).is_none());
+        });
+        assert!(unopenable.contains("cannot be opened"), "{unopenable}");
+    }
+
+    #[test]
     fn transcript_reads_refuse_a_non_file_and_cap_a_large_one() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(last_assistant_text(dir.path(), 10), None);
