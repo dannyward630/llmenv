@@ -1508,6 +1508,9 @@ The `tasks` widget shows `tasks: unreadable` in place of its count when a sessio
 The `branch` widget shows `branch: unreadable` when the repository's `HEAD` exists but cannot be read, instead of hiding the branch (changed in v3.13.0).
 
 The `pr` widget shows `pr: unreadable` when the branch cannot be read, instead of hiding itself (changed in v3.13.0).
+When `gh` gives no answer, the `pr` widget names the cause: `pr: gh missing` when `gh` is not installed, `pr: gh not logged in` when its login failed or expired, and `pr: gh failed` for a timeout or another error (changed in v3.13.0).
+The cause stays cached for the same 60 seconds as a PR answer.
+A branch with no open PR, or a repository with no GitHub remote, still shows nothing.
 
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
 on `pr`, or `{count}` on `scopes`) is left in the output literally rather than

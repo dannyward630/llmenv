@@ -64,7 +64,7 @@ pub(super) fn render_branch_with(
         Ok(pr) => pr,
         // The branch label above already shows this read error, so the link is dropped.
         Err(e) => {
-            tracing::debug!("statusline branch link skipped: {e}");
+            tracing::debug!("statusline branch link skipped: {e:?}");
             None
         }
     };
