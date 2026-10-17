@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// Garbage-collect the session-log file at `log_path` when its mtime is older
-/// than `retention_days`. Best-effort: failures are logged at `warn!` and
+/// than `retention_days`. Best-effort: failures are logged at `error!` and
 /// dropped — session logging never fails a launch.
 ///
 /// The directory `log_path` lives in is cleaned up (removed if empty) after
@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 ///
 /// # Effects
 /// Deletes the file on disk. No-op when the file does not exist, when its mtime
-/// cannot be read (logged at `warn!`), or when retention is zero (guarded by caller — the config
+/// cannot be read (logged at `error!` and noticed), or when retention is zero (guarded by caller — the config
 /// validator rejects `retention_days: 0`, but this function still handles it
 /// defensively).
 pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
@@ -30,11 +30,15 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
         Ok(Some(age)) => age,
         Ok(None) => return,
         Err(e) => {
-            tracing::warn!(
-                "session_log reaper: cannot read the mtime of {}, so it is not reaped: {e}. Fix: \
-                 check the permissions of the state directory.",
+            // The reaper runs in the SessionStart hook, where stderr is dropped and the default
+            // filter hides a warn, so the failure is an error and a notice (#2862).
+            let text = format!(
+                "llmenv: the session log reaper cannot read the age of {}, so it is not reaped: \
+                 {e}. Fix: check the permissions of the state directory.",
                 log_path.display()
             );
+            tracing::error!("{text}");
+            crate::agent_notice::record(text);
             return;
         }
     };
