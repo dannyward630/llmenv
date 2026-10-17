@@ -69,7 +69,11 @@ pub fn fetch_cached(
 
     // Best-effort cache write — failure is not fatal.
     if let Err(e) = write_cache(&cache_dir, &cache_file, &snap) {
-        eprintln!("llmenv throttle: cache write failed (non-fatal): {e}");
+        note(format!(
+            "llmenv: the throttle cache could not be saved ({e:#}), so each prompt fetches usage \
+             again. Fix: check the permissions of {}.",
+            cache_dir.display()
+        ));
     }
 
     Ok(snap)
@@ -96,7 +100,7 @@ fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageS
     let age = match SystemTime::now().duration_since(modified) {
         Ok(d) => d,
         Err(_) => {
-            eprintln!("llmenv throttle: cache clock skew detected, treating cache as stale");
+            tracing::warn!("throttle cache mtime is in the future; treating the cache as stale");
             return None;
         }
     };
@@ -111,7 +115,11 @@ fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageS
     match serde_json::from_slice::<UsageSnapshot>(&bytes) {
         Ok(snap) => Some(snap),
         Err(e) => {
-            eprintln!("llmenv throttle: cache file corrupt (falling back to live fetch): {e}");
+            note(format!(
+                "llmenv: the throttle cache {} is corrupt ({e}), so usage was fetched again. \
+                 Fix: delete that file.",
+                cache_file.display()
+            ));
             None
         }
     }
@@ -131,13 +139,16 @@ fn write_cache(
 
 /// Select the backend implementation for the given config.
 ///
-/// Returns `None` for unknown backends (with a stderr diagnostic) rather than
+/// Returns `None` for unknown backends (with an agent notice) rather than
 /// panicking, so hooks always exit 0.
 pub fn backend_for(cfg: &Throttle) -> Option<Box<dyn ThrottleBackend>> {
     match cfg.backend.as_str() {
         "umans" => Some(Box::new(UmansBackend)),
         other => {
-            eprintln!("llmenv throttle: unknown backend '{other}' — skipping");
+            note(format!(
+                "llmenv: the throttle backend '{other}' is unknown, so throttling is off. Fix: \
+                 set the throttle backend to `umans`."
+            ));
             None
         }
     }
@@ -257,6 +268,13 @@ fn is_penalized(p: &UmansPriority) -> bool {
 }
 
 /// True if the RFC3339 timestamp string represents a time in the future.
+/// Log `text` at error level and record it for the agent. The engine drops a hook's stderr,
+/// so the throttle hook output carries every notice (#2746).
+fn note(text: String) {
+    tracing::error!("{text}");
+    crate::agent_notice::record(text);
+}
+
 /// Returns false on parse errors (fail-safe). Parsing is delegated to `jiff`,
 /// which handles `Z`, numeric offsets (`+00:00`), and fractional seconds.
 fn is_future_timestamp(s: &str) -> bool {
@@ -266,10 +284,11 @@ fn is_future_timestamp(s: &str) -> bool {
     match s.parse::<jiff::Timestamp>() {
         Ok(ts) => ts > jiff::Timestamp::now(),
         Err(e) => {
-            eprintln!(
-                "llmenv throttle: boxed_until '{s}' could not be parsed \
-                 (treating as not-penalized): {e}"
-            );
+            note(format!(
+                "llmenv: the throttle backend sent a boxed_until value '{s}' that is not a \
+                 timestamp ({e}), so a rate-limit penalty may be missed. Fix: report the value \
+                 to the llmenv project."
+            ));
             false
         }
     }
