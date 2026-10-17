@@ -100,13 +100,14 @@ impl Outcome {
     }
 }
 
-/// The stderr line for a flow whose every ICM call failed. A single failed call
+/// The notice for a flow whose every ICM call failed. A single failed call
 /// only costs its records, but a dead backend must be visible, as it is on the
 /// stateless path.
 fn outage_notice(flow: &str, outcome: &Outcome) -> Option<String> {
     outcome.all_failed().then(|| {
         format!(
-            "llmenv: memory {flow} recall skipped: all {} ICM calls failed",
+            "llmenv: memory {flow} recall skipped: all {} ICM calls failed. Fix: run `llmenv \
+             doctor` to check the memory server.",
             outcome.calls
         )
     })
@@ -114,8 +115,10 @@ fn outage_notice(flow: &str, outcome: &Outcome) -> Option<String> {
 
 /// Print the outage line and the `[LLMENV_CONTEXT]` trace line for one flow.
 fn report(flow: &str, outcome: &Outcome, budget: &RecallBudget) {
+    // The engine drops a hook's stderr, so the outage goes to the agent as a notice.
     if let Some(line) = outage_notice(flow, outcome) {
-        eprintln!("{line}");
+        tracing::error!("{line}");
+        agent_notice::record(line);
     }
     // Same env var that gates hook-run's other stderr telemetry (#1261).
     let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
@@ -900,7 +903,10 @@ mod tests {
         outcome.failed = 3;
         assert_eq!(
             outage_notice("turn_start", &outcome).as_deref(),
-            Some("llmenv: memory turn_start recall skipped: all 3 ICM calls failed")
+            Some(
+                "llmenv: memory turn_start recall skipped: all 3 ICM calls failed. Fix: run \
+                 `llmenv doctor` to check the memory server."
+            )
         );
     }
 
