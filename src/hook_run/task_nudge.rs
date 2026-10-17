@@ -212,11 +212,7 @@ pub(crate) fn handle_post_tool_use(
 /// Logs and notices a nudge state change that was not saved, because the lock was busy or
 /// could not be taken.
 fn note_unlocked_skip(path: &Path) {
-    tracing::error!(
-        "task nudge state {} not saved: its lock is busy or cannot be taken",
-        path.display()
-    );
-    crate::agent_notice::record(format!(
+    crate::agent_notice::record_logged(format!(
         "llmenv: the task nudge state {} was not saved, because its lock is busy or cannot be \
          taken. A nudge may repeat. Fix: run `llmenv doctor` to check the state directory.",
         path.display()

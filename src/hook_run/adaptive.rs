@@ -117,8 +117,7 @@ fn outage_notice(flow: &str, outcome: &Outcome) -> Option<String> {
 fn report(flow: &str, outcome: &Outcome, budget: &RecallBudget) {
     // The engine drops a hook's stderr, so the outage goes to the agent as a notice.
     if let Some(line) = outage_notice(flow, outcome) {
-        tracing::error!("{line}");
-        agent_notice::record(line);
+        agent_notice::record_logged(line);
     }
     // Same env var that gates hook-run's other stderr telemetry (#1261).
     let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();

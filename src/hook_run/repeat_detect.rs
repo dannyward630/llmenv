@@ -290,8 +290,7 @@ pub fn handle_stop(
 
 /// Logs a failed save and tells the agent. The engine drops a hook's stderr (#2833).
 fn note_save_failure(session_id: &str, err: &impl std::fmt::Display) {
-    tracing::error!("failed to save repeat-detect state for session {session_id}: {err}");
-    crate::agent_notice::record(format!(
+    crate::agent_notice::record_logged(format!(
         "llmenv: the repeat-call counter of session {session_id} could not be saved ({err}), so \
          a repeated call may not be flagged. Fix: run `llmenv doctor` to check the state \
          directory."

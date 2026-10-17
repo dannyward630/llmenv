@@ -69,7 +69,7 @@ pub fn fetch_cached(
 
     // Best-effort cache write — failure is not fatal.
     if let Err(e) = write_cache(&cache_dir, &cache_file, &snap) {
-        note(format!(
+        crate::agent_notice::record_logged(format!(
             "llmenv: the throttle cache could not be saved ({e:#}), so each prompt fetches usage \
              again. Fix: check the permissions of {}.",
             cache_dir.display()
@@ -79,28 +79,37 @@ pub fn fetch_cached(
     Ok(snap)
 }
 
+/// The cached snapshot, or `None` for a missing, stale, or unusable cache. A missing cache is
+/// the normal cold start, so it is quiet. Any other failure is noticed, because every prompt
+/// then fetches usage again (#2746).
 fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageSnapshot> {
-    let meta = std::fs::metadata(cache_file)
-        .inspect_err(|e| {
-            tracing::warn!(
-                "throttle cache stat failed for {}: {e}",
-                cache_file.display()
-            )
-        })
-        .ok()?;
+    let unusable = |what: &str, e: &dyn std::fmt::Display| {
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the throttle cache {} {what} ({e}), so usage was fetched again. Fix: check \
+             the permissions of that file, or delete it.",
+            cache_file.display()
+        ));
+    };
+    let meta = match std::fs::metadata(cache_file) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            unusable("cannot be read", &e);
+            return None;
+        }
+    };
     let modified = meta
         .modified()
-        .inspect_err(|e| {
-            tracing::warn!(
-                "throttle cache mtime failed for {}: {e}",
-                cache_file.display()
-            )
-        })
+        .inspect_err(|e| unusable("has no readable mtime", e))
         .ok()?;
     let age = match SystemTime::now().duration_since(modified) {
         Ok(d) => d,
-        Err(_) => {
-            tracing::warn!("throttle cache mtime is in the future; treating the cache as stale");
+        Err(e) => {
+            tracing::error!(
+                "throttle cache {} mtime is {} s in the future; treating the cache as stale",
+                cache_file.display(),
+                e.duration().as_secs()
+            );
             return None;
         }
     };
@@ -108,14 +117,12 @@ fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageS
         return None;
     }
     let bytes = std::fs::read(cache_file)
-        .inspect_err(|e| {
-            tracing::warn!("throttle cache read failed (falling back to live fetch): {e}")
-        })
+        .inspect_err(|e| unusable("cannot be read", e))
         .ok()?;
     match serde_json::from_slice::<UsageSnapshot>(&bytes) {
         Ok(snap) => Some(snap),
         Err(e) => {
-            note(format!(
+            crate::agent_notice::record_logged(format!(
                 "llmenv: the throttle cache {} is corrupt ({e}), so usage was fetched again. \
                  Fix: delete that file.",
                 cache_file.display()
@@ -145,7 +152,7 @@ pub fn backend_for(cfg: &Throttle) -> Option<Box<dyn ThrottleBackend>> {
     match cfg.backend.as_str() {
         "umans" => Some(Box::new(UmansBackend)),
         other => {
-            note(format!(
+            crate::agent_notice::record_logged(format!(
                 "llmenv: the throttle backend '{other}' is unknown, so throttling is off. Fix: \
                  set the throttle backend to `umans`."
             ));
@@ -268,13 +275,6 @@ fn is_penalized(p: &UmansPriority) -> bool {
 }
 
 /// True if the RFC3339 timestamp string represents a time in the future.
-/// Log `text` at error level and record it for the agent. The engine drops a hook's stderr,
-/// so the throttle hook output carries every notice (#2746).
-fn note(text: String) {
-    tracing::error!("{text}");
-    crate::agent_notice::record(text);
-}
-
 /// Returns false on parse errors (fail-safe). Parsing is delegated to `jiff`,
 /// which handles `Z`, numeric offsets (`+00:00`), and fractional seconds.
 fn is_future_timestamp(s: &str) -> bool {
@@ -284,7 +284,7 @@ fn is_future_timestamp(s: &str) -> bool {
     match s.parse::<jiff::Timestamp>() {
         Ok(ts) => ts > jiff::Timestamp::now(),
         Err(e) => {
-            note(format!(
+            crate::agent_notice::record_logged(format!(
                 "llmenv: the throttle backend sent a boxed_until value '{s}' that is not a \
                  timestamp ({e}), so a rate-limit penalty may be missed. Fix: report the value \
                  to the llmenv project."

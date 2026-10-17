@@ -83,6 +83,14 @@ pub(crate) fn record(notice: impl Into<String>) {
         .record(notice);
 }
 
+/// Log `notice` at error level, which the default filter shows, and add it for the agent. The
+/// engine drops a hook's stderr, so the log alone reaches no one.
+pub(crate) fn record_logged(notice: impl Into<String>) {
+    let notice = notice.into();
+    tracing::error!("{notice}");
+    record(notice);
+}
+
 /// Every notice of this process, one per line, or `None` when there is none. The list stays set,
 /// so every call returns the same notices.
 pub(crate) fn current() -> Option<String> {

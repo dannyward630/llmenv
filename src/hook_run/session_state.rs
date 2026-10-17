@@ -99,8 +99,7 @@ fn file_age(path: &Path) -> std::io::Result<Option<Duration>> {
 /// Logs a state-file pruning failure at error level, which the default filter shows, and
 /// tells the agent.
 fn note_prune_failure(what: &str, path: &Path, err: &std::io::Error) {
-    tracing::error!("{what} {}: {err}", path.display());
-    crate::agent_notice::record(format!(
+    crate::agent_notice::record_logged(format!(
         "llmenv: {what} {} ({err}), so it stays on disk. Fix: check the permissions of that \
          file and its folder, or run `llmenv doctor` to check the state directory.",
         path.display()
@@ -195,18 +194,15 @@ pub(crate) fn prune_orphan_locks(dir: &Path, max_age_days: u64) {
         let stale = match file_age(&path) {
             Ok(age) => age.is_some_and(|age| age > max_age),
             Err(e) => {
-                tracing::error!(
-                    "cannot read the age of lock {}, so it is kept: {e}",
-                    path.display()
-                );
+                note_prune_failure("cannot read the age of the lock", &path, &e);
                 false
             }
         };
-        if stale && !path.with_extension("json").exists() {
-            // Logged at error: the default log filter is ERROR, so a warn would be invisible (#2657).
-            if let Some(e) = removal_error_to_log(std::fs::remove_file(&path)) {
-                tracing::error!("cannot remove stale lock {}: {e}", path.display());
-            }
+        if stale
+            && !path.with_extension("json").exists()
+            && let Some(e) = removal_error_to_log(std::fs::remove_file(&path))
+        {
+            note_prune_failure("cannot remove the stale lock", &path, &e);
         }
     }
 }
@@ -295,7 +291,7 @@ mod tests {
         std::fs::set_permissions(&locks, std::fs::Permissions::from_mode(0o755)).expect("test");
         assert!(lock.exists(), "a lock whose age cannot be read must stay");
         assert!(
-            logs.contains("old.lock") && logs.contains("kept"),
+            logs.contains("old.lock") && logs.contains("stays on disk"),
             "the cause must be logged: {logs}"
         );
     }

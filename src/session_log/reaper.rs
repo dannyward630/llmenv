@@ -37,8 +37,7 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
                  {e}. Fix: check the permissions of the state directory.",
                 log_path.display()
             );
-            tracing::error!("{text}");
-            crate::agent_notice::record(text);
+            crate::agent_notice::record_logged(text);
             return;
         }
     };

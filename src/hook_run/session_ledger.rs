@@ -309,10 +309,10 @@ impl LedgerStore {
 /// Logs a failed ledger save and tells the agent. `update` still returns the result of its
 /// closure, so the caller cannot see this failure (#2729).
 fn note_save_failure(path: &std::path::Path, err: &std::io::Error) {
-    tracing::error!("cannot save recall ledger {}: {err}", path.display());
-    crate::agent_notice::record(format!(
-        "llmenv: the recall ledger could not be saved ({err}), so some records may repeat. Fix: \
-         run `llmenv doctor` to check the state directory."
+    crate::agent_notice::record_logged(format!(
+        "llmenv: the recall ledger {} could not be saved ({err}), so some records may repeat. \
+         Fix: run `llmenv doctor` to check the state directory.",
+        path.display()
     ));
 }
 
@@ -679,7 +679,7 @@ mod corrupt_notice_tests {
         );
         let text = crate::agent_notice::current().unwrap_or_default();
         assert!(
-            text.contains("recall ledger could not be saved"),
+            text.contains("recall ledger /state/recall_session/s1.json could not be saved"),
             "got: {text}"
         );
     }
