@@ -66,6 +66,7 @@ cache:
 Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`, `remote_sync` = `true`. Set
 `cache_retention_hours` to `null` to disable age-based GC.
+With `null`, `llmenv doctor --gc` skips the cache, `state/tmp`, and session-log sweeps, and SessionStart shows no stale `state/tmp` hint (fixed in v3.13.0: before, `null` used the 168-hour default).
 
 (added in v3.13.0)
 

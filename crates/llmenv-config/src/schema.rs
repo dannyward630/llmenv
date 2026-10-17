@@ -447,6 +447,19 @@ const fn default_remote_sync() -> bool {
     true
 }
 
+impl Cache {
+    /// The age-based GC window, or `None` when `cache_retention_hours` is `null`. `null`
+    /// turns age-based GC off, as the config docs state (#2829). An omitted key takes the
+    /// default from [`Cache::default`], so only an explicit `null` reaches `None`.
+    ///
+    /// A multiplication that would wrap saturates, so it keeps every entry.
+    #[must_use]
+    pub fn gc_retention(&self) -> Option<std::time::Duration> {
+        self.cache_retention_hours
+            .map(|hours| std::time::Duration::from_secs(hours.saturating_mul(3600)))
+    }
+}
+
 impl Default for Cache {
     fn default() -> Self {
         Self {
@@ -1964,6 +1977,25 @@ pub fn split_plugin_ref(s: &str) -> Option<(&str, &str)> {
 pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn gc_retention_is_off_only_for_an_explicit_null() {
+        let explicit_null: Cache = serde_yaml::from_str("cache_retention_hours: null").unwrap();
+        assert_eq!(explicit_null.gc_retention(), None);
+        let omitted: Cache = serde_yaml::from_str("sync_interval_minutes: 5").unwrap();
+        assert_eq!(
+            omitted.gc_retention(),
+            Some(std::time::Duration::from_secs(168 * 3600))
+        );
+        let huge = Cache {
+            cache_retention_hours: Some(u64::MAX),
+            ..Cache::default()
+        };
+        assert_eq!(
+            huge.gc_retention(),
+            Some(std::time::Duration::from_secs(u64::MAX))
+        );
+    }
 
     #[test]
     fn memory_adaptive_recall_defaults_to_true_and_accepts_false() {

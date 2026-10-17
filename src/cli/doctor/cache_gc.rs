@@ -12,11 +12,16 @@ use crate::session_log;
 use super::forget_credentials_for;
 
 /// Run the sweeps for `doctor --gc`. All three use `cache.cache_retention_hours` (default 168).
+/// A `null` value turns all three off (#2829).
 pub(super) fn run(cache_dir: &Path, config: &Config, pass: &str, warn: &str) {
     eprintln!("Running garbage collection...");
-    // A multiplication that would wrap keeps every entry instead of removing live ones.
-    let hours = config.cache.cache_retention_hours.unwrap_or(168);
-    let retention = Duration::from_secs(hours.saturating_mul(3600));
+    let Some(retention) = config.cache.gc_retention() else {
+        eprintln!(
+            "{pass} GC skipped: cache.cache_retention_hours is null, so age-based GC is off. \
+             Set it to a number of hours to turn GC on."
+        );
+        return;
+    };
     match std::fs::metadata(cache_dir) {
         Ok(meta) if meta.permissions().readonly() => {
             eprintln!("{warn} GC of the cache skipped: cache directory is read-only");
