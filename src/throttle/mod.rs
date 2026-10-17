@@ -207,7 +207,17 @@ pub(crate) fn run_throttle_hook(event: &str) {
 /// falls back to the name that `event` maps to. Text that is not JSON adds a notice.
 fn hook_event_name(stdin: &str, event: &str, notices: &mut Vec<String>) -> String {
     let parsed = match serde_json::from_str::<serde_json::Value>(stdin) {
-        Ok(v) => v["hook_event_name"].as_str().map(str::to_owned),
+        Ok(v) => match &v["hook_event_name"] {
+            serde_json::Value::String(name) => Some(name.clone()),
+            serde_json::Value::Null => None,
+            other => {
+                notices.push(format!(
+                    "llmenv: the throttle hook got a hook_event_name that is not a string ({other}). \
+                     Fix: run `llmenv regenerate` so the hook matches this engine."
+                ));
+                None
+            }
+        },
         Err(e) if !stdin.trim().is_empty() => {
             notices.push(format!(
                 "llmenv: the throttle hook got stdin that is not valid JSON ({e}). Fix: run \
@@ -349,6 +359,34 @@ mod tests {
             resets_at: None,
             penalized,
         }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn hook_event_name_never_panics_and_always_names_an_event(stdin in "\\PC{0,64}") {
+            let mut notices = Vec::new();
+            let name = hook_event_name(&stdin, "prompt", &mut notices);
+            proptest::prop_assert!(!name.is_empty());
+        }
+
+        #[test]
+        fn a_string_event_name_is_returned_verbatim(name in "[A-Za-z]{1,24}") {
+            let mut notices = Vec::new();
+            let stdin = serde_json::json!({ "hook_event_name": name }).to_string();
+            proptest::prop_assert_eq!(hook_event_name(&stdin, "prompt", &mut notices), name);
+            proptest::prop_assert!(notices.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_non_string_event_name_falls_back_with_a_notice() {
+        let mut notices = Vec::new();
+        let got = hook_event_name(r#"{"hook_event_name": 7}"#, "pre-tool", &mut notices);
+        assert_eq!(got, "PreToolUse");
+        assert!(
+            notices.len() == 1 && notices[0].contains("not a string"),
+            "{notices:?}"
+        );
     }
 
     #[test]
