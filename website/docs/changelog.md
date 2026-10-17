@@ -130,6 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A PATH check that cannot run `which` is an error, not "not installed". `export` and `regenerate` fail with the cause, `setup` stops, and `doctor` prints the cause (#2753) [fix:adapter]
 - Recalled memory that an engine takes no context for, such as Crush on SessionStart, is logged with its size (#2770) [fix:hook]
 - `llmenv doctor --gc` removes old codebase-memory index files from `state/codebase-memory`, which no server reads since v3.11.1. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands) (#2817) [fix:materialize]
+- An ICM outage in the adaptive recall flows reaches the agent as a notice. Before, it went to stderr, which the engine drops (#2868) [fix:hook]
+- The transcript migration logs each folder it skips, and keeps a non-UTF-8 folder name. Before, an unreadable entry was skipped with no word (#2868) [fix:materialize]
+- `llmenv doctor` stops a tool's `--version` call after 10 seconds and logs why a version is unknown, and `llmenv setup` reports a `settings.json` or `plugins.json` that it cannot check (#2868) [fix:cli]
 
 ### Security
 
