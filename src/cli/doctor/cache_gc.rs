@@ -30,7 +30,10 @@ pub(super) fn run(cache_dir: &Path, config: &Config, pass: &str, warn: &str) {
         Err(e) => eprintln!("{warn} GC of the cache skipped: cannot stat cache directory: {e:#}"),
     }
     match paths::state_dir() {
-        Ok(state_dir) => sweep_state(&state_dir, retention, pass, warn),
+        Ok(state_dir) => {
+            sweep_state(&state_dir, retention, pass, warn);
+            sweep_cbm_indexes(&state_dir, config, retention, pass, warn);
+        }
         Err(e) => eprintln!(
             "{warn} GC of state/tmp and session-log rotations skipped: cannot resolve the state \
              directory: {e:#}"
@@ -88,6 +91,58 @@ fn sweep_state_tmp(state_dir: &Path, retention: Duration, pass: &str, warn: &str
     }
 }
 
+/// Remove old index databases from `state/codebase-memory`, unless a configured `index_path`
+/// names that folder as the live cache (#2817).
+fn sweep_cbm_indexes(
+    state_dir: &Path,
+    config: &Config,
+    retention: Duration,
+    pass: &str,
+    warn: &str,
+) {
+    let dir = state_dir.join("codebase-memory");
+    if names_live_cache(config, &dir) {
+        eprintln!(
+            "{pass} GC of {} skipped: a features.codebase_memory index_path uses it",
+            dir.display()
+        );
+        return;
+    }
+    match crate::materialize::cbm_sweep::sweep_legacy_indexes(&dir, retention) {
+        Ok(report) => {
+            eprintln!(
+                "{pass} GC complete for old codebase-memory indexes: removed {} files, kept {}",
+                report.removed.len(),
+                report.kept
+            );
+            for p in &report.failed {
+                eprintln!("{warn} GC: could not process {}", p.display());
+            }
+        }
+        Err(e) => eprintln!("{warn} GC of old codebase-memory indexes skipped: {e:#}"),
+    }
+}
+
+/// Whether a `features.codebase_memory` entry sets `index_path` to `dir`. A path that cannot be
+/// expanded counts as a match, so a doubt keeps the files.
+fn names_live_cache(config: &Config, dir: &Path) -> bool {
+    let entries = config
+        .features
+        .as_ref()
+        .map_or(&[][..], |f| &f.codebase_memory[..]);
+    entries
+        .iter()
+        .filter_map(|cm| cm.index_path.as_deref())
+        .any(|raw| {
+            paths::expand_tilde(raw).map_or(true, |expanded| {
+                let expanded = Path::new(&expanded);
+                expanded == dir
+                    || std::fs::canonicalize(expanded).ok() == std::fs::canonicalize(dir).ok()
+                        && expanded.exists()
+            })
+        })
+}
+
 /// Remove session-log rotations older than the retention (#2816). The active file is kept.
 fn prune_session_log(state_dir: &Path, retention: Duration, pass: &str, warn: &str) {
     let path = session_log::file_sink::file_path_in(state_dir);
@@ -107,6 +162,25 @@ mod tests {
     use crate::config::Config;
 
     const DAY: Duration = Duration::from_secs(86_400);
+
+    #[test]
+    fn a_configured_index_path_marks_the_folder_live() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("codebase-memory");
+        std::fs::create_dir(&dir).unwrap();
+        let with = |index_path: &str| -> Config {
+            serde_yaml::from_str(&format!(
+                "features:\n  codebase_memory:\n    - index_path: {index_path}\n"
+            ))
+            .unwrap()
+        };
+        assert!(super::names_live_cache(
+            &with(&dir.display().to_string()),
+            &dir
+        ));
+        assert!(!super::names_live_cache(&with("/elsewhere/cbm"), &dir));
+        assert!(!super::names_live_cache(&Config::default(), &dir));
+    }
 
     #[test]
     fn the_state_sweep_removes_an_old_rotation_and_keeps_the_active_log() {
