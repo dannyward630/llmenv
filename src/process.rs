@@ -2,16 +2,23 @@
 
 use std::io::Read;
 use std::process::{Child, Command, Output};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// How often the deadline is checked. A short wait keeps a fast command fast.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// How long a killed child gets to exit. A process in uninterruptible I/O, such as on a hung
+/// network mount, ignores the kill, so the wait for it must end too.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Run `cmd` and wait at most `timeout`. The child is killed on a timeout, and the error kind is
 /// [`std::io::ErrorKind::TimedOut`].
 ///
 /// The piped stdout and stderr are read on their own threads while the child runs. A child that
 /// writes more than the pipe holds would otherwise block on the write and never exit (#2832).
+/// The reads also end at the deadline, because a process that the child started can hold the
+/// pipes open after the child exits. Only the direct child is killed.
 ///
 /// # Errors
 /// The command cannot start, its output cannot be read, or it runs past `timeout`.
@@ -19,45 +26,61 @@ pub(crate) fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::
     let mut child = cmd.spawn()?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
-    let start = Instant::now();
+    let deadline = Instant::now() + timeout;
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                kill(&mut child);
+                return Err(e);
+            }
         }
-        if start.elapsed() >= timeout {
+        if Instant::now() >= deadline {
             kill(&mut child);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("no answer within {} ms", timeout.as_millis()),
-            ));
+            return Err(timed_out(timeout));
         }
         std::thread::sleep(POLL_INTERVAL);
     };
     Ok(Output {
         status,
-        stdout: join(stdout)?,
-        stderr: join(stderr)?,
+        stdout: collect(stdout, deadline, timeout)?,
+        stderr: collect(stderr, deadline, timeout)?,
     })
 }
 
-type Drain = Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>;
+fn timed_out(timeout: Duration) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("no answer within {} ms", timeout.as_millis()),
+    )
+}
+
+type Drain = Option<mpsc::Receiver<std::io::Result<Vec<u8>>>>;
 
 fn drain(pipe: Option<impl Read + Send + 'static>) -> Drain {
     pipe.map(|mut pipe| {
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
+            let result = pipe.read_to_end(&mut bytes).map(|_| bytes);
+            // The receiver is gone after a timeout, and then the bytes are not needed.
+            let _ = tx.send(result);
+        });
+        rx
     })
 }
 
-fn join(handle: Drain) -> std::io::Result<Vec<u8>> {
-    match handle {
-        None => Ok(Vec::new()),
-        Some(handle) => handle
-            .join()
-            .map_err(|_| std::io::Error::other("the thread that read the child output panicked"))?,
+fn collect(drain: Drain, deadline: Instant, timeout: Duration) -> std::io::Result<Vec<u8>> {
+    let Some(rx) = drain else {
+        return Ok(Vec::new());
+    };
+    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(timed_out(timeout)),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::other(
+            "the thread that read the child output stopped",
+        )),
     }
 }
 
@@ -65,8 +88,23 @@ fn kill(child: &mut Child) {
     if let Err(e) = child.kill() {
         tracing::error!("cannot kill child process {}: {e}", child.id());
     }
-    if let Err(e) = child.wait() {
-        tracing::error!("cannot reap child process {}: {e}", child.id());
+    let grace_end = Instant::now() + KILL_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < grace_end => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => {
+                tracing::error!(
+                    "child process {} did not exit after a kill; it is left running",
+                    child.id()
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!("cannot reap child process {}: {e}", child.id());
+                return;
+            }
+        }
     }
 }
 
@@ -91,6 +129,19 @@ mod tests {
             .stderr(Stdio::piped());
         let out = run_with_timeout(quick, Duration::from_secs(5)).unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+
+    #[test]
+    fn a_grandchild_that_holds_the_pipe_does_not_block_past_the_deadline() {
+        // The shell exits at once, but the background sleep keeps stdout open.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 3 & echo started"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let start = std::time::Instant::now();
+        let err = run_with_timeout(cmd, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
