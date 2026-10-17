@@ -3277,8 +3277,18 @@ mod tests {
             cbm_floor_warning("0.11.0").is_some(),
             "0.11.0 is below the 0.12.0 floor"
         );
-        for ok in ["0.12.0", "0.12.1", "1.0.0", "version unknown", "garbage"] {
+        for ok in ["0.12.0", "0.12.1", "1.0.0"] {
             assert_eq!(cbm_floor_warning(ok), None, "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn cbm_floor_warning_fires_for_an_unparseable_version() {
+        for unknown in ["version unknown", "garbage", ""] {
+            let warning = cbm_floor_warning(unknown)
+                .unwrap_or_else(|| panic!("{unknown:?} must warn, not pass silently"));
+            assert!(warning.contains("could not be checked"), "{warning}");
+            assert!(warning.contains(unknown), "{warning}");
         }
     }
 
