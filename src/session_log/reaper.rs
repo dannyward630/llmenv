@@ -19,25 +19,27 @@ use std::time::{Duration, SystemTime};
 ///
 /// # Effects
 /// Deletes the file on disk. No-op when the file does not exist, when its mtime
-/// cannot be read, or when retention is zero (guarded by caller — the config
+/// cannot be read (logged at `warn!`), or when retention is zero (guarded by caller — the config
 /// validator rejects `retention_days: 0`, but this function still handles it
 /// defensively).
 pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
     if retention_days == 0 {
         return;
     }
-    let Ok(meta) = log_path.metadata() else {
-        return;
+    let age = match log_age(log_path) {
+        Ok(Some(age)) => age,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                "session_log reaper: cannot read the mtime of {}, so it is not reaped: {e}. Fix: \
+                 check the permissions of the state directory.",
+                log_path.display()
+            );
+            return;
+        }
     };
-    let Ok(modified) = meta.modified() else {
-        return;
-    };
-    let retention = Duration::from_secs(retention_days * 86_400);
-    let Ok(now) = SystemTime::now().duration_since(modified) else {
-        // File mtime is in the future — skip rather than delete.
-        return;
-    };
-    if now < retention {
+    let retention = Duration::from_secs(retention_days.saturating_mul(86_400));
+    if age < retention {
         return;
     }
     if let Err(e) = std::fs::remove_file(log_path) {
@@ -65,10 +67,40 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
     }
 }
 
+/// The age of the file at `path`. `None` for a missing file, and for an mtime in the
+/// future, which is kept rather than deleted.
+fn log_age(path: &Path) -> std::io::Result<Option<Duration>> {
+    let modified = match path.metadata() {
+        Ok(meta) => meta.modified()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(SystemTime::now().duration_since(modified).ok())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_age_is_none_for_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(log_age(&dir.path().join("absent.jsonl")).unwrap().is_none());
+    }
+
+    #[test]
+    fn log_age_reports_an_unreadable_path_as_an_error() {
+        // A path under a regular file fails with ENOTDIR, not NotFound (#2862).
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let err = log_age(&file.join("session-log.jsonl")).unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        // The reaper logs and returns; it must not panic or delete anything.
+        reap_session_log(&file.join("session-log.jsonl"), 1);
+        assert!(file.exists());
+    }
 
     #[test]
     fn does_not_delete_file_within_retention() {
