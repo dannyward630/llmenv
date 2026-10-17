@@ -2057,13 +2057,21 @@ async fn handle_session_log(
             // SessionStart: once per launch, worth revalidating (#1090).
             ensure_transcript_session(cfg, client, csid, ctx, state_path, true).await
         }
-        (_, Some(csid)) => state_path.and_then(|p| match state::lookup_session_at(p, csid) {
-            Ok(id) => id,
-            Err(e) => {
-                // The engine drops a hook's stderr, so the agent hears it here (#2834).
-                tracing::error!("session log skipped for this event: {e:#}");
-                crate::agent_notice::record(notice::transcript_unlinked_notice(&e));
-                None
+        (_, Some(csid)) => state_path.and_then(|p| {
+            let now = session_state::unix_now();
+            match state::link_at(p, csid, now) {
+                Ok(state::Link::Linked(id)) => Some(id),
+                Ok(state::Link::Pending { since }) => {
+                    transcript_link::note_pending(since, now);
+                    None
+                }
+                Ok(state::Link::Missing) => None,
+                Err(e) => {
+                    // The engine drops a hook's stderr, so the agent hears it here (#2834).
+                    tracing::error!("ICM transcript skipped for this event: {e:#}");
+                    crate::agent_notice::record(notice::session_map_unreadable_notice(&e));
+                    None
+                }
             }
         }),
         (_, None) => None,

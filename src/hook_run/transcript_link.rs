@@ -52,8 +52,8 @@ pub(super) async fn ensure_transcript_session(
         }
         // Another hook is starting the transcript, or its link was lost. A second start would
         // leave a second orphan, so this event waits for the marker to expire (#2834).
-        state::Link::Pending => {
-            tracing::debug!("ICM transcript start pending for this session; event not logged");
+        state::Link::Pending { since } => {
+            note_pending(*since, now);
             return None;
         }
         state::Link::Missing => {}
@@ -109,11 +109,16 @@ async fn start_linked(
         Ok(id) => id,
         Err(e) => {
             error!(error = %e, "failed to start ICM transcript session");
-            if let Err(clear) = state::clear_pending_at(path, csid) {
-                error!(error = %clear, "cannot clear the pending transcript marker; it expires");
-            }
+            let blocked = match state::clear_pending_at(path, csid) {
+                Ok(()) => "",
+                Err(clear) => {
+                    error!(error = %clear, "cannot clear the pending transcript marker; it expires");
+                    ". A new start is blocked for up to 10 minutes, because its marker could not be \
+                     cleared"
+                }
+            };
             crate::agent_notice::record(notice::problem_notice(
-                &format!("the ICM transcript for this session could not start: {e:#}"),
+                &format!("the ICM transcript for this session could not start: {e:#}{blocked}"),
                 "run `llmenv doctor` to check the memory server.",
             ));
             return None;
@@ -138,6 +143,30 @@ async fn start_linked(
         return None;
     }
     Some(id)
+}
+
+/// A start takes seconds. A marker older than this was most likely left by a hook that was
+/// stopped mid-start, so the agent is told.
+const STALE_PENDING_SECS: i64 = 60;
+
+/// Log and notice a pending transcript link that is older than a start takes. Events are not
+/// sent to the ICM transcript while it stands (#2834).
+pub(super) fn note_pending(since: i64, now: i64) {
+    let age = now.saturating_sub(since);
+    if age < STALE_PENDING_SECS {
+        tracing::debug!("ICM transcript start pending for {age} s; event not logged");
+        return;
+    }
+    error!("ICM transcript link pending for {age} s; events are not logged to the transcript");
+    crate::agent_notice::record(notice::problem_notice(
+        &format!(
+            "the ICM transcript link for this session has been pending for {age} s, so events are \
+             not sent to the ICM transcript. A hook that stopped during the start leaves this \
+             marker. It expires 10 minutes after it was written, and the next session start tries \
+             again"
+        ),
+        "run `llmenv doctor` to check the memory server.",
+    ));
 }
 
 /// Decide whether a recorded transcript id still serves this session. `Some` keeps the link.
@@ -170,5 +199,20 @@ async fn cached_transcript_id(
             );
             Some(existing.to_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{STALE_PENDING_SECS, note_pending};
+
+    #[test]
+    fn only_a_stale_pending_link_is_noticed() {
+        note_pending(5_000, 5_000 + STALE_PENDING_SECS - 1);
+        let quiet = crate::agent_notice::current().unwrap_or_default();
+        assert!(!quiet.contains("pending for 59 s"), "{quiet}");
+        note_pending(5_000, 5_000 + 61);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(notices.contains("pending for 61 s"), "{notices}");
     }
 }

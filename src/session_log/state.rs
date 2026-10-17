@@ -138,15 +138,16 @@ fn lock_map(path: &Path) -> anyhow::Result<std::fs::File> {
     )
 }
 
-fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
-    let _lock = lock_map(path)?;
-    let mut map = load_for_write(path)?;
+/// Insert `key -> value` and keep the map within [`MAX_CORRELATION_ENTRIES`]. Expired pending
+/// markers go first, because no record replaces a marker whose link failed (#2834).
+fn insert_capped(map: &mut BTreeMap<String, String>, key: &str, value: &str, now: i64) {
+    map.retain(|k, v| k == key || !link::is_expired_marker(v, now));
     // Evict before the insert. Evicting after it could drop the new key itself, when that key
     // sorts first, and the lookup for this session would then miss.
-    if !map.contains_key(claude_session_id) && map.len() >= MAX_CORRELATION_ENTRIES {
+    if !map.contains_key(key) && map.len() >= MAX_CORRELATION_ENTRIES {
         map.pop_first();
     }
-    map.insert(claude_session_id.to_string(), icm_session_id.to_string());
+    map.insert(key.to_string(), value.to_string());
     // ponytail: eviction order is BTreeMap key order (the random session-id
     // string), not recency — this format carries no timestamp to sort by.
     // Correlation entries are looked up by exact claude_session_id, and an
@@ -156,20 +157,24 @@ fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyh
     while map.len() > MAX_CORRELATION_ENTRIES {
         map.pop_first();
     }
+}
+
+fn record_at(path: &Path, claude_session_id: &str, icm_session_id: &str) -> anyhow::Result<()> {
+    let _lock = lock_map(path)?;
+    let mut map = load_for_write(path)?;
+    let now = crate::hook_run::session_state::unix_now();
+    insert_capped(&mut map, claude_session_id, icm_session_id, now);
     let body = serde_json::to_string(&map)?;
     write_owner_only_atomic(path, body.as_bytes())?;
     Ok(())
 }
 
 /// The ICM session id for a Claude session, if recorded in the map at `path`. A pending
-/// marker is not an id, so it reads as `None`.
-/// Crate-internal: lets callers that already resolved `state_path()` (e.g. one
-/// hook invocation handling several events) avoid re-resolving it, and lets
-/// tests exercise this without touching the global state-dir env var.
+/// marker is not an id, so it reads as `None`. Tests only; the hook reads [`link_at`].
 ///
 /// # Errors
-/// The map file exists but cannot be read. A caller MUST NOT start a new
-/// transcript then, because it could not record the link (#2658).
+/// The map file exists but cannot be read.
+#[cfg(test)]
 pub(crate) fn lookup_session_at(
     path: &Path,
     claude_session_id: &str,
@@ -177,7 +182,7 @@ pub(crate) fn lookup_session_at(
     let now = crate::hook_run::session_state::unix_now();
     Ok(match link_at(path, claude_session_id, now)? {
         Link::Linked(id) => Some(id),
-        Link::Missing | Link::Pending => None,
+        Link::Missing | Link::Pending { .. } => None,
     })
 }
 

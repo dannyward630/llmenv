@@ -44,6 +44,15 @@ pub(super) fn log_memory_without_channel(out: &str, memory: &str, event: &str) {
     }
 }
 
+/// The notice for a session map that cannot be read during a session. Only the ICM transcript
+/// sink skips the event; the file sink still writes it (#2834).
+pub(super) fn session_map_unreadable_notice(error: &anyhow::Error) -> String {
+    format!(
+        "llmenv: the session map cannot be read ({error:#}), so this event is not sent to the ICM \
+         transcript. Fix: run `llmenv doctor` to check the state directory."
+    )
+}
+
 /// The notice for a session whose ICM transcript could not start. The map cannot save the
 /// link, so the transcript is not started (#2658).
 pub(super) fn transcript_unlinked_notice(error: &anyhow::Error) -> String {
