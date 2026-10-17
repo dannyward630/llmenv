@@ -400,32 +400,35 @@ pub(crate) fn known_engine_ids() -> Vec<String> {
         .collect()
 }
 
-/// Returns `true` when `name` resolves to an executable on the current `PATH`.
+/// Whether `name` resolves to an executable on the current `PATH`.
 ///
 /// Uses the platform `which` command so the result matches what a shell would
-/// find. Returns `false` when `which` exits non-zero. A spawn failure also returns `false`, so it
-/// is logged at error level and recorded for the agent, because `false` alone reads as "not
-/// installed".
+/// find. `Ok(false)` when `which` exits non-zero.
 ///
 /// Names containing `/` or ASCII whitespace are unconditionally rejected;
 /// they cannot be plain binary names and would produce confusing `which` behaviour.
-#[must_use]
-pub(crate) fn binary_on_path(name: &str) -> bool {
+///
+/// # Errors
+/// `which` cannot start. The caller must not read that as "not installed" (#2753).
+pub(crate) fn binary_on_path(name: &str) -> anyhow::Result<bool> {
+    binary_on_path_with("which", name)
+}
+
+/// [`binary_on_path`] with the lookup program as a parameter, so a test can name one that
+/// cannot start.
+fn binary_on_path_with(which: &str, name: &str) -> anyhow::Result<bool> {
     if name.contains('/') || name.chars().any(char::is_whitespace) {
-        return false;
+        return Ok(false);
     }
-    match std::process::Command::new("which").arg(name).output() {
-        Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
-        Err(e) => {
-            // ERROR level, so a CLI run shows the cause on stderr under the default filter.
-            tracing::error!("cannot run `which` to look for `{name}`: {e}");
-            crate::agent_notice::record(format!(
-                "llmenv could not run `which` to look for `{name}`: {e}. \
-                 Fix: check that `which` is on PATH."
-            ));
-            false
-        }
-    }
+    let output = std::process::Command::new(which)
+        .arg(name)
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot run `which` to look for `{name}`: {e}. Fix: check that `which` is on PATH"
+            )
+        })?;
+    Ok(output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 /// The first line of every injected ICM memory block.
@@ -938,13 +941,23 @@ mod tests {
 
     #[test]
     fn binary_on_path_true_for_sh() {
-        assert!(binary_on_path("sh"), "sh must be on PATH in any POSIX env");
+        assert!(
+            binary_on_path("sh").unwrap(),
+            "sh must be on PATH in any POSIX env"
+        );
+    }
+
+    #[test]
+    fn binary_on_path_is_an_error_when_the_lookup_cannot_start() {
+        let err = super::binary_on_path_with("__llmenv_no_such_which__", "sh").unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("`sh`") && text.contains("Fix:"), "{text}");
     }
 
     #[test]
     fn binary_on_path_false_for_bogus_binary() {
         assert!(
-            !binary_on_path("__llmenv_no_such_binary_xyzzy__"),
+            !binary_on_path("__llmenv_no_such_binary_xyzzy__").unwrap(),
             "bogus binary must not be found on PATH"
         );
     }
@@ -952,7 +965,7 @@ mod tests {
     #[test]
     fn binary_on_path_rejects_slash() {
         assert!(
-            !binary_on_path("/usr/bin/sh"),
+            !binary_on_path("/usr/bin/sh").unwrap(),
             "path with '/' must be rejected without spawning which"
         );
     }
@@ -960,11 +973,11 @@ mod tests {
     #[test]
     fn binary_on_path_rejects_whitespace() {
         assert!(
-            !binary_on_path("sh -c echo"),
+            !binary_on_path("sh -c echo").unwrap(),
             "name with whitespace must be rejected without spawning which"
         );
         assert!(
-            !binary_on_path("sh\techo"),
+            !binary_on_path("sh\techo").unwrap(),
             "name with tab must be rejected without spawning which"
         );
     }

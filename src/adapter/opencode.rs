@@ -462,8 +462,19 @@ impl AgentAdapter for OpencodeAdapter {
         "opencode"
     }
 
+    /// The trait answers with a `bool`, so a failed PATH check is logged and noticed here, and
+    /// reads as inactive (#2753).
     fn is_active(&self) -> bool {
-        std::env::var_os("OPENCODE_CONFIG_DIR").is_some() || binary_on_path("opencode")
+        if std::env::var_os("OPENCODE_CONFIG_DIR").is_some() {
+            return true;
+        }
+        binary_on_path("opencode").unwrap_or_else(|e| {
+            tracing::error!("opencode adapter treated as inactive: {e:#}");
+            crate::agent_notice::record(format!(
+                "llmenv: the opencode adapter is treated as inactive: {e:#}."
+            ));
+            false
+        })
     }
 
     fn binary_name(&self) -> &'static str {
