@@ -54,10 +54,18 @@ const TAIL_LINES: usize = 200;
 const TAIL_BYTES: u64 = 1024 * 1024;
 
 /// The last [`TAIL_BYTES`] of a regular file, starting at a line boundary.
-/// `None` for anything that is not a readable regular file.
+/// `None` for anything that is not a readable regular file. A file that exists but cannot be
+/// opened is logged, because the checks that read the tail then pass with no word.
 fn read_tail(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::error!("transcript {} cannot be opened: {e}", path.display());
+            return None;
+        }
+    };
     let meta = file.metadata().ok()?;
     if !meta.is_file() {
         return None;
