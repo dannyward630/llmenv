@@ -6,8 +6,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Context;
-
 use crate::materialize::cache::is_expired;
 
 /// Size at which the active file rotates. Each line is one hook event, so the cap bounds how
@@ -54,11 +52,22 @@ fn is_full(path: &Path, max_bytes: u64) -> std::io::Result<bool> {
     }
 }
 
-/// Take the rotation lock beside `path`, and wait for it. A rotation holds it only for a few
-/// renames, and the lock ends with its process, so the wait is short.
+/// The suffix of the rotation lock file beside the active log.
+const LOCK_SUFFIX: &str = ".rotate.lock";
+
+/// A hook must not stall on a stuck rotation, so the lock gives up after about 500 ms. The
+/// append then goes to the active file, and the next append tries the rotation again.
+const LOCK_ATTEMPTS: u32 = 50;
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Take the rotation lock beside `path`. A rotation holds it only for a few renames, so a short
+/// bounded wait is enough.
+///
+/// # Errors
+/// The lock file cannot be opened, or the lock stays busy for the whole wait.
 fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".rotate.lock");
+    name.push(LOCK_SUFFIX);
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).truncate(false).write(true);
     #[cfg(unix)]
@@ -67,8 +76,20 @@ fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
         opts.mode(0o600);
     }
     let file = crate::paths::refuse_symlink(&mut opts).open(path.with_file_name(name))?;
-    file.lock()?;
-    Ok(file)
+    for _ in 0..LOCK_ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!(
+            "the session log rotation lock beside {} stays busy",
+            path.display()
+        ),
+    ))
 }
 
 /// The first line of a file that follows a rotation. It names the file the old lines moved to.
@@ -110,7 +131,13 @@ pub(crate) fn prune_rotations(path: &Path, older_than: Duration) -> anyhow::Resu
     let mut removed = 0;
     let mut failures = Vec::new();
     for entry in entries {
-        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                failures.push(format!("an entry in {}: {e}", dir.display()));
+                continue;
+            }
+        };
         if !is_rotation_of(&entry.file_name(), base) {
             continue;
         }
@@ -325,5 +352,24 @@ mod tests {
             let other_base = format!("other.jsonl.{digits}");
             prop_assert!(!is_rotation_of(OsStr::new(&other_base), base));
         });
+    }
+
+    #[test]
+    fn the_rotation_lock_is_never_read_as_a_rotated_file() {
+        use proptest::prelude::*;
+        use std::ffi::OsStr;
+        proptest!(|(base in "[a-z.-]{1,12}(\\.[0-9]{1,3})?")| {
+            let lock = format!("{base}{LOCK_SUFFIX}");
+            prop_assert!(!is_rotation_of(OsStr::new(&lock), OsStr::new(&base)));
+        });
+    }
+
+    #[test]
+    fn a_lock_held_past_the_wait_is_an_error_not_a_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        let _held = rotation_lock(&path).unwrap();
+        let err = rotation_lock(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock, "{err}");
     }
 }
