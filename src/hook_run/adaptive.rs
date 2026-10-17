@@ -24,7 +24,7 @@ mod subagent;
 #[cfg(test)]
 use cut::cut_items_notice;
 use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
-use session_reset::{first_update_notice, resets_ledger};
+use session_reset::{FirstUpdate, first_update_notice, resets_ledger};
 use subagent::agent_key;
 pub(super) use subagent::subagent_start;
 
@@ -266,7 +266,7 @@ pub(super) async fn session_start(
     let recall_project = project.clone();
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
     let resume = super::resume_cache::ResumeCache::from_payload(ctx.payload);
-    let updated = ctx.store.update(ctx.session_id, |l| {
+    let updated = ctx.store.update_reporting_save(ctx.session_id, |l| {
         l.resume_cache = Some(resume);
         if reset {
             l.reset();
@@ -276,11 +276,11 @@ pub(super) async fn session_start(
         }
         l.sent_for(MAIN_AGENT)
     });
-    if let Some(notice) = first_update_notice(updated.is_some(), reset) {
+    if let Some(notice) = first_update_notice(FirstUpdate::of(updated.as_ref()), reset) {
         tracing::error!("session start ledger update failed (reset requested: {reset}): {notice}");
         agent_notice::record(notice);
     }
-    let sent = updated.unwrap_or_default();
+    let sent = updated.map(|(sent, _)| sent).unwrap_or_default();
     // A resumed session already holds its pack, so it makes neither call (#2142). A failed
     // wake-up call must not discard the project memories that did load, so they are kept on the
     // error path below (#2756).
@@ -564,13 +564,32 @@ mod tests {
         // The first update holds the only copy of the sent set for this session. A later
         // successful update does not undo a lost first update, so the notice must come from
         // the first update alone.
-        assert_eq!(first_update_notice(true, false), None);
+        assert_eq!(first_update_notice(FirstUpdate::Saved, false), None);
         assert_eq!(
-            first_update_notice(false, false),
+            first_update_notice(FirstUpdate::NotApplied, false),
             Some(RECALL_STATE_UNSAVED)
         );
-        assert_eq!(first_update_notice(false, true), Some(RESET_UNDONE));
-        assert_eq!(first_update_notice(true, true), None);
+        assert_eq!(
+            first_update_notice(FirstUpdate::NotApplied, true),
+            Some(RESET_UNDONE)
+        );
+        assert_eq!(first_update_notice(FirstUpdate::Saved, true), None);
+    }
+
+    #[test]
+    fn a_reset_whose_save_fails_is_reported_as_undone() {
+        // The reset was applied in memory but never reached disk, so the agent must hear it.
+        assert_eq!(
+            first_update_notice(FirstUpdate::SaveFailed, true),
+            Some(RESET_UNDONE)
+        );
+    }
+
+    #[test]
+    fn first_update_maps_the_store_result() {
+        assert_eq!(FirstUpdate::of::<()>(None), FirstUpdate::NotApplied);
+        assert_eq!(FirstUpdate::of(Some(&((), true))), FirstUpdate::Saved);
+        assert_eq!(FirstUpdate::of(Some(&((), false))), FirstUpdate::SaveFailed);
     }
 
     use std::time::Duration;
