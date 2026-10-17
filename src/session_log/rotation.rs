@@ -18,15 +18,17 @@ pub(crate) const MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const KEPT_ROTATIONS: u32 = 3;
 
 /// Rotate `path` when it holds at least `max_bytes`. Returns the name of the first rotation,
-/// or `None` when nothing rotated. Two processes that rotate at the same time are not locked
-/// against each other (#2831).
+/// or `None` when nothing rotated.
+///
+/// The rotation holds an advisory lock on a sibling lock file, and checks the length again
+/// under it. Two processes can both see a full file. Without the lock, the second would move
+/// the first one's new active file into generation 1 (#2831).
 pub(crate) fn rotate_if_full(path: &Path, max_bytes: u64) -> std::io::Result<Option<String>> {
-    let len = match std::fs::metadata(path) {
-        Ok(meta) => meta.len(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    if len < max_bytes {
+    if !is_full(path, max_bytes)? {
+        return Ok(None);
+    }
+    let _lock = rotation_lock(path)?;
+    if !is_full(path, max_bytes)? {
         return Ok(None);
     }
     ignore_missing(std::fs::remove_file(rotation_path(path, KEPT_ROTATIONS)))?;
@@ -41,6 +43,32 @@ pub(crate) fn rotate_if_full(path: &Path, max_bytes: u64) -> std::io::Result<Opt
     Ok(first
         .file_name()
         .map(|name| name.to_string_lossy().into_owned()))
+}
+
+/// Whether `path` holds at least `max_bytes`. A missing file is not full.
+fn is_full(path: &Path, max_bytes: u64) -> std::io::Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.len() >= max_bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Take the rotation lock beside `path`, and wait for it. A rotation holds it only for a few
+/// renames, and the lock ends with its process, so the wait is short.
+pub(super) fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".rotate.lock");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = crate::paths::refuse_symlink(&mut opts).open(path.with_file_name(name))?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// The first line of a file that follows a rotation. It names the file the old lines moved to.
@@ -131,6 +159,29 @@ mod tests {
 
     fn write_bytes(path: &Path, len: u64) {
         std::fs::write(path, vec![b'x'; usize::try_from(len).unwrap()]).unwrap();
+    }
+
+    #[test]
+    fn a_rotation_that_waits_on_the_lock_checks_the_length_again() {
+        // Another process rotated while this one waited, so the active file is small again.
+        // A second rotation would move that new file into generation 1 (#2831).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        std::fs::write(&path, "x".repeat(20)).unwrap();
+        let held = rotation_lock(&path).unwrap();
+        let waiter = {
+            let path = path.clone();
+            std::thread::spawn(move || rotate_if_full(&path, 10))
+        };
+        // Give the waiter time to pass its first length check and block on the lock.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::rename(&path, rotation_path(&path, 1)).unwrap();
+        std::fs::write(&path, "new").unwrap();
+        drop(held);
+
+        assert_eq!(waiter.join().unwrap().unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(!rotation_path(&path, 2).exists());
     }
 
     #[test]

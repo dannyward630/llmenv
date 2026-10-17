@@ -53,7 +53,8 @@ impl FileSink {
         let rotated = match rotate_if_full(&self.path, MAX_BYTES) {
             Ok(rotated) => rotated,
             Err(e) => {
-                tracing::warn!(
+                // Error level: the default filter hides a warn (#2657).
+                tracing::error!(
                     path = %self.path.display(),
                     error = %e,
                     "session log rotation failed; appending to the active file"
