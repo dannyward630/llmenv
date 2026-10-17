@@ -840,15 +840,19 @@ mod tests {
             Some("busy-2747"),
             dir.path(),
         );
+        // The message names no session id: the deny text holds the state path.
         assert!(
             denied.starts_with("__DENY__:") && denied.contains("busy"),
-            "{denied}"
+            "a busy lock must deny the commit"
         );
         let edit = serde_json::json!({ "tool_name": "Edit" });
         handle_post_tool_use(&tracker, &edit, Some("busy-2747"), dir.path());
         assert!(!path.exists(), "no save without the lock");
         let notices = crate::agent_notice::current().unwrap_or_default();
-        assert!(notices.contains(&path.display().to_string()), "{notices}");
+        assert!(
+            notices.contains(&path.display().to_string()),
+            "the skipped save must be noticed"
+        );
 
         drop(held);
         handle_post_tool_use(&tracker, &edit, Some("busy-2747"), dir.path());
