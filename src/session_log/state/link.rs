@@ -32,7 +32,7 @@ pub(crate) enum Link {
 }
 
 /// The link that a map `value` gives at `now` (Unix seconds).
-pub(crate) fn classify(value: Option<&str>, now: i64) -> Link {
+fn classify(value: Option<&str>, now: i64) -> Link {
     let Some(value) = value else {
         return Link::Missing;
     };

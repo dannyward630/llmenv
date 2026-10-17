@@ -594,7 +594,7 @@ pub(super) enum PrError {
 
 impl PrError {
     /// The text the widget shows for this error.
-    pub(super) fn label(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::Branch(_) => "pr: unreadable",
             Self::Gh(failure) => failure.label(),

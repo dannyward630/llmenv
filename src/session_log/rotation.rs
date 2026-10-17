@@ -56,7 +56,7 @@ fn is_full(path: &Path, max_bytes: u64) -> std::io::Result<bool> {
 
 /// Take the rotation lock beside `path`, and wait for it. A rotation holds it only for a few
 /// renames, and the lock ends with its process, so the wait is short.
-pub(super) fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
+fn rotation_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".rotate.lock");
     let mut opts = std::fs::OpenOptions::new();
