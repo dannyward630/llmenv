@@ -750,8 +750,15 @@ fn write_pr_cache(path: &Path, lookup: &PrLookup, now: i64) {
         pr: lookup.clone().unwrap_or_default(),
         failure: lookup.as_ref().err().copied(),
     };
-    let Ok(json) = serde_json::to_string(&entry) else {
-        return;
+    let json = match serde_json::to_string(&entry) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!(
+                "pr cache entry for {} cannot be serialized: {e}",
+                path.display()
+            );
+            return;
+        }
     };
     if let Err(e) = crate::paths::write_owner_only(path, json.as_bytes()) {
         tracing::error!("pr cache write to {} failed: {e}", path.display());
@@ -851,19 +858,32 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
     }
 }
 
-/// The lookup for a `gh pr view` that exited non-zero. A login failure is a failure. Any other
-/// exit, such as "no pull requests found" or "no git remotes", means there is no PR to show.
+/// The `gh pr view` errors that mean "there is no PR to show", not a failure.
+const GH_NO_PR_SIGNS: [&str; 3] = [
+    "no pull requests found",
+    "no git remotes found",
+    "not a git repository",
+];
+
+/// The `gh` errors that mean the login is missing or expired.
+const GH_LOGIN_SIGNS: [&str; 3] = ["gh auth login", "HTTP 401", "authentication required"];
+
+/// The lookup for a `gh pr view` that exited non-zero. Only a known "no PR" answer is
+/// `Ok(None)`. The "no PR" check runs first, because that message quotes the branch name, and a
+/// branch name can hold a login word. Any other exit, such as a network or rate-limit error, is
+/// a failure, so it cannot look like "no open PR" (#2821).
 fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -> PrLookup {
     let first_line = stderr.lines().next().unwrap_or("");
-    let login_failed = ["gh auth login", "HTTP 401", "authentication"]
-        .iter()
-        .any(|sign| stderr.contains(sign));
-    if login_failed {
+    if GH_NO_PR_SIGNS.iter().any(|sign| stderr.contains(sign)) {
+        tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
+        return Ok(None);
+    }
+    if GH_LOGIN_SIGNS.iter().any(|sign| stderr.contains(sign)) {
         tracing::error!("gh pr view: gh is not logged in ({status}): {first_line}");
         return Err(GhFailure::Unauthenticated);
     }
-    tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
-    Ok(None)
+    tracing::error!("gh pr view failed ({status}): {first_line}");
+    Err(GhFailure::Failed)
 }
 
 /// Parse `gh pr view --json number,url,reviewDecision`'s stdout into a
@@ -1983,6 +2003,36 @@ mod tests {
         assert_eq!(calls.lines().count(), 1, "gh should be called on a miss");
         let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
         assert!(cache_path.exists(), "cache miss must write a cache entry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_gh_exit_reads_only_known_answers_as_no_pr() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let no_pr = "no pull requests found for branch \"fix/authentication-retry\"";
+        assert_eq!(classify_gh_exit(status, no_pr), Ok(None));
+        assert_eq!(
+            classify_gh_exit(status, "To get started, please run:  gh auth login"),
+            Err(GhFailure::Unauthenticated)
+        );
+        assert_eq!(
+            classify_gh_exit(status, "error connecting to api.github.com"),
+            Err(GhFailure::Failed)
+        );
+        assert_eq!(classify_gh_exit(status, ""), Err(GhFailure::Failed));
+    }
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #[test]
+        fn classify_gh_exit_never_reads_unknown_text_as_no_pr(stderr in "\\PC{0,80}") {
+            use std::os::unix::process::ExitStatusExt as _;
+            let status = std::process::ExitStatus::from_raw(1 << 8);
+            let known = GH_NO_PR_SIGNS.iter().chain(GH_LOGIN_SIGNS.iter()).any(|s| stderr.contains(s));
+            proptest::prop_assume!(!known);
+            proptest::prop_assert_eq!(classify_gh_exit(status, &stderr), Err(GhFailure::Failed));
+        }
     }
 
     #[test]
