@@ -35,18 +35,28 @@ pub(super) async fn ensure_transcript_session(
     verify: bool,
 ) -> Option<String> {
     let path = state_path?;
-    let existing = match state::lookup_session_at(path, csid) {
-        Ok(existing) => existing,
+    let now = super::session_state::unix_now();
+    let seen = match state::link_at(path, csid, now) {
+        Ok(link) => link,
         Err(e) => {
             // Starting a new transcript here would orphan it: the map cannot record the link (#2658).
             crate::agent_notice::record(notice::transcript_unlinked_notice(&e));
             return None;
         }
     };
-    if let Some(existing) = existing
-        && let Some(id) = cached_transcript_id(client, &existing, verify).await
-    {
-        return Some(id);
+    match &seen {
+        state::Link::Linked(existing) => {
+            if let Some(id) = cached_transcript_id(client, existing, verify).await {
+                return Some(id);
+            }
+        }
+        // Another hook is starting the transcript, or its link was lost. A second start would
+        // leave a second orphan, so this event waits for the marker to expire (#2834).
+        state::Link::Pending => {
+            tracing::debug!("ICM transcript start pending for this session; event not logged");
+            return None;
+        }
+        state::Link::Missing => {}
     }
     if !cfg.transcript_wants(LogLevel::Info) {
         return None;
@@ -55,17 +65,37 @@ pub(super) async fn ensure_transcript_session(
         error!("no ICM transcript started: transcripts are on, but no MCP client is configured");
         return None;
     };
-    // Check the map before ICM starts a transcript. A transcript that cannot be linked is an
-    // orphan, and each later event would add another one (#2667).
-    if let Err(e) = state::check_writable_at(path) {
-        error!(error = %e, "no ICM transcript started: the session map cannot be written");
-        crate::agent_notice::record(notice::problem_notice(
-            &format!(
-                "no ICM transcript started for this session: the session map cannot be written: {e:#}"
-            ),
-            "run `llmenv doctor` to check the state directory.",
-        ));
-        return None;
+    start_linked(client, ctx, path, csid, &seen, now).await
+}
+
+/// Claim the session with a pending marker, start the transcript, and record its link. `None`
+/// after each failure, which is logged and noticed.
+async fn start_linked(
+    client: &McpHttpClient,
+    ctx: &ScopeContext,
+    path: &std::path::Path,
+    csid: &str,
+    seen: &state::Link,
+    now: i64,
+) -> Option<String> {
+    // The claim also proves the map can be written before ICM starts a transcript. A transcript
+    // that cannot be linked is an orphan, and each later event would add another one (#2667).
+    match state::claim_pending_at(path, csid, seen, now) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!("another hook claimed the ICM transcript start for this session");
+            return None;
+        }
+        Err(e) => {
+            error!(error = %e, "no ICM transcript started: the session map cannot be written");
+            crate::agent_notice::record(notice::problem_notice(
+                &format!(
+                    "no ICM transcript started for this session: the session map cannot be written: {e:#}"
+                ),
+                "run `llmenv doctor` to check the state directory.",
+            ));
+            return None;
+        }
     }
     let metadata = scope_metadata_json(ctx);
     let id = match transcript_dispatch::start_session(
@@ -79,6 +109,9 @@ pub(super) async fn ensure_transcript_session(
         Ok(id) => id,
         Err(e) => {
             error!(error = %e, "failed to start ICM transcript session");
+            if let Err(clear) = state::clear_pending_at(path, csid) {
+                error!(error = %clear, "cannot clear the pending transcript marker; it expires");
+            }
             crate::agent_notice::record(notice::problem_notice(
                 &format!("the ICM transcript for this session could not start: {e:#}"),
                 "run `llmenv doctor` to check the memory server.",
@@ -95,7 +128,8 @@ pub(super) async fn ensure_transcript_session(
         crate::agent_notice::record(notice::problem_notice(
             &format!(
                 "ICM transcript {id} started, but its link to this session was not recorded, so \
-                 this event is not logged and transcript {id} has no link: {e:#}"
+                 this event is not logged and transcript {id} has no link. No other transcript \
+                 starts for this session for 10 minutes: {e:#}"
             ),
             &format!(
                 "run `llmenv doctor` to check the state directory, then remove transcript {id} in ICM."

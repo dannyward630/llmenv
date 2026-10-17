@@ -2057,7 +2057,9 @@ async fn handle_session_log(
         (_, Some(csid)) => state_path.and_then(|p| match state::lookup_session_at(p, csid) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("llmenv: session log skipped for this event: {e:#}");
+                // The engine drops a hook's stderr, so the agent hears it here (#2834).
+                tracing::error!("session log skipped for this event: {e:#}");
+                crate::agent_notice::record(notice::transcript_unlinked_notice(&e));
                 None
             }
         }),
@@ -7387,6 +7389,45 @@ mod session_log_tests {
     // trigger (the test binary is not the `llmenv` binary `spawn_record`
     // expects to re-invoke). `start_session` stays synchronous/inline
     // (`ensure_transcript_session`), so it remains directly unit-testable.
+
+    #[tokio::test]
+    async fn ensure_transcript_session_starts_no_second_transcript_while_one_is_pending() {
+        // A start whose link was not recorded leaves its pending marker. A later event must not
+        // start another transcript, which would be a second orphan (#2834).
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("transcript-sessions.json");
+        let seen = state::Link::Missing;
+        let now = super::session_state::unix_now();
+        assert!(state::claim_pending_at(&state_path, "claude-p", &seen, now).unwrap());
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_text_response("icm-new")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let cfg = SessionLog {
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled: true,
+                level: LogLevel::Info,
+                retention_days: None,
+            }),
+            ..file_only_cfg(&state_dir.path().join("unused.jsonl"))
+        };
+
+        let id = ensure_transcript_session(
+            &cfg,
+            Some(&client),
+            "claude-p",
+            &ctx(),
+            Some(&state_path),
+            true,
+        )
+        .await;
+
+        assert_eq!(id, None);
+        server.verify().await;
+    }
 
     #[tokio::test]
     async fn ensure_transcript_session_creates_and_correlates_when_none_recorded() {
