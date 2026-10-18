@@ -3,7 +3,8 @@
 use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 /// Copy `src` to `dst` like `std::fs::copy`, with the destination opened by
 /// [`crate::paths::create_refusing_symlink`]. The copy keeps the source mode, because the backup
@@ -76,21 +77,60 @@ fn stage_binary(temp: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// How long the new binary may take to answer `--version`. A binary that hangs on start must not
+/// block the upgrade with no output, so a longer wait only delays the rollback.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often the verify loop checks whether the child has exited. Short enough that a fast run
+/// adds little delay, and long enough that the loop does not spin.
+const VERIFY_POLL: Duration = Duration::from_millis(20);
+
 /// Run the installed binary. A run that fails puts the backup back over it.
 fn verify_installed(current_exe: &Path, backup: &Path) -> Result<()> {
-    let failure = match Command::new(current_exe).arg("--version").output() {
-        Ok(output) if output.status.success() => {
+    verify_installed_within(current_exe, backup, VERIFY_TIMEOUT)
+}
+
+/// [`verify_installed`] with the wait bound as a parameter, so a test can use a short bound.
+fn verify_installed_within(current_exe: &Path, backup: &Path, timeout: Duration) -> Result<()> {
+    let mut version = Command::new(current_exe);
+    version.arg("--version");
+    let failure = match run_bounded(version, timeout) {
+        Ok(Some(output)) if output.status.success() => {
             remove_leftover(backup, "backup");
             return Ok(());
         }
-        Ok(output) => format!(
+        Ok(Some(output)) => format!(
             "new binary failed verification ({}; stderr: {})",
             output.status,
             String::from_utf8_lossy(&output.stderr)
         ),
+        Ok(None) => format!(
+            "new binary did not finish --version within {}s",
+            timeout.as_secs()
+        ),
         Err(e) => format!("could not run new binary to verify it: {e}"),
     };
     bail!("{}", restore_original(current_exe, backup, &failure))
+}
+
+/// Run `cmd` and collect its output, or kill it when `timeout` passes first.
+///
+/// Returns `Ok(None)` when the child was killed at the deadline. `Command` has no timeout of its
+/// own, so the child is polled until it exits or the deadline passes.
+fn run_bounded(mut cmd: Command, timeout: Duration) -> std::io::Result<Option<Output>> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(Some);
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Ok(None);
+        }
+        std::thread::sleep(VERIFY_POLL);
+    }
 }
 
 /// Put the backup back over the installed binary, and describe the outcome for the user.
@@ -132,6 +172,43 @@ fn resolve_install_path(exe: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_past_its_deadline_is_killed_and_reports_no_output() {
+        let started = std::time::Instant::now();
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("600");
+        let outcome = run_bounded(cmd, Duration::from_millis(100)).unwrap();
+        assert!(
+            outcome.is_none(),
+            "a run past the deadline must report no output"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the run must stop at the deadline"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_binary_that_never_exits_is_replaced_by_the_backup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("llmenv");
+        use std::os::unix::fs::PermissionsExt;
+        // `exec` replaces the shell, so the kill at the deadline reaches the process that hangs.
+        std::fs::write(&exe, "#!/bin/sh\nexec /bin/sleep 600\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let backup = dir.path().join(".llmenv-upgrade.bak");
+        std::fs::write(&backup, b"old binary").unwrap();
+        let err = verify_installed_within(&exe, &backup, Duration::from_millis(100))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did not finish --version within"), "{err}");
+        assert!(err.ends_with("restored original"), "{err}");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
+        assert!(!backup.exists(), "the backup must move back into place");
+    }
 
     #[cfg(unix)]
     #[test]
