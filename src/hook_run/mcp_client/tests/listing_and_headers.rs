@@ -163,25 +163,42 @@ async fn with_headers_sends_the_configured_headers() {
     client.probe().await.expect("probe");
 }
 
-#[test]
-fn with_headers_rejects_an_invalid_header_name_and_value() {
-    for (name, value) in [("bad name", "v"), ("x-ok", "line\nbreak")] {
-        let headers = std::collections::BTreeMap::from([(name.to_string(), value.to_string())]);
-        let err = McpHttpClient::with_headers(
-            "http://127.0.0.1:9".into(),
-            Duration::from_secs(1),
-            &headers,
-        )
+/// The error text that `with_headers` returns for `headers`.
+fn header_error(headers: &std::collections::BTreeMap<String, String>) -> String {
+    McpHttpClient::with_headers("http://127.0.0.1:9".into(), Duration::from_secs(1), headers)
         .expect_err("invalid header")
-        .to_string();
-        assert!(err.contains("header"), "{err}");
-    }
+        .to_string()
 }
 
-/// Runs in a child process, because `set_var` is unsafe in edition 2024 and a process-wide
-/// proxy variable would race the other tests in this binary.
-/// Runs in a child process, because `set_var` is unsafe in edition 2024 and a process-wide
-/// proxy variable would race the other tests in this binary.
+#[test]
+fn with_headers_rejects_an_invalid_header_name_and_value() {
+    let bad_name = std::collections::BTreeMap::from([("bad name".to_string(), "v".to_string())]);
+    let name_err = header_error(&bad_name);
+    assert!(
+        name_err.contains("MCP header name 'bad name' is not valid"),
+        "{name_err}"
+    );
+    let bad_value =
+        std::collections::BTreeMap::from([("x-ok".to_string(), "line\nbreak".to_string())]);
+    let value_err = header_error(&bad_value);
+    assert!(
+        value_err.contains("MCP header 'x-ok' has a value that is not valid"),
+        "{value_err}"
+    );
+}
+
+#[test]
+fn with_headers_rejects_keys_that_differ_only_by_case() {
+    let headers = std::collections::BTreeMap::from([
+        ("X-Api-Key".to_string(), "a".to_string()),
+        ("x-api-key".to_string(), "b".to_string()),
+    ]);
+    let err = header_error(&headers);
+    assert!(err.contains("is set more than once"), "{err}");
+}
+
+/// Runs in a child process. The child gets the proxy variables through `Command::env`, so the
+/// parent process env stays untouched, because `set_var` is unsafe in edition 2024.
 #[tokio::test]
 async fn http_proxy_env_cannot_carry_an_mcp_request() {
     const TARGET_ENV: &str = "LLMENV_MCP_PROXY_TEST_TARGET";
@@ -208,10 +225,17 @@ async fn http_proxy_env_cannot_carry_an_mcp_request() {
         .respond_with(ResponseTemplate::new(418))
         .mount(&proxy)
         .await;
-    let test_name = "hook_run::mcp_client::tests::listing_and_headers::http_proxy_env_cannot_carry_an_mcp_request";
-    let output = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+    let test_name = concat!(
+        "hook_run::mcp_client::tests::listing_and_headers::",
+        "http_proxy_env_cannot_carry_an_mcp_request"
+    );
+    // The child re-runs this test binary, so the path is the test binary itself. nosemgrep: rust.lang.security.current-exe.current-exe
+    let test_binary = std::env::current_exe().expect("test binary path");
+    let output = std::process::Command::new(test_binary)
         .args(["--exact", test_name, "--nocapture"])
         .env("HTTP_PROXY", proxy.uri())
+        .env("HTTPS_PROXY", proxy.uri())
+        .env("ALL_PROXY", proxy.uri())
         .env(TARGET_ENV, target.uri())
         .output()
         .expect("spawn the child test");

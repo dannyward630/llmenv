@@ -1,5 +1,10 @@
 //! Test helpers shared by the MCP client tests.
+use super::ssrf::{blocked_reason, drop_link_local_for_domain, is_link_local, run_with_timeout};
 use super::*;
+use crate::mcp::cleartext::{embedded_ipv4, is_cleartext_safe, is_unique_local_v6};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::mpsc;
+use std::thread;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
