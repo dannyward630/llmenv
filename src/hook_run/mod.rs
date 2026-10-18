@@ -1446,8 +1446,7 @@ fn run_inner(
                 [cm] => match crate::mcp::resolve::codebase_memory_paths() {
                     Ok((project_root, state_dir)) => {
                         // Before the index run, so the server accepts the repository (#2406).
-                        let roots =
-                            crate::mcp::cbm_roots::session_start_notice(&config, cm, &project_root);
+                        let roots = crate::mcp::cbm_roots::session_start_notice(cm, &project_root);
                         let index = trigger_codebase_memory_index(&project_root, cm, &state_dir);
                         roots_notice = match (roots, index) {
                             (Some(r), Some(i)) => Some(format!("{r}{i}")),

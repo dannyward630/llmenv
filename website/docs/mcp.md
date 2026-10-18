@@ -303,15 +303,17 @@ llmenv saves that result for each project next to `index.log`, in `index-result-
 - `no index result for this project yet` before the first run
 
 The time is in UTC.
-(added in v3.12.0) codebase-memory-mcp 0.11.0 indexes only the roots in its `allowed_roots` file, once any root is recorded.
-At each SessionStart llmenv records its roots through `codebase-memory-mcp allow-root <path>`,
-with the same `CBM_CACHE_DIR` as the server.
-The roots are:
+(added in v3.12.0; changed in v3.13.0) codebase-memory-mcp indexes only the roots in its `allowed_roots` file, once any root is recorded.
+An empty file means it indexes any path.
+llmenv never records a root.
+You record one yourself with the command that `llmenv doctor` prints:
 
-- the project root
-- the llmenv config, cache, and state folders
-- `${NBL_DIAG_CACHE:-~/.cache/nbl-diag}/repos`, the code-explorer cache
-- the entries of `allowed_roots`
+```sh
+CBM_CACHE_DIR=<cache dir> codebase-memory-mcp allow-root <path>
+```
+
+The roots are the entries of `allowed_roots`, and nothing else.
+The project root, the llmenv folders, and the code-explorer cache are not roots unless you list them.
 
 ```yaml
 features:
@@ -325,14 +327,16 @@ features:
 `~` and `$VAR` expand at session start.
 An entry with an unset variable is dropped.
 A relative entry or a `~user` entry is rejected by `llmenv validate`.
-llmenv skips a default root that does not exist yet, and warns about a configured entry that is not a folder.
-The SessionStart notice and `llmenv doctor` list the roots, and warn about a root that the server did not accept.
-A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the configured roots
-and the roots the server lists.
-The deny text names the config fix.
-A root stays recorded after you remove it from the config, because codebase-memory-mcp has no command to remove one.
-To revoke a root, delete its line from `<cache dir>/allowed_roots`.
-Do not run `allow-root` by hand: the config is the source of the roots.
+llmenv warns about a configured entry that is not a folder.
+The SessionStart notice and `llmenv doctor` list the recorded roots.
+They name each configured root that the server does not cover, with the command to record it.
+They also name a recorded root that no configured root covers.
+A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the recorded roots,
+once any root is recorded.
+The deny text asks you to record the folder.
+codebase-memory-mcp has no command to remove a root.
+To return to unconfined indexing, delete `<cache dir>/allowed_roots`.
+To keep some roots, edit that file.
 
 The background watcher is a setting of codebase-memory-mcp itself, not of llmenv.
 Turn it off with `codebase-memory-mcp config set watcher_enabled false`.
