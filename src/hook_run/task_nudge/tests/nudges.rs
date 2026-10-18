@@ -163,11 +163,13 @@ fn the_commit_deny_names_the_next_open_task_when_tasks_are_queued() {
     );
     assert!(
         denied.contains("llmenv task start step-one"),
-        "the deny must name the start command for step one"
+        "the deny must name the start command for step one; got {} bytes",
+        denied.len()
     );
     assert!(
         !denied.contains("llmenv task add"),
-        "the deny must not suggest adding a task"
+        "the deny must not suggest adding a task; got {} bytes",
+        denied.len()
     );
 }
 

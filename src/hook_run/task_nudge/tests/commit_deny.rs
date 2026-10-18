@@ -6,14 +6,20 @@ fn the_first_commit_with_no_task_in_progress_is_denied_and_the_retry_passes() {
     let tracker = TaskTracker::default();
     let pre = |command: &str| handle_pre_tool_use(&tracker, &bash(command), Some("s1"), dir.path());
     let denied = pre("git commit -m x");
-    assert!(denied.starts_with("__DENY__:"), "the commit gate must deny");
+    assert!(
+        denied.starts_with("__DENY__:"),
+        "the commit gate must deny; got {} bytes",
+        denied.len()
+    );
     assert!(
         denied.contains("llmenv task session start"),
-        "the deny must name the session start command"
+        "the deny must name the session start command; got {} bytes",
+        denied.len()
     );
     assert!(
         denied.contains("enforce_commit"),
-        "the deny must name enforce_commit"
+        "the deny must name enforce_commit; got {} bytes",
+        denied.len()
     );
     assert_eq!(pre("git commit -m x"), "", "the retry is allowed");
     assert_eq!(pre("git status"), "", "other commands never deny");

@@ -9,7 +9,11 @@ fn a_task_done_earlier_in_the_same_command_does_not_pass_the_commit_gate() {
     let tracker = TaskTracker::default();
     let chained = bash(&format!("llmenv task done {slug} && git commit -m x"));
     let denied = handle_pre_tool_use(&tracker, &chained, Some("s1"), dir.path());
-    assert!(denied.starts_with("__DENY__:"), "the commit gate must deny");
+    assert!(
+        denied.starts_with("__DENY__:"),
+        "the commit gate must deny; got {} bytes",
+        denied.len()
+    );
     // The commit ran before the task ended, so the task is still in progress for it.
     let before = bash(&format!("git commit -m x && llmenv task done {slug}"));
     assert_eq!(
@@ -28,7 +32,11 @@ fn a_task_waited_on_earlier_in_the_same_command_does_not_pass_the_commit_gate() 
         "llmenv task wait {slug} \"needs an answer\" && git commit -m x"
     ));
     let denied = handle_pre_tool_use(&TaskTracker::default(), &waited, Some("s1"), dir.path());
-    assert!(denied.starts_with("__DENY__:"), "the commit gate must deny");
+    assert!(
+        denied.starts_with("__DENY__:"),
+        "the commit gate must deny; got {} bytes",
+        denied.len()
+    );
 }
 
 #[test]
@@ -42,18 +50,25 @@ fn commit_gate_names_the_nesting_limit_for_a_command_too_deep_to_split() {
         Some("s1"),
         dir.path(),
     );
-    assert!(denied.starts_with("__DENY__:"), "the commit gate must deny");
+    assert!(
+        denied.starts_with("__DENY__:"),
+        "the commit gate must deny; got {} bytes",
+        denied.len()
+    );
     assert!(
         denied.contains("32 levels deep"),
-        "the deny must name the 32-level limit"
+        "the deny must name the 32-level limit; got {} bytes",
+        denied.len()
     );
     assert!(
         denied.contains("Split the command"),
-        "the deny must say to split the command"
+        "the deny must say to split the command; got {} bytes",
+        denied.len()
     );
     assert!(
         !denied.contains("no task is in progress"),
-        "the deny must not blame a missing task"
+        "the deny must not blame a missing task; got {} bytes",
+        denied.len()
     );
 }
 
@@ -67,9 +82,14 @@ fn a_nested_commit_stays_denied_on_retry() {
     let retry = handle_pre_tool_use(&tracker, &bash(&nested), Some("s1"), dir.path());
     assert!(
         first.starts_with("__DENY__:"),
-        "the first attempt must deny"
+        "the first attempt must deny; got {} bytes",
+        first.len()
     );
-    assert!(retry.starts_with("__DENY__:"), "the retry must deny");
+    assert!(
+        retry.starts_with("__DENY__:"),
+        "the retry must deny; got {} bytes",
+        retry.len()
+    );
 }
 
 #[test]
