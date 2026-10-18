@@ -214,20 +214,28 @@ async fn run_scope(
         }
         outcome.texts.clear();
     }
-    let unrun = actions.len();
-    if budget.is_full() {
-        if let Some(notice) = scope_cut_notice(unrun) {
-            agent_notice::record(notice);
-        }
-    } else if outcome.failed > 0 && unrun > 0 {
-        // The failure ended the fallback early. The skipped tags are not retried this epoch,
-        // so the agent must hear that they did not run (#2897).
-        agent_notice::record(format!(
-            "llmenv: {unrun} scope recall action(s) did not run after a memory recall failed. \
-             Fix: run `llmenv doctor` to check the memory server."
-        ));
+    if let Some(notice) = unrun_notice(actions.len(), outcome.failed > 0, budget.is_full()) {
+        agent_notice::record(notice);
     }
     outcome
+}
+
+/// The notice for scope recalls that did not run, or `None` when none were skipped. A stop after
+/// a failure is not retried this epoch, so the agent must hear about it (#2897). A cut by the
+/// output budget has its own notice (#2766).
+fn unrun_notice(unrun: usize, failed: bool, budget_full: bool) -> Option<String> {
+    if unrun == 0 {
+        return None;
+    }
+    if budget_full {
+        return scope_cut_notice(unrun);
+    }
+    failed.then(|| {
+        format!(
+            "llmenv: {unrun} scope recall action(s) did not run after a memory recall failed. \
+             Fix: run `llmenv doctor` to check the memory server."
+        )
+    })
 }
 
 /// `SessionStart`: reset per `source`, then send the wake-up pack and the scope set.
@@ -862,6 +870,22 @@ mod tests {
             ledger.last_query_hash, None,
             "a failed recall is not a done query"
         );
+    }
+
+    #[test]
+    fn a_failure_with_nothing_unrun_has_no_notice() {
+        assert_eq!(unrun_notice(0, true, false), None);
+        assert_eq!(unrun_notice(0, false, true), None);
+    }
+
+    #[test]
+    fn a_failure_that_leaves_tags_unrun_names_the_count() {
+        let notice = unrun_notice(3, true, false).unwrap();
+        assert!(
+            notice.contains("3 scope recall action(s) did not run"),
+            "{notice}"
+        );
+        assert_eq!(unrun_notice(3, false, false), None);
     }
 
     #[tokio::test]
