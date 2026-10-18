@@ -28,6 +28,9 @@ llmenv status tags     # marks active tags
   change or hide the gateway, leaving the scope unmatched. An `ssid` scope never matches when
   the platform hides the SSID (macOS 15 prints `<redacted>`), and `llmenv doctor` says so.
   Fall back to a **host scope** (matches by hostname, always reliable) that emits the same tag.
+  Each detection command has a deadline (changed after v3.12.2). A stuck `route`, `arp`,
+  `networksetup`, or `ipconfig` call counts as no reading, so the scope stays unmatched and the
+  prompt does not wait.
 - **Host scopes** match case-insensitively against the local hostname. Run
   `hostname` and compare.
 - **User scopes** match `$USER` exactly.
@@ -161,6 +164,17 @@ llmenv found a `settings.json` that is not valid JSON, for example after a half-
 It moved the file to `settings.json.corrupt` and wrote a new one, and it printed a warning with the parse error.
 Compare the two files, copy any key that you need back into your llmenv config, and delete the `.corrupt` file.
 If llmenv cannot move the file, the render stops and names the file. Fix or remove it, and run `llmenv regenerate`.
+When `settings.json` is a symlink, llmenv moves the file that the link points to, and the link stays (changed after v3.12.2).
+
+## A config file is a symlink to a dotfiles repo
+
+(changed after v3.12.2)
+
+llmenv keeps a symlink at `settings.json`, `.claude.json`, `plugins/installed_plugins.json`, or `config.yaml`.
+It writes the file that the link points to, and it does not change the permissions of that file's folder.
+The written file is readable by its owner only.
+A link whose target does not exist stops the write with an error that names the link and its target.
+Create the target file, or remove the link so that llmenv writes a plain file.
 
 ## A bundle hook warns that a path is not in the bundle files
 
