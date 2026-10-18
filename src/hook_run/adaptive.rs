@@ -199,7 +199,7 @@ async fn run_scope(
     ctx: &AdaptiveCtx<'_>,
     scope: Vec<Action>,
     budget: &mut RecallBudget,
-) -> Outcome {
+) -> (Outcome, Option<String>) {
     let mut outcome = Outcome::default();
     let mut actions = scope.into_iter();
     // A refused or timed-out server would stall each remaining tag for one HOOK_TIMEOUT, so the
@@ -214,10 +214,8 @@ async fn run_scope(
         }
         outcome.texts.clear();
     }
-    if let Some(notice) = unrun_notice(actions.len(), outcome.failed > 0, budget.is_full()) {
-        agent_notice::record(notice);
-    }
-    outcome
+    let notice = unrun_notice(actions.len(), outcome.failed > 0, budget.is_full());
+    (outcome, notice)
 }
 
 /// The notice for scope recalls that did not run, or `None` when none were skipped. A stop after
@@ -290,7 +288,10 @@ pub(super) async fn session_start(
     let wake_bytes = pack_bytes(&wake, &own);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
     let scope_len = scope.len();
-    let outcome = run_scope(ctx, scope, &mut budget).await;
+    let (outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
+    if let Some(notice) = unrun {
+        agent_notice::record(notice);
+    }
     report("session_start", &outcome, &budget);
     let wake = match wake {
         Ok(text) => text,
@@ -379,7 +380,11 @@ pub(super) async fn turn_start(
     let fallback = !ledger.scope_sent(MAIN_AGENT);
     let mut outcome = Outcome::default();
     if fallback {
-        outcome = run_scope(ctx, scope, &mut budget).await;
+        let (scope_outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
+        if let Some(notice) = unrun {
+            agent_notice::record(notice);
+        }
+        outcome = scope_outcome;
     }
     let tail = ctx.payload["transcript_path"]
         .as_str()
@@ -893,13 +898,15 @@ mod tests {
         let server = failing_server().await;
         let f = fixture(&server);
         let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
-        let outcome = run_scope(
+        let (outcome, unrun) = run_scope(
             &ctx(&f, &json!({"prompt": "hi"})),
             vec![tag_action("a"), tag_action("b"), tag_action("c")],
             &mut budget,
         )
         .await;
         assert_eq!(outcome.calls, 1, "{outcome:?}");
+        let notice = unrun.expect("the stop after a failure must be reported");
+        assert!(notice.contains("2 scope recall action(s)"), "{notice}");
     }
 
     #[tokio::test]
