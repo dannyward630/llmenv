@@ -237,7 +237,7 @@ pub(crate) fn choose_auth_for_inheritance(
 ///
 /// Follows the same read-merge-write discipline as `merge_mcp_into_claude_json`:
 /// reads existing file (absent → `{}`), corrupt → hard error, upserts only the
-/// `oauthAccount` key, writes back with `write_owner_only_atomic`. All other
+/// `oauthAccount` key, writes back with `write_user_file_atomic`. All other
 /// keys (`mcpServers`, `numStartups`, project state) are preserved verbatim.
 ///
 /// # Errors
@@ -257,7 +257,7 @@ pub(crate) fn inject_auth_into_claude_json(
     };
     obj.insert(OAUTH_ACCOUNT_KEY.to_string(), entry.raw.clone());
     let json = Zeroizing::new(serde_json::to_string_pretty(&doc)?);
-    let result = crate::paths::write_owner_only_atomic(&path, json.as_bytes())
+    let result = crate::paths::write_user_file_atomic(&path, json.as_bytes())
         .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()));
     zeroize_json_value(&mut doc);
     result
