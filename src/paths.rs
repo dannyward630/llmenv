@@ -4,7 +4,8 @@ pub use llmenv_paths::{
     binary_on_path, config_dir, config_path, copy_replacing_symlink, create_dir_owner_only,
     cwd_under_prefix, expand_tilde, has_parent_component, is_unsafe_join_target,
     is_valid_short_name, read_dir_optional, refuse_symlink, reject_non_regular_file,
-    resolve_in_path_list, resolve_on_path, state_dir, write_owner_only, write_owner_only_atomic,
+    resolve_in_path_list, resolve_on_path, resolve_user_link, state_dir, write_owner_only,
+    write_owner_only_atomic, write_user_file_atomic,
 };
 
 #[cfg(all(test, unix))]
