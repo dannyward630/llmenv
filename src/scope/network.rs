@@ -143,7 +143,12 @@ fn detect_linux() -> Option<String> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run(args: &[&str]) -> Option<String> {
     let (cmd, rest) = args.split_first()?;
-    super::capture_stdout("gateway-mac detection", cmd, rest)
+    super::probe::capture_stdout(
+        "gateway-mac detection",
+        cmd,
+        rest,
+        super::probe::DEFAULT_DETECT_TIMEOUT,
+    )
 }
 
 #[must_use]

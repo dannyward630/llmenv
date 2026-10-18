@@ -50,7 +50,12 @@ pub(crate) fn detect_ssid_name() -> Option<String> {
 
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn run(program: &str, args: &[&str]) -> Option<String> {
-    super::capture_stdout("ssid detection", program, args)
+    super::probe::capture_stdout(
+        "ssid detection",
+        program,
+        args,
+        super::probe::DEFAULT_DETECT_TIMEOUT,
+    )
 }
 
 #[cfg(target_os = "macos")]
