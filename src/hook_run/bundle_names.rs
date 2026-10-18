@@ -6,8 +6,9 @@
 /// deduplicated and sorted, minus anything any scope disables. `disable_bundles`
 /// wins here too (#1125): a project that opts out of a bundle must not have it
 /// named in queries sent to the memory backend or in the context chunk stored
-/// there. The firing set is the one `icm.json` shows, so the recall keywords and
-/// the session metadata match the bundles the session really has (#2898).
+/// there. The firing set is the one `icm.json` shows (#2898). An `enable_bundles`
+/// name that no bundle entry declares is kept too, as it was before, so a name
+/// that cannot fire still appears in these lists.
 pub(super) fn recall_bundle_names(
     bundles: &[crate::config::Bundle],
     active: &crate::scope::ActiveScopes,
