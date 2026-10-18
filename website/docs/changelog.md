@@ -133,10 +133,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An ICM outage in the adaptive recall flows reaches the agent as a notice. Before, it went to stderr, which the engine drops (#2868) [fix:hook]
 - The transcript migration logs each folder it skips, and keeps a non-UTF-8 folder name. Before, an unreadable entry was skipped with no word (#2868) [fix:materialize]
 - `llmenv doctor` stops a tool's `--version` call after 10 seconds and logs why a version is unknown, and `llmenv setup` reports a `settings.json` or `plugins.json` that it cannot check (#2868) [fix:cli]
+- `llmenv upgrade` replaces the binary that a symlink points to, not the symlink. Before, the rename replaced the link and the real binary kept the old version (#2580) [fix:upgrade]
 
 ### Security
 
 - Update `rustls` to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and RUSTSEC-2026-0349. They cover TLS secrets in `Debug` output, application data sent after an ECH rejection, unbounded Brotli certificate decompression, and a key-exchange downgrade [fix:deps]
+- The MCP HTTP client ignores `HTTP_PROXY`, so an `http://` request to a private address cannot leave through a proxy. An MCP server that is reachable only through a proxy no longer works (#2484) [fix:hook]
 
 ## [3.12.2] - 2026-10-10
 
