@@ -3475,7 +3475,7 @@ fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
     }
     let yaml =
         serde_yaml::to_string(&config).map_err(|e| anyhow::anyhow!("serializing config: {e}"))?;
-    paths::write_owner_only_atomic(config_path, yaml.as_bytes())
+    paths::write_user_file_atomic(config_path, yaml.as_bytes())
         .with_context(|| format!("writing config {}", config_path.display()))?;
     eprintln!("✓ {count} setting(s) added to init.seeded_settings in config.yaml");
     Ok(())

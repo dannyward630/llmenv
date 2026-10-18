@@ -3,7 +3,8 @@
 use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Copy `src` to `dst` like `std::fs::copy`, with the destination opened by
 /// [`crate::paths::create_refusing_symlink`]. The copy keeps the source mode, because the backup
@@ -54,7 +55,7 @@ pub(super) fn install_binary(data: &[u8]) -> Result<()> {
             current_exe.display()
         )));
     }
-    verify_installed(&current_exe, &backup)
+    verify_installed(&current_exe, &backup, VERIFY_TIMEOUT)
 }
 
 /// Write `data` to `temp` with the executable mode, and flush it to disk.
@@ -76,21 +77,44 @@ fn stage_binary(temp: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Run the installed binary. A run that fails puts the backup back over it.
-fn verify_installed(current_exe: &Path, backup: &Path) -> Result<()> {
-    let failure = match Command::new(current_exe).arg("--version").output() {
+/// How long the new binary may take to answer `--version`. A binary that hangs on start must not
+/// block the upgrade with no output, so a longer wait only delays the rollback.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run the installed binary with `--version`, for at most `timeout`. A run that fails, or that
+/// does not finish in time, puts the backup back over it.
+fn verify_installed(current_exe: &Path, backup: &Path, timeout: Duration) -> Result<()> {
+    let mut version = Command::new(current_exe);
+    // A broken binary that reads stdin must not take the user's keystrokes.
+    version
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let failure = match crate::process::run_with_timeout(version, timeout) {
         Ok(output) if output.status.success() => {
             remove_leftover(backup, "backup");
             return Ok(());
         }
         Ok(output) => format!(
-            "new binary failed verification ({}; stderr: {})",
+            "new binary failed verification ({}; stderr starts with {:?})",
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            stderr_excerpt(&output.stderr)
         ),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            format!("new binary did not finish --version: {e}")
+        }
         Err(e) => format!("could not run new binary to verify it: {e}"),
     };
     bail!("{}", restore_original(current_exe, backup, &failure))
+}
+
+/// The start of the new binary's stderr, short enough to put in an error message.
+fn stderr_excerpt(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .chars()
+        .take(super::github::BODY_EXCERPT_CHARS)
+        .collect()
 }
 
 /// Put the backup back over the installed binary, and describe the outcome for the user.
@@ -133,6 +157,37 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn the_stderr_excerpt_is_capped() {
+        let long = "e".repeat(super::super::github::BODY_EXCERPT_CHARS * 3);
+        let excerpt = stderr_excerpt(long.as_bytes());
+        assert_eq!(
+            excerpt.chars().count(),
+            super::super::github::BODY_EXCERPT_CHARS
+        );
+        assert_eq!(stderr_excerpt(b"short"), "short");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_binary_that_never_exits_is_replaced_by_the_backup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("llmenv");
+        use std::os::unix::fs::PermissionsExt;
+        // `exec` replaces the shell, so the kill at the deadline reaches the process that hangs.
+        std::fs::write(&exe, "#!/bin/sh\nexec /bin/sleep 600\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let backup = dir.path().join(".llmenv-upgrade.bak");
+        std::fs::write(&backup, b"old binary").unwrap();
+        let err = verify_installed(&exe, &backup, Duration::from_millis(100))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did not finish --version"), "{err}");
+        assert!(err.ends_with("restored original"), "{err}");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
+        assert!(!backup.exists(), "the backup must move back into place");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_symlinked_install_path_resolves_to_the_real_binary() {
@@ -165,7 +220,7 @@ mod tests {
     #[test]
     fn a_new_binary_that_runs_is_kept_and_the_backup_is_removed() {
         let (_dir, exe, backup) = install_linked_to("/usr/bin/true", b"old binary");
-        verify_installed(&exe, &backup).unwrap();
+        verify_installed(&exe, &backup, VERIFY_TIMEOUT).unwrap();
         assert!(!backup.exists(), "the backup must be removed");
         assert!(exe.is_symlink(), "the new binary must stay in place");
     }
@@ -174,7 +229,9 @@ mod tests {
     #[test]
     fn a_new_binary_that_fails_is_replaced_by_the_backup() {
         let (_dir, exe, backup) = install_linked_to("/usr/bin/false", b"old binary");
-        let err = verify_installed(&exe, &backup).unwrap_err().to_string();
+        let err = verify_installed(&exe, &backup, VERIFY_TIMEOUT)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("failed verification (exit status: 1"), "{err}");
         assert!(err.ends_with("restored original"), "{err}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
@@ -189,7 +246,9 @@ mod tests {
         std::fs::write(&exe, b"not a program").unwrap();
         let backup = dir.path().join(".llmenv-upgrade.bak");
         std::fs::write(&backup, b"old binary").unwrap();
-        let err = verify_installed(&exe, &backup).unwrap_err().to_string();
+        let err = verify_installed(&exe, &backup, VERIFY_TIMEOUT)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("could not run new binary to verify it"),
             "{err}"
