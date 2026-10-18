@@ -148,6 +148,100 @@ mod tests {
         );
     }
 
+    /// A temp dir with an installed binary that links to `program`, and a backup that holds
+    /// `old`. A link to a system program avoids writing an executable, which can fail with
+    /// "text file busy" when another test forks at the same time.
+    #[cfg(unix)]
+    fn install_linked_to(program: &str, old: &[u8]) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("llmenv");
+        std::os::unix::fs::symlink(program, &exe).unwrap();
+        let backup = dir.path().join(".llmenv-upgrade.bak");
+        std::fs::write(&backup, old).unwrap();
+        (dir, exe, backup)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_binary_that_runs_is_kept_and_the_backup_is_removed() {
+        let (_dir, exe, backup) = install_linked_to("/usr/bin/true", b"old binary");
+        verify_installed(&exe, &backup).unwrap();
+        assert!(!backup.exists(), "the backup must be removed");
+        assert!(exe.is_symlink(), "the new binary must stay in place");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_binary_that_fails_is_replaced_by_the_backup() {
+        let (_dir, exe, backup) = install_linked_to("/usr/bin/false", b"old binary");
+        let err = verify_installed(&exe, &backup).unwrap_err().to_string();
+        assert!(err.contains("failed verification (exit status: 1"), "{err}");
+        assert!(err.ends_with("restored original"), "{err}");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
+        assert!(!backup.exists(), "the backup must move back into place");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_binary_that_cannot_start_is_replaced_by_the_backup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("llmenv");
+        std::fs::write(&exe, b"not a program").unwrap();
+        let backup = dir.path().join(".llmenv-upgrade.bak");
+        std::fs::write(&backup, b"old binary").unwrap();
+        let err = verify_installed(&exe, &backup).unwrap_err().to_string();
+        assert!(
+            err.contains("could not run new binary to verify it"),
+            "{err}"
+        );
+        assert!(err.ends_with("restored original"), "{err}");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old binary");
+    }
+
+    #[test]
+    fn a_failed_restore_names_the_backup_and_the_installed_binary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("llmenv");
+        std::fs::write(&exe, b"new binary").unwrap();
+        let backup = dir.path().join("missing.bak");
+        let msg = restore_original(&exe, &backup, "new binary failed verification");
+        assert!(
+            msg.starts_with("new binary failed verification; AND"),
+            "{msg}"
+        );
+        assert!(msg.contains(&backup.display().to_string()), "{msg}");
+        assert!(
+            msg.contains(&format!("still at {}", exe.display())),
+            "{msg}"
+        );
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new binary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_writes_the_data_with_the_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let temp = dir.path().join(".llmenv-upgrade.new");
+        stage_binary(&temp, b"new binary").unwrap();
+        assert_eq!(std::fs::read(&temp).unwrap(), b"new binary");
+        let mode = std::fs::metadata(&temp).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_refuses_a_symlink_at_the_temp_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, b"keep").unwrap();
+        let temp = dir.path().join(".llmenv-upgrade.new");
+        std::os::unix::fs::symlink(&target, &temp).unwrap();
+        let err = stage_binary(&temp, b"new binary").unwrap_err().to_string();
+        assert!(err.contains(&temp.display().to_string()), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 
