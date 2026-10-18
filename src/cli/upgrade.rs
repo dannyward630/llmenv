@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use std::env;
-use std::io::{Read, Write};
-use std::path::Path;
-use std::process::Command;
+use std::io::Read;
 
 mod github;
 use github::{fetch_beta, fetch_latest};
+mod install;
+use install::install_binary;
 
 /// Map the current platform to a GitHub release asset name.
 fn platform_asset_name() -> Result<&'static str> {
@@ -168,109 +168,6 @@ fn download_binary(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<
         );
     }
     Ok(resp.bytes().context("failed to read binary")?.to_vec())
-}
-
-/// Install `data` as the new binary, with backup/restore safety.
-fn install_binary(data: &[u8]) -> Result<()> {
-    // Replace target is this binary's own path. Tracked in #2580.
-    // nosemgrep: rust.lang.security.current-exe.current-exe
-    let current_exe = std::env::current_exe().context("failed to get current executable path")?;
-    let current_dir = current_exe
-        .parent()
-        .context("current executable has no parent directory")?;
-
-    // Backup lives next to the current binary (same filesystem for atomic rename)
-    let backup = current_dir.join(".llmenv-upgrade.bak");
-    backup_current_binary(&current_exe, &backup)?;
-
-    // Write new binary to a temp file in the same directory
-    let temp = current_dir.join(".llmenv-upgrade.new");
-    let write_result = (|| -> Result<()> {
-        let mut tmp = crate::paths::create_refusing_symlink(&temp)
-            .context("failed to create temp file for new binary")?;
-        tmp.write_all(data).context("failed to write new binary")?;
-        tmp.sync_all().context("failed to sync new binary")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            tmp.set_permissions(perms)
-                .context("failed to set executable permissions")?;
-        }
-
-        // Rename over the current binary
-        std::fs::rename(&temp, &current_exe).context("failed to replace current binary")?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_result {
-        remove_leftover(&temp, "temp file");
-        // Restore backup before propagating the error
-        let restore_err = restore_backup(&current_exe, &backup);
-        if let Err(re) = restore_err {
-            anyhow::bail!("failed to install upgrade: {e}; AND failed to restore backup: {re}");
-        }
-        return Err(e.context("upgrade installation failed; backup restored"));
-    }
-
-    // Verify the new binary works
-    match Command::new(&current_exe).arg("--version").output() {
-        Ok(output) if output.status.success() => {
-            remove_leftover(&backup, "backup");
-            Ok(())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
-                tracing::error!("upgrade: failed to restore backup after verification failure: {e}")
-            });
-            if let Err(re) = restore_err {
-                anyhow::bail!(
-                    "new binary failed verification (stderr: {stderr}); AND failed to restore backup: {re}"
-                );
-            }
-            anyhow::bail!("new binary failed verification (stderr: {stderr}); restored original");
-        }
-        Err(e) => {
-            let restore_err = restore_backup(&current_exe, &backup).inspect_err(|e| {
-                tracing::error!("upgrade: failed to restore backup after verification error: {e}")
-            });
-            if let Err(re) = restore_err {
-                anyhow::bail!(
-                    "could not verify new binary: {e}; AND failed to restore backup: {re}"
-                );
-            }
-            anyhow::bail!("could not verify new binary: {e}; restored original");
-        }
-    }
-}
-
-/// Remove a file that the upgrade left behind. A failure is logged at error level, because
-/// the default log filter hides warn. A silent leftover binary is a failure the user never
-/// sees (#2666).
-fn remove_leftover(path: &Path, what: &str) {
-    if let Err(e) = std::fs::remove_file(path) {
-        tracing::error!("upgrade: failed to remove {what} {}: {e}", path.display());
-    }
-}
-
-fn restore_backup(target: &Path, backup: &Path) -> Result<()> {
-    std::fs::rename(backup, target).context("failed to restore backup binary")
-}
-
-/// Copy `current_exe` to `backup` before installing the new binary over it.
-///
-/// `copy_replacing_symlink`, not `std::fs::copy`: `backup` is a fixed,
-/// predictable filename (`.llmenv-upgrade.bak`) in the binary's own install
-/// directory, so a plain copy would write through a pre-existing symlink
-/// planted there instead of replacing it — the same TOCTOU class
-/// `src/materialize/inherit.rs` was hardened against for #1341, and
-/// `src/materialize/mod.rs`'s `write_in_place`/`claude_code`'s `materialize`
-/// were fixed for in #1422/#1423.
-fn backup_current_binary(current_exe: &Path, backup: &Path) -> Result<()> {
-    crate::paths::copy_replacing_symlink(current_exe, backup)
-        .with_context(|| format!("failed to backup current binary to {}", backup.display()))
 }
 
 /// Find the matching platform asset in a release.
@@ -511,7 +408,7 @@ mod tests {
         let backup = tmp.path().join(".llmenv-upgrade.bak");
         std::os::unix::fs::symlink(&victim, &backup).unwrap();
 
-        backup_current_binary(&current_exe, &backup).unwrap();
+        install::backup_current_binary(&current_exe, &backup).unwrap();
 
         assert!(
             !std::fs::symlink_metadata(&backup)
@@ -535,7 +432,7 @@ mod tests {
         std::fs::write(&current_exe, b"binary-bytes").unwrap();
         let backup = tmp.path().join(".llmenv-upgrade.bak");
 
-        backup_current_binary(&current_exe, &backup).unwrap();
+        install::backup_current_binary(&current_exe, &backup).unwrap();
 
         assert_eq!(std::fs::read(&backup).unwrap(), b"binary-bytes");
     }
@@ -1387,7 +1284,9 @@ d014cffae3326ad537b149d025f0b9c3826a91694b1c8b5717fb1f7cc8c5eea8  llmenv-macos-x
         let stuck = dir.path().join("stuck");
         // remove_file refuses a directory, so the removal fails.
         std::fs::create_dir(&stuck).unwrap();
-        let logs = crate::test_log_capture::capture_logs(|| remove_leftover(&stuck, "temp file"));
+        let logs = crate::test_log_capture::capture_logs(|| {
+            install::remove_leftover(&stuck, "temp file");
+        });
         assert!(logs.contains("ERROR"), "expected an ERROR line: {logs}");
         assert!(logs.contains("failed to remove temp file"), "{logs}");
     }

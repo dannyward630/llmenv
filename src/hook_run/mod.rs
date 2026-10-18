@@ -4916,7 +4916,8 @@ mod tests {
             let text = text.expect("the guard must decide this call");
             assert!(
                 text.starts_with("__DENY__:"),
-                "the deny must lead the string, got {text:?}"
+                "the deny must lead the string; got {} bytes",
+                text.len()
             );
         }
     }
@@ -5050,10 +5051,15 @@ mod tests {
         });
         let text = resolve_pre_tool_text(&payload, Some("s2"), &config, false, state_dir.path())
             .expect("test");
-        assert!(text.contains("cd"), "cd_guard text must be present: {text}");
+        assert!(
+            text.contains("cd"),
+            "cd_guard text must be present; got {} bytes",
+            text.len()
+        );
         assert!(
             text.contains("identical input"),
-            "repeat_detect text must also be present: {text}"
+            "repeat_detect text must also be present; got {} bytes",
+            text.len()
         );
     }
 
@@ -5114,7 +5120,8 @@ mod tests {
         // the `__DENY__:` prefix alone wouldn't tell them apart.
         assert!(
             text.starts_with("__DENY__:") && text.contains(&tasks[0].slug),
-            "deny must name the created task: {text}"
+            "deny must name the created task; got {} bytes",
+            text.len()
         );
     }
 

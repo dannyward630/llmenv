@@ -1332,6 +1332,7 @@ Upgrade llmenv to the latest version from GitHub releases. Downloads the
 platform-appropriate pre-built binary, checks it against the release's published
 SHA-256, performs a safe install cycle (backup → write temp → sync → rename →
 verify → remove backup), and restores the original binary on failure.
+A symlink to the running binary is followed first, so the real file is replaced (changed after v3.12.2).
 The binary is downloaded only over HTTPS from `github.com` or `objects.githubusercontent.com`.
 A redirect to any other host fails the upgrade.
 `LLMENV_UPGRADE_GITHUB_API` overrides the GitHub API base URL (added in v3.12.2: it must be a bare HTTPS base URL, with
