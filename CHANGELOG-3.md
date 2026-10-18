@@ -125,11 +125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The transcript migration logs each folder it skips, and keeps a non-UTF-8 folder name. Before, an unreadable entry was skipped with no word (#2868) [fix:materialize]
 - `llmenv doctor` stops a tool's `--version` call after 10 seconds and logs why a version is unknown, and `llmenv setup` reports a `settings.json` or `plugins.json` that it cannot check (#2868) [fix:cli]
 - `llmenv upgrade` replaces the binary that a symlink points to, not the symlink. Before, the rename replaced the link and the real binary kept the old version (#2580) [fix:upgrade]
+- An MCP server header whose name appears twice with different case now fails with an error that names it. Before, one of the two values was dropped without a word (#2881) [fix:mcp]
 
 ### Security
 
 - Update `rustls` to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and RUSTSEC-2026-0349. They cover TLS secrets in `Debug` output, application data sent after an ECH rejection, unbounded Brotli certificate decompression, and a key-exchange downgrade [fix:deps]
-- The MCP HTTP client ignores `HTTP_PROXY`, so an `http://` request to a private address cannot leave through a proxy. An MCP server that is reachable only through a proxy no longer works (#2484) [fix:hook]
+- The MCP HTTP client ignores the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), so a request to a private address cannot leave through a proxy. An MCP server that is reachable only through a proxy no longer works. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2484) [fix:hook]
 
 ## [3.12.2] - 2026-10-10
 
