@@ -9,9 +9,10 @@ use super::GhRelease;
 /// The public GitHub API base. Any other base means `LLMENV_UPGRADE_GITHUB_API` is set.
 const DEFAULT_API_BASE: &str = "https://api.github.com";
 
-/// Characters of an unexpected response body to show. Enough to recognize a captive
-/// portal or a proxy page, short enough to keep the error on one screen.
-const BODY_EXCERPT_CHARS: usize = 200;
+/// Characters of an unexpected response body, or of a new binary's stderr, to show. Enough to
+/// recognize a captive portal, a proxy page, or a panic, short enough to keep the error on one
+/// screen.
+pub(super) const BODY_EXCERPT_CHARS: usize = 200;
 /// Bytes read from a failed response. A GitHub JSON error is far smaller than this.
 const ERROR_BODY_READ_CAP: u64 = 4096;
 
