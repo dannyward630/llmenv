@@ -135,6 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv doctor` stops a tool's `--version` call after 10 seconds and logs why a version is unknown, and `llmenv setup` reports a `settings.json` or `plugins.json` that it cannot check (#2868) [fix:cli]
 - `llmenv upgrade` replaces the binary that a symlink points to, not the symlink. Before, the rename replaced the link and the real binary kept the old version (#2580) [fix:upgrade]
 - An MCP server header whose name appears twice with different case now fails with an error that names it. Before, one of the two values was dropped without a word (#2881) [fix:mcp]
+- A dotfiles-managed `settings.json` symlink stays a symlink after llmenv writes it. Before, the atomic rename replaced the link with a plain file and left the linked file stale (#2883) [fix:adapter]
+- `llmenv upgrade` stops a new binary that does not answer `--version` within 10 seconds, then restores the backup with a message. Before, the upgrade blocked with no output (#2885) [fix:upgrade]
 
 ### Security
 
