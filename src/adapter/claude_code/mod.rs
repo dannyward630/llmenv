@@ -2076,7 +2076,9 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
     // here. Runs after the last overlay so it catches every layer.
     super::strip_json_nulls(&mut settings_value);
 
-    let settings_path = out.join("settings.json");
+    // #2883: a dotfiles-managed settings.json is a symlink. Write to its target so the link stays.
+    let settings_path = crate::paths::follow_symlink(&out.join("settings.json"))
+        .context("failed to resolve settings.json")?;
 
     // #2144: `modelSettings` is shared with Claude Code's `/effort`, so it must
     // not pass through reconcile as a wholesale replace. It merges after reconcile.
@@ -2261,7 +2263,9 @@ pub(crate) fn apply_seeded_settings(
     if seeded.is_empty() {
         return Ok(());
     }
-    let path = out.join("settings.json");
+    // #2883: write through a symlinked settings.json so the link is kept.
+    let path = crate::paths::follow_symlink(&out.join("settings.json"))
+        .context("failed to resolve settings.json")?;
     // Read whatever materialize wrote; no-op if file absent (materialize
     // failed or skipped — don't create a seeded-only file in that case).
     let existing: serde_json::Value = match std::fs::read(&path) {
