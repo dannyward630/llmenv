@@ -14,6 +14,7 @@ use crate::util::{dedup, merge_json};
 
 pub(crate) mod retired;
 mod seed;
+pub(crate) mod version;
 
 #[cfg(test)]
 use seed::classify_claude_path;
