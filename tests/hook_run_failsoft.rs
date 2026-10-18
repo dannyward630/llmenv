@@ -975,6 +975,31 @@ fn session_start_names_a_declared_root_the_server_lacks() {
         .stdout(predicate::str::contains("llmenv never runs"));
 }
 
+// #2916: an index_repository call outside the recorded roots is denied, and the reason names the
+// command the user runs.
+#[cfg(unix)]
+#[test]
+fn pre_tool_use_denies_an_index_outside_the_recorded_roots() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "pre_tool_use");
+    cmd.current_dir(dir.path());
+    with_fake_cbm(
+        &mut cmd,
+        bin.path(),
+        &listing_cbm(&std::env::temp_dir().display().to_string()),
+    );
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__codebase-memory-mcp__index_repository","tool_input":{"repo_path":"/usr"}}"#;
+    cmd.timeout(Duration::from_secs(20))
+        .write_stdin(payload)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "outside the codebase-memory allowed roots",
+        ))
+        .stdout(predicate::str::contains("allow-root"));
+}
+
 /// A config whose host scope matches `hostname`, so this host owns the ICM server.
 fn config_with_local_memory_server(port: u16, hostname: &str) -> String {
     format!(
