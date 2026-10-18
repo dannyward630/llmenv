@@ -204,8 +204,11 @@ fn print_roots(
         })
         .unwrap_or_else(|e| {
             (
-                CheckLevel::Info,
-                format!("codebase-memory: cannot check the allowed roots: {e}"),
+                CheckLevel::Warn,
+                format!(
+                    "codebase-memory: cannot check the allowed roots: {e:#}. Run `llmenv doctor` \
+                     after the fix, and check that codebase-memory-mcp is on PATH."
+                ),
             )
         });
     super::print_check(check, pass, warn, info);

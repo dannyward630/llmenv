@@ -74,13 +74,22 @@ fn cbm_command(cm: &CodebaseMemory, args: &[&str]) -> anyhow::Result<Command> {
 }
 
 /// The roots in the output of `allow-root --list`.
-fn parse_roots(listing: &str) -> Vec<PathBuf> {
-    listing
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with('/'))
-        .map(PathBuf::from)
-        .collect()
+/// The roots in the output of `allow-root --list`. A line that is neither a root nor a known
+/// header or empty notice means the format changed. The roots are then unknown, so the read
+/// fails rather than reading as an empty, unconfined record (#2916).
+///
+/// # Errors
+/// A line that llmenv does not recognize.
+fn parse_roots(listing: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    for line in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if line.starts_with('/') {
+            roots.push(PathBuf::from(line));
+        } else if !line.starts_with("allowed roots") && !line.starts_with("no allowed roots") {
+            anyhow::bail!("unrecognized line in allow-root --list output: {line:?}");
+        }
+    }
+    Ok(roots)
 }
 
 /// The roots that codebase-memory-mcp has recorded for the cache folder of `cm`.
@@ -89,13 +98,18 @@ fn parse_roots(listing: &str) -> Vec<PathBuf> {
 /// The command cannot run, times out, or exits non-zero.
 fn list_roots(cm: &CodebaseMemory) -> anyhow::Result<Vec<PathBuf>> {
     let output = run_with_timeout(cbm_command(cm, &["allow-root", "--list"])?, COMMAND_TIMEOUT)
-        .map_err(|e| anyhow::anyhow!("codebase-memory-mcp allow-root --list: {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "codebase-memory-mcp allow-root --list: {e:#}. Is codebase-memory-mcp on PATH?"
+            )
+        })?;
     anyhow::ensure!(
         output.status.success(),
-        "codebase-memory-mcp allow-root --list exited with {}",
-        output.status
+        "codebase-memory-mcp allow-root --list exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
     );
-    Ok(parse_roots(&String::from_utf8_lossy(&output.stdout)))
+    parse_roots(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// What the server allows, compared with what the config declares.
@@ -136,9 +150,23 @@ fn missing_roots(wanted: &[PathBuf], listed: &[PathBuf]) -> Vec<PathBuf> {
     }
     wanted
         .iter()
-        .filter(|root| root.is_dir() && !is_within_any(root, listed))
+        .filter(|root| is_folder(root) && !is_within_any(root, listed))
         .cloned()
         .collect()
+}
+
+/// Whether `path` is a folder. A stat error other than "not found" is logged, because it
+/// would otherwise drop a declared root from the report without a word (#2916).
+fn is_folder(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_dir(),
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("cannot read the declared root {}: {e}", path.display());
+            }
+            false
+        }
+    }
 }
 
 /// The recorded roots that no declared root covers. A recorded root that sits under a declared
@@ -146,7 +174,16 @@ fn missing_roots(wanted: &[PathBuf], listed: &[PathBuf]) -> Vec<PathBuf> {
 fn undeclared_roots(listed: &[PathBuf], wanted: &[PathBuf]) -> Vec<PathBuf> {
     listed
         .iter()
-        .filter(|root| canonical(root).is_some() && !is_within_any(root, wanted))
+        .filter(|root| {
+            if canonical(root).is_none() {
+                tracing::warn!(
+                    "recorded root {} does not resolve, so it is not reported",
+                    root.display()
+                );
+                return false;
+            }
+            !is_within_any(root, wanted)
+        })
         .cloned()
         .collect()
 }
@@ -177,11 +214,15 @@ pub(crate) fn check_roots(
 /// `path` as one shell word, so a command in a message can be pasted as it is.
 fn shell_word(path: &Path) -> String {
     let text = path.display().to_string();
-    let plain = text
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "/._-+:@%".contains(c));
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@%".contains(c));
     if plain {
         text
+    } else if text.is_empty() {
+        // An empty word would vanish from the pasted command, so it is written as a quoted empty.
+        "''".to_string()
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
@@ -211,8 +252,9 @@ pub(crate) fn describe(report: &RootsReport) -> (bool, String) {
     } else {
         format!(
             " The server also holds roots that the config does not declare: {}. Earlier llmenv \
-             versions recorded them. To return to unconfined indexing, delete {}. To keep some \
-             roots, edit that file.",
+             versions recorded them. Ask the user to clear them: to return to unconfined \
+             indexing, the user deletes {}; to keep some roots, the user edits that file. Do not \
+             delete or edit it yourself.",
             list(&report.undeclared),
             report.cache_dir.join("allowed_roots").display()
         )
@@ -278,7 +320,8 @@ pub(crate) fn session_start_notice(cm: &CodebaseMemory, project_root: &Path) -> 
     match check_roots(cm, &wanted, bases.home.as_deref()) {
         Ok(report) => {
             let (warn, text) = describe(&report);
-            let text = [warn.then_some(text)]
+            let undeclared = !report.undeclared.is_empty();
+            let text = [(warn || undeclared).then_some(text)]
                 .into_iter()
                 .flatten()
                 .chain(problems)
@@ -287,9 +330,9 @@ pub(crate) fn session_start_notice(cm: &CodebaseMemory, project_root: &Path) -> 
             (!text.is_empty()).then(|| format!("{text}\n"))
         }
         Err(e) => {
-            tracing::error!(error = %e, "codebase-memory allowed roots could not be read");
+            tracing::error!("codebase-memory allowed roots could not be read: {e:#}");
             Some(format!(
-                "codebase-memory: cannot read the allowed roots: {e}. Run `llmenv doctor`.\n"
+                "codebase-memory: cannot read the allowed roots: {e:#}. Run `llmenv doctor`.\n"
             ))
         }
     }
@@ -313,7 +356,24 @@ pub(crate) fn guard_decision(repo_path: &str, config: &Config) -> Option<String>
             Err(e) => unreadable.push(format!("{e:#}")),
         }
     }
-    decide(repo_path, listed).map(|reason| with_unreadable_note(reason, &unreadable))
+    decide_with_reads(repo_path, listed, &unreadable)
+}
+
+/// [`guard_decision`] given the listed roots and the failed reads. An empty record with a failed
+/// read is not unconfined: the read may have failed, so the guard denies (#2916).
+fn decide_with_reads(
+    repo_path: &str,
+    listed: Vec<PathBuf>,
+    unreadable: &[String],
+) -> Option<String> {
+    if listed.is_empty() && !unreadable.is_empty() {
+        return Some(format!(
+            "{repo_path} cannot be checked against the codebase-memory allowed roots, because \
+             they could not be read: {}. Ask the user to run `llmenv doctor`.",
+            unreadable.join("; ")
+        ));
+    }
+    decide(repo_path, listed).map(|reason| with_unreadable_note(reason, unreadable))
 }
 
 /// `reason` with the failures to read the server's recorded roots, so a deny that came from a
@@ -335,7 +395,22 @@ fn decide(repo_path: &str, listed: Vec<PathBuf>) -> Option<String> {
     if listed.is_empty() {
         return None;
     }
+    // A relative path resolves against the hook's folder, but the server resolves it against its
+    // own, so the check would judge a different folder than the one indexed (#2916).
+    if !Path::new(repo_path).is_absolute() {
+        return Some(format!(
+            "{repo_path} is not an absolute path, so it cannot be checked against the \
+             codebase-memory allowed roots. Pass the absolute path of the repository."
+        ));
+    }
     let roots: Vec<PathBuf> = listed.iter().filter_map(|root| canonical(root)).collect();
+    if roots.is_empty() {
+        return Some(format!(
+            "{repo_path} cannot be checked: none of the {} recorded roots resolves to a folder. \
+             Ask the user to run `llmenv doctor`.",
+            listed.len()
+        ));
+    }
     match std::fs::canonicalize(repo_path) {
         Ok(canonical) => path_outside_roots(&canonical, &roots),
         Err(e) => Some(format!(
@@ -363,14 +438,25 @@ mod tests {
     fn the_listing_is_read_after_its_header() {
         let listing = "allowed roots:\n/Users/u/git\n/Users/u/.cache/nbl-diag/repos\n";
         assert_eq!(
-            parse_roots(listing),
+            parse_roots(listing).unwrap(),
             [
                 PathBuf::from("/Users/u/git"),
                 PathBuf::from("/Users/u/.cache/nbl-diag/repos")
             ]
         );
-        assert!(parse_roots("no allowed roots recorded \n").is_empty());
-        assert!(parse_roots("").is_empty());
+        assert!(
+            parse_roots("no allowed roots recorded \n")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse_roots("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_listing_in_a_new_format_is_an_error_not_an_empty_record() {
+        // An empty record means unconfined, so a format change must not read as one (#2916).
+        assert!(parse_roots("- /Users/u/git\n").is_err());
+        assert!(parse_roots("allowed roots:\n  /Users/u/git\nsomething new\n").is_err());
     }
 
     #[test]
@@ -477,6 +563,28 @@ mod tests {
         assert_eq!(shell_word(Path::new("/plain/path")), "/plain/path");
         assert_eq!(shell_word(Path::new("/a b")), "'/a b'");
         assert_eq!(shell_word(Path::new("/it's")), "'/it'\\''s'");
+        assert_eq!(shell_word(Path::new("")), "''");
+    }
+
+    #[test]
+    fn a_failed_read_with_an_empty_record_denies_the_call() {
+        let reason = decide_with_reads("/usr", vec![], &["timed out".to_string()]).unwrap();
+        assert!(reason.contains("could not be read"), "{reason}");
+        assert!(reason.contains("timed out"), "{reason}");
+        assert_eq!(decide_with_reads("/usr", vec![], &[]), None);
+    }
+
+    #[test]
+    fn a_relative_repo_path_is_denied_not_resolved_against_the_hook_folder() {
+        let listed = vec![std::env::current_dir().unwrap()];
+        let reason = decide(".", listed).unwrap();
+        assert!(reason.contains("not an absolute path"), "{reason}");
+    }
+
+    #[test]
+    fn a_record_that_resolves_to_nothing_denies_the_call() {
+        let reason = decide("/usr", vec![PathBuf::from("/no/such/root/2916")]).unwrap();
+        assert!(reason.contains("none of the 1 recorded roots"), "{reason}");
     }
 
     #[test]
@@ -598,10 +706,18 @@ mod tests {
     proptest! {
         #[test]
         fn every_parsed_root_is_an_absolute_line_of_the_input(listing in "(\\PC{0,30}\n){0,6}") {
-            for root in parse_roots(&listing) {
+            let Ok(roots) = parse_roots(&listing) else {
+                return Ok(());
+            };
+            for root in roots {
                 prop_assert!(root.is_absolute());
                 prop_assert!(listing.lines().any(|l| l.trim() == root.to_string_lossy()));
             }
+        }
+
+        #[test]
+        fn a_shell_word_is_never_empty(path in "\\PC{0,40}") {
+            prop_assert!(!shell_word(Path::new(&path)).is_empty());
         }
 
         #[test]
