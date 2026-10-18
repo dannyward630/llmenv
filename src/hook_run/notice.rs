@@ -23,6 +23,7 @@ pub(super) fn write_notice_only(
 /// notice in it reaches no one. The error log is the only place left for it (#2736).
 pub(super) fn log_notice_without_channel(out: &str, notice: Option<&str>, event: &str) {
     if let Some(notice) = notice
+        && !notice.trim().is_empty()
         && out.is_empty()
     {
         tracing::error!(
@@ -82,7 +83,7 @@ pub(super) fn problem_notice(problem: &str, fix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::problem_notice;
+    use super::{log_notice_without_channel, problem_notice};
 
     #[test]
     fn the_map_unreadable_notice_names_the_cause_the_sink_and_the_fix() {
@@ -99,5 +100,16 @@ mod tests {
             problem_notice("the cache is unreadable", "run doctor"),
             "llmenv: the cache is unreadable. Fix: run doctor"
         );
+    }
+
+    #[test]
+    fn an_empty_notice_with_no_channel_is_not_an_error() {
+        // Passing no notice and passing a blank one both mean nothing to say (#2899).
+        let logs = crate::test_log_capture::capture_logs(|| {
+            log_notice_without_channel("", Some(""), "post_tool_use");
+            log_notice_without_channel("", Some("  \n"), "post_tool_use");
+            log_notice_without_channel("", None, "post_tool_use");
+        });
+        assert!(!logs.contains("no channel"), "{logs}");
     }
 }
