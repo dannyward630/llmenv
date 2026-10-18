@@ -470,7 +470,7 @@ fn write_config(
     config.disabled_engines = disabled_engines.to_vec();
 
     let yaml = serde_yaml::to_string(&config).context("serializing config")?;
-    paths::write_owner_only_atomic(config_path, yaml.as_bytes())
+    paths::write_user_file_atomic(config_path, yaml.as_bytes())
         .with_context(|| format!("writing config {}", config_path.display()))?;
 
     Ok(())

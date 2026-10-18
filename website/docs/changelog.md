@@ -231,6 +231,9 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - `llmenv doctor` stops a tool's `--version` call after 10 seconds and logs why a version is unknown, and `llmenv setup` reports a `settings.json` or `plugins.json` that it cannot check (#2868) [fix:cli]
 - `llmenv upgrade` replaces the binary that a symlink points to, not the symlink. Before, the rename replaced the link and the real binary kept the old version (#2580) [fix:upgrade]
 - An MCP server header whose name appears twice with different case now fails with an error that names it. Before, one of the two values was dropped without a word (#2881) [fix:mcp]
+- A dotfiles symlink at `settings.json`, `.claude.json`, `plugins/installed_plugins.json`, or `config.yaml` stays a symlink when llmenv writes the file. llmenv writes the link target and leaves its folder's permissions alone. Before, the write replaced the link with a plain file and left the linked file stale. See [troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-config-file-is-a-symlink-to-a-dotfiles-repo) (#2883) [fix:adapter]
+- `llmenv upgrade` stops a new binary that does not answer `--version` in time, then restores the backup with a message. Before, the upgrade blocked with no output (#2885) [fix:upgrade]
+- Network and SSID scope detection stop a `route`, `arp`, `networksetup`, or `ipconfig` call that does not answer in time, and count it as no reading. Before, a stuck call blocked the shell prompt and `llmenv doctor` (#2885) [fix:scope]
 
 ### Security
 
