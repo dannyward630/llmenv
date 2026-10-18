@@ -214,10 +214,18 @@ async fn run_scope(
         }
         outcome.texts.clear();
     }
-    if budget.is_full()
-        && let Some(notice) = scope_cut_notice(actions.len())
-    {
-        agent_notice::record(notice);
+    let unrun = actions.len();
+    if budget.is_full() {
+        if let Some(notice) = scope_cut_notice(unrun) {
+            agent_notice::record(notice);
+        }
+    } else if outcome.failed > 0 && unrun > 0 {
+        // The failure ended the fallback early. The skipped tags are not retried this epoch,
+        // so the agent must hear that they did not run (#2897).
+        agent_notice::record(format!(
+            "llmenv: {unrun} scope recall action(s) did not run after a memory recall failed. \
+             Fix: run `llmenv doctor` to check the memory server."
+        ));
     }
     outcome
 }
@@ -438,8 +446,9 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super:
         topic: Some("errors-resolved".to_string()),
         ..query(&text, FANOUT_LIMIT)
     };
-    // The session project comes first, as in `waves`. The all-projects main recall stays
-    // after the shared `errors-resolved` fix, because that topic is meant to cross projects.
+    // The session project comes first, as in `waves`. The shared `errors-resolved` topic is
+    // the only cross-project recall here, because that topic is meant to cross projects. No
+    // all-projects recall runs on a failure (#2910).
     let scoped = ledger.project.as_deref().map(|p| RecallQuery {
         project: Some(p.to_string()),
         ..query(&text, FAILURE_LIMIT)

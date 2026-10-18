@@ -14,8 +14,14 @@ const GENERIC_MARKERS: [&str; 5] = [
 
 /// Whether `error` is a generic failure, so a failure recall would inject unrelated memories.
 pub(super) fn is_generic(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    GENERIC_MARKERS.iter().any(|marker| lower.contains(marker))
+    // Only the first line names the failure. A long log of a real failure can quote a marker
+    // further down, and that failure is not generic.
+    let first = error
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    GENERIC_MARKERS.iter().any(|marker| first.contains(marker))
 }
 
 #[cfg(test)]
@@ -28,6 +34,12 @@ mod tests {
         assert!(is_generic(
             "SyntaxError: Unexpected token } in JSON at position 4"
         ));
+    }
+
+    #[test]
+    fn a_marker_deep_in_a_long_log_is_not_generic() {
+        let log = "Exit code 1\nrunning 40 tests\nthe parser test printed:\nSyntaxError: bad input";
+        assert!(!is_generic(log));
     }
 
     #[test]
