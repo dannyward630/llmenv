@@ -334,6 +334,7 @@ They also name a recorded root that no configured root covers.
 A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the recorded roots,
 once any root is recorded.
 The deny text asks you to record the folder.
+The guard also denies a call while the recorded roots cannot be read, and denies a relative `repo_path`.
 codebase-memory-mcp has no command to remove a root.
 To return to unconfined indexing, delete `<cache dir>/allowed_roots`.
 To keep some roots, edit that file.
