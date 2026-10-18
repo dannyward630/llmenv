@@ -125,6 +125,10 @@ features:
 llmenv drops the link-local addresses, connects only to the others, and fails only when no other address is left.
 Before v3.12.1 any link-local address made the SessionStart health check report memory as dead.
 
+MCP HTTP requests ignore proxy environment variables (changed after v3.12.2).
+A proxy resolves the host itself, so it would send a request to a private address outside llmenv's address check.
+An MCP server that is reachable only through a proxy is not supported.
+
 ### Tool search and the ICM tools (added in v3.12.0)
 
 Claude Code defers the tools of an MCP server behind tool search:
