@@ -25,17 +25,17 @@ pub(crate) fn env_vars() -> Vec<(String, String)> {
             match parse_version(&text) {
                 Some(version) => vec![("CLAUDE_CODE_VERSION".into(), version)],
                 None => {
-                    tracing::warn!("claude --version printed no version: {}", text.trim());
+                    tracing::error!("claude --version printed no version: {}", text.trim());
                     Vec::new()
                 }
             }
         }
         Ok(out) => {
-            tracing::warn!("claude --version exited with {}", out.status);
+            tracing::error!("claude --version exited with {}", out.status);
             Vec::new()
         }
         Err(e) => {
-            tracing::warn!("claude --version failed: {e:#}");
+            tracing::error!("claude --version failed: {e:#}");
             Vec::new()
         }
     }
@@ -46,7 +46,9 @@ pub(crate) fn env_vars() -> Vec<(String, String)> {
 fn parse_version(text: &str) -> Option<String> {
     let first = text.split_whitespace().next()?;
     let numeric = first.starts_with(|c: char| c.is_ascii_digit())
-        && first.chars().all(|c| c.is_ascii_digit() || c == '.');
+        && first
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
     numeric.then(|| first.to_string())
 }
 
@@ -67,6 +69,9 @@ mod tests {
         assert_eq!(parse_version(""), None);
         assert_eq!(parse_version("error: unknown flag"), None);
         assert_eq!(parse_version("v2.1.251"), None);
-        assert_eq!(parse_version("2.1.251-beta"), None);
+        assert_eq!(
+            parse_version("2.1.251-beta"),
+            Some("2.1.251-beta".to_string())
+        );
     }
 }
