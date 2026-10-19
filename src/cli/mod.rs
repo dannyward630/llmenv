@@ -484,6 +484,7 @@ enum TaskCommand {
     /// default to every session's tasks. `--state`/`--hide-done` filter by
     /// lifecycle state; `--current-project` further narrows to the current
     /// project's tasks (composable with either `--session` or `--all`).
+    #[command(visible_alias = "list")]
     Ls {
         #[arg(long, value_enum)]
         format: Option<TaskListFormat>,

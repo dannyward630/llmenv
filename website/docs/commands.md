@@ -530,7 +530,8 @@ Only when the open session has no match does the search cover the whole project.
 - `task ls [--format json] (--session <id> | --all) [--state <s>]...
   [--hide-done] [--current-project]` — list tasks. **Requires `--session <id>`
   or `--all`** (added in v3.8.0) — no silent default to every session's
-  tasks; pass `--all` to deliberately see everything. The human output groups
+  tasks; pass `--all` to deliberately see everything. `task list` is an alias
+  of `task ls` (added in v3.13.0). The human output groups
   tasks by session (current-project sessions first), indents subtasks under
   their parent, prefixes each row with a state glyph + label
   (`open`/`wip`/`waiting`/`done`), and annotates blocked tasks with their
