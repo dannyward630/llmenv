@@ -6,7 +6,6 @@ use super::{FANOUT_LIMIT, MAIN_LIMIT, Outcome, WAVE2_CUTOFF, query, recall};
 use crate::hook_run::action::{RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::relevance;
-use crate::hook_run::web_fetch::is_web_fetch_topic;
 
 /// The recall texts for `text`, in budget order: the session project's main
 /// recall, the all-projects main recall, keyword fanout, topic fanout. The flag
@@ -36,10 +35,9 @@ pub(super) async fn waves(
     );
     let main_ok = matches!(own, Some(Ok(_))) || matches!(main, Some(Ok(_)));
     let mut outcome = Outcome::default();
-    outcome.push(own);
-    [main, kw0, kw1]
+    [own, main, kw0, kw1]
         .into_iter()
-        .for_each(|r| outcome.push(without_web_pages(r)));
+        .for_each(|r| outcome.push(r));
     if start.elapsed() < WAVE2_CUTOFF {
         let topics: Vec<String> = outcome
             .texts
@@ -55,24 +53,10 @@ pub(super) async fn waves(
             })
         };
         let (t0, t1) = tokio::join!(recall(client, topic(0)), recall(client, topic(1)));
-        outcome.push(without_web_pages(t0));
-        outcome.push(without_web_pages(t1));
+        outcome.push(t0);
+        outcome.push(t1);
     }
     (outcome, main_ok)
-}
-
-/// Remove the web-fetch records from an all-projects recall. A fetched page belongs to the
-/// project that fetched it, and only that project's own recall brings it back (#2911).
-fn without_web_pages(result: Option<anyhow::Result<String>>) -> Option<anyhow::Result<String>> {
-    result.map(|r| {
-        r.map(|text| {
-            split_recall_records(&text)
-                .into_iter()
-                .filter(|record| !relevance::record_topic(record).is_some_and(is_web_fetch_topic))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-    })
 }
 
 #[cfg(test)]
@@ -121,12 +105,5 @@ mod tests {
         assert!(all.contains("a fact"), "{all}");
         assert!(!all.contains("https://other.example"), "{all}");
         assert!(!all.contains("https://old.example"), "{all}");
-    }
-
-    #[test]
-    fn a_failed_recall_stays_failed() {
-        let failed = without_web_pages(Some(Err(anyhow::anyhow!("down"))));
-        assert!(matches!(failed, Some(Err(_))));
-        assert!(without_web_pages(None).is_none());
     }
 }
