@@ -13,7 +13,7 @@ fn wants_auto_prune(
 
 /// The one active entry of `memory`, or `None` with zero or two or more: with two, the memory
 /// server does not resolve, so no entry of them applies.
-pub(super) fn single_active<'a>(
+pub(crate) fn single_active<'a>(
     memory: &'a [crate::config::Memory],
     active_tags: &std::collections::BTreeSet<String>,
 ) -> Option<&'a crate::config::Memory> {

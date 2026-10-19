@@ -740,13 +740,15 @@ semantic rules and store them back in ICM.
 (changed in v3.12.0) It reads only the memories of the current project, which it names the same way the session start does.
 It stores each rule under the topic `llmenv-consolidation-<project>`, so the rule comes back in that project's recall.
 Rules stored before v3.12.0 stay under the topic `llmenv-consolidation`.
-Before it stores a rule, it recalls the five closest rules in the project topic and in the old topic.
+(changed in v3.13.0) No recall reads that old topic, so a rule there comes back in no session.
+Before it stores a rule, it recalls the five closest rules in the project topic.
 It skips the new rule when one of them shares at least 80% of its words and has the same negation words, such as `not` or `never`. It is off by default and skips a session with fewer than
 three memories.
 
 (changed in v3.12.0) The trigger is the `session_end` hook (Claude Code's `SessionEnd`).
 Before v3.12.0 consolidation waited for a `post_session` event that no adapter sent, so it never ran.
 The settings come from the active `memory:` entry, which can be in `config.yaml` or in a firing bundle's `bundle.yaml`.
+(changed in v3.13.0) With two active `memory:` entries, no entry's settings apply and consolidation does not run.
 The `claude-cli` backend runs `claude -p` with `disableAllHooks`, the default output style, `--strict-mcp-config`, no tools, no skills, and `--no-session-persistence`.
 That child runs no hooks and no MCP servers. It still reads your Claude Code settings and login, so auth from `env`, `apiKeyHelper`, or a Bedrock or Vertex provider keeps working.
 llmenv also sets `LLMENV_CONSOLIDATION_CHILD=1` on the child, and `llmenv hook-run` starts no consolidation under that variable, so the child cannot start consolidation again.
