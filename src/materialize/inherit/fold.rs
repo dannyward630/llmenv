@@ -16,14 +16,9 @@ use anyhow::Context as _;
 /// way to follow one into a bounded tree, matching the discipline in
 /// `adapter::claude_code::copy_dir_owner_only`.
 ///
-/// That guarantee is per-entry, not whole-tree (#1066). `src` itself is a path
-/// the kernel re-resolves on every syscall, so swapping it for a symlink between
-/// the check and the `read_dir` would still redirect the walk. Closing that
-/// needs `openat`-relative traversal — opening the parent once and working from
-/// its file descriptor — applied across every tree walk in the repo, which is a
-/// dependency decision (`cap-std`/`rustix`) plus a cross-cutting refactor rather
-/// than a fix to this function. Severity is low: it requires winning a race as
-/// the same user, who can already read these files.
+/// The two roots are opened once, and every folder below them is reached through the open
+/// folder that holds it (#1066, #2949). So a folder swapped for a symlink during the walk cannot
+/// redirect it.
 pub(super) fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<()> {
     crate::adapter::skills::create_dir_owner_only(dst)
         .with_context(|| format!("creating {}", dst.display()))?;
@@ -46,7 +41,18 @@ pub(super) fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<()>
         .with_context(|| format!("reading {}", src.display()))?;
     let dst_dir = crate::paths::dirfd::open_dir_nofollow(dst)
         .with_context(|| format!("opening {}", dst.display()))?;
-    let entries = crate::paths::dirfd::read_dir_entries(src_dir.as_fd())
+    move_dir_at(src_dir.as_fd(), dst_dir.as_fd(), src, dst)
+}
+
+/// [`move_dir_newest_wins`] for two open folders. `src` and `dst` name them in messages only.
+fn move_dir_at(
+    src_dir: std::os::fd::BorrowedFd<'_>,
+    dst_dir: std::os::fd::BorrowedFd<'_>,
+    src: &Path,
+    dst: &Path,
+) -> anyhow::Result<()> {
+    use std::os::fd::AsFd as _;
+    let entries = crate::paths::dirfd::read_dir_entries(src_dir)
         .with_context(|| format!("reading entry in {}", src.display()))?;
     for entry in entries {
         let from = src.join(&entry.name);
@@ -54,12 +60,29 @@ pub(super) fn move_dir_newest_wins(src: &Path, dst: &Path) -> anyhow::Result<()>
         if entry.is_symlink() {
             tracing::debug!("inherit: skipping symlink {}", from.display());
         } else if entry.is_dir() {
-            move_dir_newest_wins(&from, &to)?;
-        } else if entry.is_file() && is_newer_at(src_dir.as_fd(), dst_dir.as_fd(), &entry.name) {
-            move_file_at(src_dir.as_fd(), dst_dir.as_fd(), &entry.name, &from, &to)?;
+            let sub_src = crate::paths::dirfd::open_dir_at(src_dir, &entry.name)
+                .with_context(|| format!("reading {}", from.display()))?;
+            let sub_dst = open_or_create_dir_at(dst_dir, &entry.name)
+                .with_context(|| format!("opening {}", to.display()))?;
+            move_dir_at(sub_src.as_fd(), sub_dst.as_fd(), &from, &to)?;
+        } else if entry.is_file() && is_newer_at(src_dir, dst_dir, &entry.name) {
+            move_file_at(src_dir, dst_dir, &entry.name, &from, &to)?;
         }
     }
     Ok(())
+}
+
+/// Open the folder `name` in `dir`, owner-only, and create it first when it is absent. The open
+/// refuses a symlink, so a link at the destination is never written through (#1065).
+fn open_or_create_dir_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    match rustix::fs::mkdirat(dir, name, rustix::fs::Mode::from(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(e) => return Err(e.into()),
+    }
+    crate::paths::dirfd::open_dir_at(dir, name)
 }
 
 /// Rename `from` onto `to`, falling back to copy-then-delete across devices.
@@ -224,6 +247,55 @@ mod tests {
     // `dst` already resolves through a symlink to an existing directory —
     // it never lstats first. `move_dir_newest_wins` must refuse to proceed
     // rather than silently folding into the symlink's target.
+    /// The walk below the roots goes through the open folders, so a root path that now names
+    /// a symlink to another tree does not change what is moved (#2949).
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_does_not_resolve_a_path_below_the_open_roots() {
+        use std::os::fd::AsFd as _;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("sub").join("real.jsonl"), "real");
+        write(
+            &tmp.path().join("decoy").join("sub").join("decoy.jsonl"),
+            "decoy",
+        );
+        std::fs::create_dir_all(&dst).unwrap();
+        let src_dir = crate::paths::dirfd::open_dir_nofollow(&src).unwrap();
+        let dst_dir = crate::paths::dirfd::open_dir_nofollow(&dst).unwrap();
+        std::fs::rename(&src, tmp.path().join("src-moved")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("decoy"), &src).unwrap();
+
+        move_dir_at(src_dir.as_fd(), dst_dir.as_fd(), &src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub").join("real.jsonl")).unwrap(),
+            "real"
+        );
+        assert!(!dst.join("sub").join("decoy.jsonl").exists());
+        assert!(
+            tmp.path().join("decoy/sub/decoy.jsonl").exists(),
+            "the decoy is untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_a_destination_subfolder_is_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("sub").join("a.jsonl"), "a");
+        std::fs::create_dir_all(&dst).unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dst.join("sub")).unwrap();
+        assert!(move_dir_newest_wins(&src, &dst).is_err());
+        assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn move_dir_newest_wins_rejects_a_symlinked_destination() {
