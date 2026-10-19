@@ -1165,10 +1165,7 @@ fn warn_dead_config(
         None => (&config.capabilities, &config.native),
     };
     warn_dead_native_keys(capabilities, native, prefix);
-    let opencode_active = engine_is_active(config, "opencode").unwrap_or_else(|e| {
-        eprintln!("{prefix} cannot check whether opencode is installed, so it is skipped: {e:#}");
-        false
-    });
+    let opencode_active = engine_is_active(config, "opencode");
     for hit in doctor::claude_only_colon_permission_patterns(capabilities, opencode_active) {
         eprintln!("{prefix} {}", hit.message());
     }
@@ -1186,23 +1183,20 @@ fn warn_dead_config(
 /// engine doesn't duplicate that output. Resolves the binary name through the
 /// registry rather than hardcoding it, so an adapter rename can't silently
 /// desynchronize the two.
-///
-/// # Errors
-/// The PATH check for the engine binary cannot run (#2753).
-fn engine_is_active(config: &Config, engine: &str) -> anyhow::Result<bool> {
+fn engine_is_active(config: &Config, engine: &str) -> bool {
     if config
         .disabled_engines
         .iter()
         .any(|e| e.eq_ignore_ascii_case(engine))
     {
-        return Ok(false);
+        return false;
     }
     for adapter in crate::adapter::registered_adapters() {
         if crate::adapter::engine_id(adapter.as_ref()) == engine {
             return crate::adapter::binary_on_path(adapter.binary_name());
         }
     }
-    Ok(false)
+    false
 }
 
 /// Registered adapters whose binary is present on `PATH` and that aren't
@@ -1217,11 +1211,7 @@ fn engine_is_active(config: &Config, engine: &str) -> anyhow::Result<bool> {
 /// isn't run on every export/regenerate/doctor invocation.
 ///
 /// Empty or whitespace-only entries are silently skipped (#566).
-///
-/// # Errors
-/// The PATH check for an adapter binary cannot run. A failed check must not read as "not
-/// installed", because the adapter would then be skipped with no word (#2753).
-fn installed_adapters(config: &Config) -> anyhow::Result<Vec<Box<dyn AgentAdapter>>> {
+fn installed_adapters(config: &Config) -> Vec<Box<dyn AgentAdapter>> {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
         if engine.trim().is_empty() {
@@ -1238,12 +1228,7 @@ fn installed_adapters(config: &Config) -> anyhow::Result<Vec<Box<dyn AgentAdapte
     }
     let mut installed = Vec::new();
     for adapter in crate::adapter::registered_adapters() {
-        let on_path = crate::adapter::binary_on_path(adapter.binary_name()).with_context(|| {
-            format!(
-                "checking whether the {} engine is installed",
-                adapter.name()
-            )
-        })?;
+        let on_path = crate::adapter::binary_on_path(adapter.binary_name());
         if !on_path {
             tracing::debug!(
                 adapter = adapter.name(),
@@ -1267,7 +1252,7 @@ fn installed_adapters(config: &Config) -> anyhow::Result<Vec<Box<dyn AgentAdapte
         }
         installed.push(adapter);
     }
-    Ok(installed)
+    installed
 }
 
 /// What [`ensure_local_memory_proxy`] did.
@@ -1451,7 +1436,7 @@ fn run_export(
 
     let mut failed_adapters: Vec<&str> = Vec::new();
     let mut any_adapter_eligible = false;
-    for adapter in installed_adapters(&config)? {
+    for adapter in installed_adapters(&config) {
         any_adapter_eligible = true;
 
         let result = match &shared_manifest {
@@ -1738,7 +1723,7 @@ fn run_regenerate() -> anyhow::Result<()> {
 
     let mut materialized_any = false;
     let mut failed_adapters: Vec<&str> = Vec::new();
-    for adapter in installed_adapters(&config)? {
+    for adapter in installed_adapters(&config) {
         let result = match &shared_manifest {
             Some((m, cache_root)) => {
                 let mut cloned = m.clone();
@@ -2722,22 +2707,22 @@ fn run_config_context() {
     let config_path = match paths::config_path() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("llmenv config-context: failed to resolve config path: {e}");
-            emit(
-                "llmenv config-context: could not resolve config path. \
-                 Run `llmenv doctor` to diagnose.",
-            );
+            eprintln!("llmenv config-context: failed to resolve config path: {e:#}");
+            emit(&format!(
+                "llmenv config-context: could not resolve config path ({e:#}). \
+                 Run `llmenv doctor` to diagnose."
+            ));
             return;
         }
     };
     let bundles_dir = match paths::config_dir() {
         Ok(d) => d.join("bundles"),
         Err(e) => {
-            eprintln!("llmenv config-context: failed to resolve config dir: {e}");
-            emit(
-                "llmenv config-context: could not resolve config dir. \
-                 Run `llmenv doctor` to diagnose.",
-            );
+            eprintln!("llmenv config-context: failed to resolve config dir: {e:#}");
+            emit(&format!(
+                "llmenv config-context: could not resolve config dir ({e:#}). \
+                 Run `llmenv doctor` to diagnose."
+            ));
             return;
         }
     };
@@ -2784,10 +2769,10 @@ fn run_config_context() {
                     }
                     Err(e) => {
                         eprintln!(
-                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
+                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e:#}"
                         );
                         text.push_str(&format!(
-                            "\n\nllmenv: the task tracker reminders could not be loaded ({e}). Run \
+                            "\n\nllmenv: the task tracker reminders could not be loaded ({e:#}). Run \
                              `llmenv doctor`."
                         ));
                     }
@@ -2795,7 +2780,16 @@ fn run_config_context() {
             }
         }
         Err(e) => {
-            eprintln!("llmenv config-context: failed to load config for task-tracker reminder: {e}")
+            eprintln!(
+                "llmenv config-context: failed to load config for task-tracker reminder: {e:#}"
+            );
+            // The cause can quote a value from the config, such as a secret, so the agent gets
+            // the place and the fix, and the full chain goes to stderr only (#2923).
+            text.push_str(&format!(
+                "\n\nllmenv: the config at {} could not be loaded, so the task tracker reminders \
+                 are missing. Run `llmenv validate` to see why.",
+                config_path.display()
+            ));
         }
     }
 
@@ -2900,7 +2894,7 @@ fn run_config_guard() {
             return;
         }
     };
-    if is_within_cache(&cache_root, &expanded) {
+    if crate::util::is_within(&cache_root, &expanded) {
         let config_path = paths::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "~/.config/llmenv/config.yaml".to_string());
@@ -6067,7 +6061,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).unwrap().len(),
+            installed_adapters(&config).len(),
             0,
             "disabling every known engine id must yield no installed adapters"
         );
@@ -6085,7 +6079,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).unwrap().len(),
+            installed_adapters(&config).len(),
             0,
             "disabled_engines with different casing must still disable engines"
         );
@@ -6097,14 +6091,14 @@ mod tests {
         // and must not print confusing "unknown engine" warnings.
         let on_path_count = crate::adapter::registered_adapters()
             .iter()
-            .filter(|a| crate::adapter::binary_on_path(a.binary_name()).unwrap())
+            .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
             .count();
         let config = Config {
             disabled_engines: vec!["".to_string(), "  ".to_string(), "\t".to_string()],
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).unwrap().len(),
+            installed_adapters(&config).len(),
             on_path_count,
             "empty/whitespace disabled_engine entries should not disable adapters"
         );
@@ -6117,7 +6111,7 @@ mod tests {
             disabled_engines: vec!["  ".to_string(), "\t\t".to_string()],
             ..Config::default()
         };
-        let count = installed_adapters(&config).unwrap().len();
+        let count = installed_adapters(&config).len();
         let _ = count;
     }
 
@@ -6764,34 +6758,6 @@ mod tests {
     }
 }
 
-/// Lexically normalize a path: resolve `..` and `.` components without touching
-/// the filesystem. This prevents `..`-based traversal bypasses when checking
-/// path prefixes on paths that may not exist yet.
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut out = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Pure path-prefix check: does `expanded_path` lie within `cache_root`?
-///
-/// Normalizes `..` components lexically (no filesystem access) so traversal
-/// paths like `/cache/llmenv/../../../etc/passwd` cannot bypass the check.
-#[must_use]
-fn is_within_cache(cache_root: &std::path::Path, expanded_path: &str) -> bool {
-    let path = normalize_path(std::path::Path::new(expanded_path));
-    path.starts_with(cache_root)
-}
-
 #[cfg(test)]
 mod config_guard_tests {
     use super::*;
@@ -6816,19 +6782,19 @@ mod config_guard_tests {
     #[test]
     fn test_is_within_cache_basic() {
         let cache_root = std::path::Path::new("/home/user/.cache/llmenv");
-        assert!(is_within_cache(
+        assert!(crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv/config"
         ));
-        assert!(is_within_cache(
+        assert!(crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv/data/file.txt"
         ));
-        assert!(!is_within_cache(
+        assert!(!crate::util::is_within(
             cache_root,
             "/home/user/.config/llmenv/config.yaml"
         ));
-        assert!(!is_within_cache(
+        assert!(!crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv-adjacent/file"
         ));
@@ -6837,7 +6803,7 @@ mod config_guard_tests {
     #[test]
     fn test_is_within_cache_empty_path() {
         let cache_root = std::path::Path::new("/cache");
-        assert!(!is_within_cache(cache_root, ""));
+        assert!(!crate::util::is_within(cache_root, ""));
     }
 
     #[test]
@@ -6846,7 +6812,7 @@ mod config_guard_tests {
         // After normalization, /cache/llmenv/../../../etc/passwd → /etc/passwd,
         // which does not start with /cache/llmenv.
         let escaped = "/cache/llmenv/../../../etc/passwd";
-        assert!(!is_within_cache(cache_root, escaped));
+        assert!(!crate::util::is_within(cache_root, escaped));
     }
 
     #[test]
@@ -6894,14 +6860,14 @@ mod config_guard_tests {
         #[test]
         fn prop_within_cache_reflexive(ref cache_root in r"/[a-z/]+") {
             let path = std::path::Path::new(cache_root);
-            prop_assert!(is_within_cache(path, cache_root));
+            prop_assert!(crate::util::is_within(path, cache_root));
         }
 
         #[test]
         fn prop_within_cache_child_paths(ref cache_root in r"/[a-z/]+", ref suffix in r"[a-z0-9]+") {
             let path = std::path::Path::new(cache_root);
             let child = format!("{}/{}", cache_root, suffix);
-            prop_assert!(is_within_cache(path, &child));
+            prop_assert!(crate::util::is_within(path, &child));
         }
 
         #[test]
@@ -6910,7 +6876,7 @@ mod config_guard_tests {
             // Adjacent directory with similar prefix should not match
             if let Some(base) = cache_root.rfind('/') {
                 let sibling = format!("{}{}", &cache_root[..=base], "other");
-                prop_assert!(!is_within_cache(path, &sibling));
+                prop_assert!(!crate::util::is_within(path, &sibling));
             }
         }
 
@@ -6918,7 +6884,7 @@ mod config_guard_tests {
         fn prop_no_panic_on_arbitrary_strings(ref cache_root in r"/[a-z/]*", ref path_str in ".*") {
             let path = std::path::Path::new(cache_root);
             // Should never panic, even on malformed paths
-            let _ = is_within_cache(path, path_str);
+            let _ = crate::util::is_within(path, path_str);
         }
     }
 }

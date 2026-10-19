@@ -332,6 +332,7 @@ An entry with an unset variable is dropped.
 A relative entry or a `~user` entry is rejected by `llmenv validate`.
 llmenv warns about a configured entry that is not a folder.
 The SessionStart notice and `llmenv doctor` list the recorded roots.
+(changed in v3.13.0) When no root is recorded, `llmenv doctor` says that indexing is unconfined.
 They name each configured root that the server does not cover, with the command to record it.
 They also name a recorded root that no configured root covers.
 A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the recorded roots,

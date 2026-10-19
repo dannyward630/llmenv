@@ -130,7 +130,8 @@ fn build_prompt(max_rules: u32, summaries: &[String]) -> String {
 /// Returns `anyhow::Error` if the process fails to start, times out, or exits
 /// with a non-zero status.
 async fn call_claude(prompt: &str) -> anyhow::Result<String> {
-    let mut child = spawn_with_kill_on_drop(claude_command())?;
+    let program = crate::path_lookup::resolve_program("claude")?;
+    let mut child = spawn_with_kill_on_drop(claude_command(&program))?;
 
     // Write prompt to stdin and close it
     if let Some(mut stdin) = child.stdin.take() {
@@ -156,35 +157,8 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
 /// sees it, so the child can never start consolidation again (#2355).
 pub(crate) const CHILD_GUARD_ENV: &str = "LLMENV_CONSOLIDATION_CHILD";
 
-/// The isolated `claude -p` call. The child inherits `CLAUDE_CONFIG_DIR`, so
-/// without these flags it runs every llmenv hook and MCP server, and its own
-/// `SessionEnd` hook starts consolidation again (#2355).
-///
-/// The user's settings still load, because they can hold the auth (`env`,
-/// `apiKeyHelper`, a Bedrock or Vertex provider). `--bare` and
-/// `--setting-sources ""` both drop that auth, and `--bare` also drops the
-/// OAuth login this backend exists for. `disableAllHooks` stops the hooks,
-/// and the default output style keeps the reply in the bullet format that
-/// [`parse_bullets`] reads.
-fn claude_command() -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.args([
-        "-p",
-        "--settings",
-        r#"{"disableAllHooks":true,"outputStyle":"default"}"#,
-        // No --mcp-config is given, so no MCP server starts.
-        "--strict-mcp-config",
-        "--tools",
-        "",
-        "--disable-slash-commands",
-        "--no-session-persistence",
-    ])
-    .env(CHILD_GUARD_ENV, "1")
-    // The prompt calls no tools, so waiting for MCP servers to connect only adds start-up time.
-    // Claude Code 2.1.274 and later read this; older versions ignore it.
-    .env("CLAUDE_CODE_MCP_STARTUP_WAIT_MS", "0");
-    cmd
-}
+mod claude_cli;
+use claude_cli::claude_command;
 
 /// The consolidation settings of the active memory entry: the first entry in
 /// `memory` (top-level plus bundle-contributed) whose `when` has an active
@@ -1172,7 +1146,7 @@ mod tests {
 
     #[test]
     fn claude_command_isolates_the_child_and_sets_the_guard() {
-        let cmd = claude_command();
+        let cmd = claude_command(std::path::Path::new("claude"));
         let std_cmd = cmd.as_std();
         let args: Vec<&std::ffi::OsStr> = std_cmd.get_args().collect();
         let has_pair = |flag: &str, value: &str| {

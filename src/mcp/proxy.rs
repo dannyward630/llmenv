@@ -1002,51 +1002,10 @@ fn sanitize_log_line(line: &str) -> String {
         .collect()
 }
 
-/// Builds the `mcp-proxy` invocation, preferring a `mcp-proxy` already on
-/// `PATH` and falling back to `uvx mcp-proxy` when it isn't installed. Returns
-/// the program plus its leading args; the caller appends `--port`/target.
-///
-/// # Errors
-/// Returns an error when neither `mcp-proxy` nor `uvx` is on `PATH` — the
-/// memory backend can't be exposed on the network without one of them.
-fn mcp_proxy_command() -> anyhow::Result<(&'static str, Vec<&'static str>)> {
-    if on_path("mcp-proxy") {
-        Ok(("mcp-proxy", vec![]))
-    } else if on_path("uvx") {
-        Ok(("uvx", vec!["mcp-proxy"]))
-    } else {
-        Err(anyhow::anyhow!(
-            "neither `mcp-proxy` nor `uvx` found on PATH; install one to run the \
-             memory server, or disable the `memory` config block"
-        ))
-    }
-}
-
-/// True when `program` resolves to an executable on `PATH`. Scans `$PATH`
-/// entries directly rather than shelling out, so it works without a shell and
-/// is unaffected by `command`/`which` availability.
-fn on_path(program: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(program);
-        is_executable(&candidate)
-    })
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
+mod launcher;
+use launcher::mcp_proxy_command;
+#[cfg(test)]
+use launcher::mcp_proxy_command_in;
 
 /// Parses a `host:port` bind string into a socket address.
 ///
@@ -1098,7 +1057,7 @@ pub(crate) fn spawn_mcp_proxy(
 ) -> anyhow::Result<Child> {
     let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(&program);
     cmd.args(leading)
         // `--host` takes a bare address; `ip()` drops the brackets an IPv6
         // SocketAddr renders with, which mcp-proxy would reject.
@@ -1128,9 +1087,12 @@ pub(crate) fn spawn_mcp_proxy(
         }
     };
     configure_detached(&mut cmd, stderr);
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawning `{program}` to run mcp-proxy (resolved from PATH)"))?;
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "spawning `{}` to run mcp-proxy (resolved from PATH)",
+            program.display()
+        )
+    })?;
     // One line per spawn, so a later unexplained shutdown can be tied to a spawner (#2417).
     record_spawn(pid_path, child.id(), source);
     Ok(child)
@@ -1309,7 +1271,7 @@ pub fn is_alive(pid: u32) -> Option<bool> {
     reason = "test scaffolding"
 )]
 mod tests {
-    use super::{Command, Path, Stdio, is_executable};
+    use super::{Command, Path, Stdio, mcp_proxy_command_in};
     use std::os::unix::fs::PermissionsExt;
 
     // #1494: shared with `tests/mcp_proxy.rs` via `include!` rather than
@@ -1318,31 +1280,19 @@ mod tests {
     include!("../../tests/support/port_guard.rs");
 
     #[test]
-    fn is_executable_true_only_for_executable_files() {
-        let dir = tempfile::tempdir().expect("tempdir");
-
-        let exe = dir.path().join("tool");
+    fn the_proxy_program_is_the_absolute_path_and_never_a_relative_folder() {
+        let dir = tempfile::tempdir_in(".").expect("tempdir");
+        let exe = dir.path().join("uvx");
         std::fs::write(&exe, b"#!/bin/sh\n").expect("write");
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        assert!(is_executable(&exe), "0o755 file should be executable");
-
-        let plain = dir.path().join("data");
-        std::fs::write(&plain, b"x").expect("write");
-        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        assert!(
-            !is_executable(&plain),
-            "0o644 file should not be executable"
-        );
-
-        assert!(
-            !is_executable(&dir.path().join("missing")),
-            "missing path should not be executable"
-        );
-
-        assert!(
-            !is_executable(dir.path()),
-            "a directory should not count as an executable file"
-        );
+        let relative = Path::new(".").join(dir.path().file_name().expect("name"));
+        let path_var = std::env::join_paths([&relative]).expect("join");
+        assert!(mcp_proxy_command_in(Some(&path_var)).is_err());
+        let absolute = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let path_var = std::env::join_paths([absolute.clone()]).expect("join");
+        let (program, leading) = mcp_proxy_command_in(Some(&path_var)).expect("found");
+        assert_eq!(program, absolute.join("uvx"));
+        assert_eq!(leading, ["mcp-proxy"]);
     }
 
     // #2262: `icm serve` reads `<git root>/.icm/` when no `ICM_DB` or global

@@ -54,6 +54,16 @@ fn a_subagent_call_does_not_reset_the_main_agent_streak() {
 }
 
 #[test]
+fn an_unsafe_session_id_stays_unsafe_with_an_agent_id() {
+    use crate::hook_run::session_state::agent_state_key;
+    assert_eq!(
+        agent_state_key("../x", &json!({ "agent_id": "a1" })),
+        "../x"
+    );
+    assert_eq!(agent_state_key("..", &json!({ "agent_id": "a1" })), "..");
+}
+
+#[test]
 fn an_agent_id_with_path_parts_gets_its_own_counter_inside_the_state_dir() {
     let dir = TempDir::new().expect("test");
     let outs: Vec<String> = (0..2)
@@ -87,18 +97,38 @@ fn a_non_string_agent_id_still_keeps_its_own_counter() {
 proptest::proptest! {
     #[test]
     fn two_different_agents_never_share_a_state_key(
-        s1 in "[a-z0-9.]{1,6}", a1 in "[a-z0-9.]{1,6}",
-        s2 in "[a-z0-9.]{1,6}", a2 in proptest::option::of("[a-z0-9.]{1,6}"),
+        s1 in "[a-z0-9][a-z0-9.]{0,5}", a1 in "[a-z0-9.]{1,6}",
+        s2 in "[a-z0-9][a-z0-9.]{0,5}", a2 in proptest::option::of("[a-z0-9.]{1,6}"),
     ) {
+        use crate::hook_run::session_state::agent_state_key;
         let payload = |a: Option<&str>| match a {
             Some(a) => json!({ "agent_id": a }),
             None => json!({}),
         };
-        let k1 = state_key(&s1, &payload(Some(&a1)));
-        let k2 = state_key(&s2, &payload(a2.as_deref()));
+        let k1 = agent_state_key(&s1, &payload(Some(&a1)));
+        let k2 = agent_state_key(&s2, &payload(a2.as_deref()));
         if (s1.as_str(), Some(a1.as_str())) != (s2.as_str(), a2.as_deref()) {
             proptest::prop_assert_ne!(&k1, &k2);
         }
-        proptest::prop_assert!(crate::paths::is_valid_short_name(&k1) || s1.starts_with('.'));
+        proptest::prop_assert!(crate::paths::is_valid_short_name(&k1));
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn the_main_agent_and_an_unsafe_session_keep_the_bare_session_id(
+        session in "[a-zA-Z0-9._/-]{1,12}",
+        agent in proptest::option::of("[a-z0-9]{1,6}"),
+        null_agent in proptest::bool::ANY,
+    ) {
+        use crate::hook_run::session_state::agent_state_key;
+        let main = if null_agent { json!({ "agent_id": null }) } else { json!({}) };
+        proptest::prop_assert_eq!(agent_state_key(&session, &main), session.clone());
+        if !crate::paths::is_valid_short_name(&session)
+            && let Some(agent) = agent
+        {
+            let sub = json!({ "agent_id": agent });
+            proptest::prop_assert_eq!(agent_state_key(&session, &sub), session);
+        }
     }
 }

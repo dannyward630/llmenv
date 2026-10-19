@@ -27,6 +27,7 @@ use notice::{
     log_memory_without_channel, log_notice_without_channel, write_hook_line, write_notice_only,
 };
 use transcript_link::ensure_transcript_session;
+mod cbm_index_cmd;
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
 pub(crate) mod mcp_client;
@@ -44,11 +45,21 @@ mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
+pub(crate) use cbm_index_cmd::index_result_path;
+use cbm_index_cmd::{
+    create_result_file, direct_index_stdout, index_command, index_job_command, uses_wrapper,
+};
+mod stop_reminder;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
 pub(crate) mod transcript;
 mod transcript_link;
+use stop_reminder::resolve_stop_reminder;
 mod web_fetch;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod agent_state_tests;
 
 use std::io::Write;
 use std::str::FromStr;
@@ -920,6 +931,9 @@ fn resolve_pre_tool_text(
     // silently downgrade the deny to an allow.
     // #317 phase 3: checked before the write guard only because both deny and
     // the first deny wins; neither ordering is load-bearing beyond that.
+    // Each subagent keeps its own hook state (#2936). Repeat detection derives the same key.
+    let agent_key = claude_session_id.map(|id| session_state::agent_state_key(id, stdin_payload));
+    let state_id = agent_key.as_deref();
     let scan_deny = crate::hook_run::slippage::handle_transcript_scan(
         config.features.as_ref().and_then(|f| f.slippage.as_ref()),
         stdin_payload,
@@ -931,7 +945,7 @@ fn resolve_pre_tool_text(
     let write_guard = crate::hook_run::slippage::handle_pre_tool_use(
         config.features.as_ref().and_then(|f| f.slippage.as_ref()),
         stdin_payload,
-        claude_session_id,
+        state_id,
         state_dir,
     );
     if !write_guard.is_empty() {
@@ -948,7 +962,7 @@ fn resolve_pre_tool_text(
         let deny = crate::hook_run::task_nudge::handle_pre_tool_use(
             tracker,
             stdin_payload,
-            claude_session_id,
+            state_id,
             state_dir,
         );
         if !deny.is_empty() {
@@ -966,7 +980,7 @@ fn resolve_pre_tool_text(
     {
         let ro_text = crate::hook_run::read_once::handle_pre_tool_use(
             stdin_payload,
-            claude_session_id,
+            state_id,
             read_once,
             state_dir,
         );
@@ -1008,68 +1022,6 @@ fn resolve_pre_tool_text(
         .flatten()
         .collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
-/// The task-tracker's `Stop` reminder, with repeat-detection applied: once
-/// the identical reminder has fired `threshold` times in a row for this
-/// session, `repeat_detect::handle_stop` appends a pointer to `llmenv task
-/// wait` (see #1006 — this is the same on-by-default detector as
-/// `resolve_pre_tool_text`, applied to Stop-event nagging instead of
-/// `PreToolUse` tool-call repetition).
-fn resolve_stop_reminder(
-    state_dir: &std::path::Path,
-    claude_session_id: Option<&str>,
-    config: &crate::config::Config,
-    stop_payload: &serde_json::Value,
-) -> String {
-    // #2511: a stop that a Stop hook caused gets no reminder, so the hook cannot loop the agent.
-    if stop_dedupe::is_hook_continuation(stop_payload) {
-        return String::new();
-    }
-    let mut reminder = crate::task::stop_hook_reminder(state_dir, claude_session_id);
-    // #2456: a turn that ends with a question to the user parks the task that waits for it.
-    if let Some(tracker) = config
-        .features
-        .as_ref()
-        .and_then(|f| f.task_tracker.as_ref())
-    {
-        let waiting = crate::hook_run::task_nudge::handle_stop(tracker, stop_payload, state_dir);
-        if !waiting.is_empty() {
-            if !reminder.is_empty() {
-                reminder.push_str("\n\n");
-            }
-            reminder.push_str(&waiting);
-        }
-    }
-    // #317: appended before repeat-detect wraps the text, so a repeat warning
-    // stays the last thing read — it's about the turn that just happened,
-    // while the checklist is about what to do before ending.
-    let critique = crate::hook_run::slippage::handle_stop(
-        config.features.as_ref().and_then(|f| f.slippage.as_ref()),
-    );
-    if !critique.is_empty() {
-        if !reminder.is_empty() {
-            reminder.push_str("\n\n");
-        }
-        reminder.push_str(&critique);
-    }
-    // #2511: runs before repeat-detect, which counts only the reminders that are emitted.
-    let reminder = stop_dedupe::emit_once(state_dir, claude_session_id, &reminder);
-    let repeat_detect_cfg = config
-        .features
-        .as_ref()
-        .and_then(|f| f.repeat_detect.clone())
-        .unwrap_or_default();
-    if repeat_detect_cfg.enabled {
-        crate::hook_run::repeat_detect::handle_stop(
-            &reminder,
-            claude_session_id,
-            &repeat_detect_cfg,
-            state_dir,
-        )
-    } else {
-        reminder
-    }
 }
 
 /// Build the `LLMENV_TRACE_TIMING` marker payload from whichever phase
@@ -1285,13 +1237,14 @@ fn run_inner(
     // #317: counted here rather than inside the pipeline below, which the
     // #702 early-exit can skip entirely — a metric that only accrues when
     // something else happens to want the event would undercount silently.
+    let agent_key = claude_session_id.map(|id| session_state::agent_state_key(id, stdin_payload));
     if counts_tool_use(event)
         && let Some(state_dir) = state_dir_or_log("slippage counters not updated")
     {
         crate::hook_run::slippage::handle_post_tool_use(
             config.features.as_ref().and_then(|f| f.slippage.as_ref()),
             stdin_payload,
-            claude_session_id,
+            agent_key.as_deref(),
             &state_dir,
         );
     }
@@ -1334,7 +1287,7 @@ fn run_inner(
         let text = crate::hook_run::task_nudge::handle_post_tool_use(
             tracker,
             stdin_payload,
-            claude_session_id,
+            agent_key.as_deref(),
             &state_dir,
         );
         (!text.is_empty()).then_some(text)
@@ -2835,91 +2788,6 @@ pub(crate) fn redirect_stderr_to_detached_log(
     }
 }
 
-/// Builds the `codebase-memory-mcp cli index_repository` subprocess command
-/// for `project_root`, without spawning it — kept separate so tests can
-/// assert on the command shape without launching a real process (#365).
-///
-/// `CBM_CACHE_DIR` is only set when `cm.index_path` is explicit (#1493);
-/// `CBM_ALLOWED_ROOT` is never set (#1495). `CBM_MEM_BUDGET_MB` is set when
-/// `cm.mem_budget_mb` is (#2154). Same treatment as `resolve_codebase_memory`
-/// (`src/mcp/resolve.rs`), which this mirrors so the SessionStart auto-index
-/// and the MCP server launch agree on scope and budget.
-/// The indexer command for `project_root`. The checkpointed wrapper (`detached_cbm`) rebuilds it
-/// from a checkpoint file (#2396).
-///
-/// `index_path` MUST already be expanded (see [`expanded_index_path`]). A literal `~` would reach
-/// the child as a directory name.
-fn index_command(
-    project_root: &std::path::Path,
-    index_path: Option<&str>,
-    mem_budget_mb: Option<u32>,
-) -> std::process::Command {
-    // repo_path must become JSON text regardless (the CLI arg is a JSON
-    // string), so this lossy step is unavoidable here — unlike the env var
-    // below, which can carry the raw OsStr straight through.
-    let args_json =
-        serde_json::json!({ "repo_path": project_root.display().to_string() }).to_string();
-    let mut cmd = std::process::Command::new("codebase-memory-mcp");
-    cmd.args(["cli", "index_repository", &args_json])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Some(index_path) = index_path {
-        cmd.env("CBM_CACHE_DIR", index_path);
-    }
-    if let Some(budget) = mem_budget_mb {
-        cmd.env("CBM_MEM_BUDGET_MB", budget.to_string());
-    }
-    cmd
-}
-
-/// Where the last index result of `project_root` is kept, under `cache_dir`. The cache directory
-/// is shared by every project, so the file name carries a stable key of the project root. The
-/// writer and `llmenv doctor` both call this (#2154).
-pub(crate) fn index_result_path(
-    cache_dir: &std::path::Path,
-    project_root: &std::path::Path,
-) -> std::path::PathBuf {
-    use sha2::{Digest, Sha256};
-    #[cfg(unix)]
-    let bytes = {
-        use std::os::unix::ffi::OsStrExt;
-        project_root.as_os_str().as_bytes().to_vec()
-    };
-    #[cfg(not(unix))]
-    let bytes = project_root.to_string_lossy().into_owned().into_bytes();
-    let digest = Sha256::digest(&bytes);
-    let key: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    cache_dir.join(format!("index-result-{key}.json"))
-}
-
-/// Send the stdout of an indexer that `cmd` starts directly to the result file. When `cmd` is the
-/// wrapper it does this for the indexer it starts (#2154).
-fn direct_index_stdout(
-    cmd: &mut std::process::Command,
-    wrapped: bool,
-    result_path: &std::path::Path,
-) {
-    if !wrapped {
-        cmd.stdout(result_stdout(result_path));
-    }
-}
-
-/// Create the result file at `path`, owner-only and new. An existing file or symlink at `path` is
-/// removed first, so the open can neither follow a link nor reuse a file that another user made.
-fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    // A failed removal shows below: `create_new` then fails on what is still there.
-    if let Some(e) = session_state::removal_error_to_log(std::fs::remove_file(path)) {
-        tracing::error!("could not remove result file {} ({e})", path.display());
-    }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
 /// The SessionEnd dedup snapshot path. Other events have none. A missing state directory skips
 /// the snapshot and logs, because an error return would drop the notices built above (#2719).
 fn dedup_snapshot_path(
@@ -3144,48 +3012,6 @@ mod write_hook_line_tests {
     }
 }
 
-/// The stdout for an indexer that reports its result as JSON: the result file, or null when the
-/// file cannot be created (a missing result is a smaller problem than skipping the index).
-fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
-    match create_result_file(path) {
-        Ok(file) => std::process::Stdio::from(file),
-        Err(e) => {
-            tracing::warn!(
-                "cannot create the index result file {}, so doctor cannot report the result: {e}",
-                path.display()
-            );
-            std::process::Stdio::null()
-        }
-    }
-}
-
-/// Whether an index job runs through the `cbm-index-run` wrapper: it needs a checkpoint and an
-/// executable to run it with (#2396).
-fn uses_wrapper(checkpoint: Option<&std::path::Path>, exe: Option<&std::path::Path>) -> bool {
-    checkpoint.is_some() && exe.is_some()
-}
-
-/// The process that runs one index job: `llmenv cbm-index-run` when there is a checkpoint and an
-/// executable to run it with, else the indexer itself (`direct`) (#2396).
-fn index_job_command(
-    checkpoint: Option<&std::path::Path>,
-    exe: Option<std::path::PathBuf>,
-    direct: impl FnOnce() -> std::process::Command,
-) -> std::process::Command {
-    match (checkpoint, exe) {
-        (Some(path), Some(exe)) => {
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("cbm-index-run")
-                .arg("--checkpoint")
-                .arg(path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null());
-            cmd
-        }
-        _ => direct(),
-    }
-}
-
 /// Fire-and-forget: registers `project_root` with codebase-memory-mcp's
 /// index + background auto-watch (#365). Mirrors `post_session_consolidation`'s
 /// detached-spawn pattern — indexing a large repo can take minutes (the
@@ -3219,6 +3045,13 @@ fn trigger_codebase_memory_index(
             )));
         }
     };
+    let program = match crate::path_lookup::resolve_program("codebase-memory-mcp") {
+        Ok(program) => program,
+        Err(e) => {
+            tracing::error!("codebase-memory index skipped: {e:#}");
+            return Some(index_skipped_notice(&format!("{e:#}")));
+        }
+    };
     let cache_dir = cache_dir_of(index_path.as_deref(), state_dir);
     let result_path = index_result_path(&cache_dir, project_root);
     let inputs = detached_cbm::IndexInputs {
@@ -3234,7 +3067,12 @@ fn trigger_codebase_memory_index(
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
-        index_command(project_root, index_path.as_deref(), cm.mem_budget_mb)
+        index_command(
+            &program,
+            project_root,
+            index_path.as_deref(),
+            cm.mem_budget_mb,
+        )
     });
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -3524,6 +3362,7 @@ mod tests {
         }
     }
 
+    use super::cbm_index_cmd::result_stdout;
     use super::web_fetch::handle_web_fetch_in;
     use super::*;
 
@@ -5430,6 +5269,7 @@ mod tests {
             mcp_permissions: None,
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/repos/proj"),
             cm.index_path.as_deref(),
             cm.mem_budget_mb,
@@ -5475,6 +5315,7 @@ mod tests {
             mcp_permissions: None,
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/repos/proj"),
             cm.index_path.as_deref(),
             cm.mem_budget_mb,
@@ -5628,6 +5469,7 @@ mod tests {
             ..Default::default()
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/r"),
             with.index_path.as_deref(),
             with.mem_budget_mb,
@@ -5638,6 +5480,7 @@ mod tests {
             ..Default::default()
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/r"),
             without.index_path.as_deref(),
             without.mem_budget_mb,
@@ -5841,7 +5684,12 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
+            let cmd = index_command(
+                std::path::Path::new("codebase-memory-mcp"),
+                &project_root,
+                cm.index_path.as_deref(),
+                cm.mem_budget_mb,
+            );
             let args: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
@@ -5866,7 +5714,12 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
+            let cmd = index_command(
+                std::path::Path::new("codebase-memory-mcp"),
+                &project_root,
+                cm.index_path.as_deref(),
+                cm.mem_budget_mb,
+            );
             let envs: std::collections::BTreeMap<String, String> = cmd
                 .get_envs()
                 .filter_map(|(k, v)| {

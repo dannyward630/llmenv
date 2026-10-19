@@ -15,6 +15,8 @@ mod instruction_size;
 mod mcp_text;
 mod network;
 mod task_text;
+mod tool_availability;
+use tool_availability::run_doctor_tool_availability;
 mod version;
 use version::{cbm_floor_warning, parse_semver_triple};
 
@@ -389,7 +391,10 @@ const DEPENDENT_TOOLS: &[(&str, UpdatePath)] = &[
 /// A hung tool must not hang doctor, so the call stops after [`DEFAULT_TOOL_VERSION_TIMEOUT`].
 /// A failed call is logged with its cause.
 fn tool_version(binary: &str) -> Option<String> {
-    let mut cmd = std::process::Command::new(binary);
+    let program = crate::path_lookup::resolve_program(binary)
+        .inspect_err(|e| tracing::error!("cannot read the version of {binary}: {e:#}"))
+        .ok()?;
+    let mut cmd = std::process::Command::new(program);
     cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -519,7 +524,7 @@ fn icm_server_check(version: &str) -> (CheckLevel, String) {
 
 /// The local `icm` version for a host that serves memory, or the reason it is unknown.
 fn local_icm_version() -> Result<String, String> {
-    if !crate::adapter::binary_on_path("icm").map_err(|e| format!("{e:#}"))? {
+    if !crate::adapter::binary_on_path("icm") {
         return Err("icm is not on PATH, but this host serves ICM memory".to_string());
     }
     tool_version("icm").ok_or_else(|| "`icm --version` failed or printed no version".to_string())
@@ -640,7 +645,7 @@ fn run_doctor_dependent_tools(use_color: bool) {
 
     let installed: Vec<_> = DEPENDENT_TOOLS
         .iter()
-        .filter(|(bin, _)| on_path(bin, &warn) == Some(true))
+        .filter(|(bin, _)| crate::adapter::binary_on_path(bin))
         .collect();
     if installed.is_empty() {
         return;
@@ -667,105 +672,6 @@ fn run_doctor_dependent_tools(use_color: bool) {
         eprintln!("{marker} {bin} {version} — {how} `{}`", update.command());
         if let Some(text) = floor_warning {
             eprintln!("{warn} {text}");
-        }
-    }
-}
-
-fn run_doctor_tool_availability(use_color: bool, config: &Config) {
-    let pass = super::doctor_pass(use_color);
-    let fail = super::doctor_fail(use_color);
-    let info = super::doctor_info(use_color);
-
-    eprintln!();
-    eprintln!("Tool-availability checks:");
-
-    let has_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.memory.is_empty());
-
-    // icm — required when features.memory has entries
-    // mcp-proxy or uvx — required when any memory server_host is remote
-    if has_memory {
-        match on_path("icm", &fail) {
-            Some(true) => eprintln!("{pass} icm found on PATH"),
-            Some(false) => eprintln!(
-                "{fail} icm not found on PATH (required when features.memory is configured)"
-            ),
-            None => {}
-        }
-
-        if has_remote_memory_host(config) {
-            match (on_path("mcp-proxy", &fail), on_path("uvx", &fail)) {
-                (Some(true), _) | (_, Some(true)) => {
-                    eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
-                }
-                (Some(false), Some(false)) => eprintln!(
-                    "{fail} neither mcp-proxy nor uvx on PATH \
-                     (remote memory server_host requires one for TCP proxying)"
-                ),
-                _ => {}
-            }
-        }
-    }
-
-    // codebase-memory-mcp — required when features.codebase_memory has entries
-    let has_codebase_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.codebase_memory.is_empty());
-    if has_codebase_memory {
-        match on_path("codebase-memory-mcp", &fail) {
-            Some(true) => eprintln!("{pass} codebase-memory-mcp found on PATH"),
-            Some(false) => eprintln!(
-                "{fail} codebase-memory-mcp not found on PATH (required when \
-                 features.codebase_memory is configured) — install: \
-                 https://github.com/DeusData/codebase-memory-mcp"
-            ),
-            None => {}
-        }
-    }
-
-    // claude — required when claude_code engine is not disabled
-    let claude_disabled = config
-        .disabled_engines
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case("claude_code"));
-    if !claude_disabled {
-        match on_path("claude", &fail) {
-            Some(true) => eprintln!("{pass} claude found on PATH"),
-            Some(false) => eprintln!(
-                "{fail} claude not found on PATH \
-                 (claude_code engine is not disabled, but the `claude` binary is missing)"
-            ),
-            None => {}
-        }
-    }
-
-    // Every other registered engine — always optional. Derived from the adapter
-    // registry rather than a hardcoded list, so a newly registered engine is
-    // reported here without a second edit (#1032).
-    for adapter in crate::adapter::registered_adapters() {
-        if crate::adapter::engine_id(adapter.as_ref()) == "claude_code" {
-            continue; // reported above, where it is required rather than optional
-        }
-        let bin = adapter.binary_name();
-        match on_path(bin, &fail) {
-            Some(true) => eprintln!("{pass} {bin} found on PATH"),
-            Some(false) => eprintln!("{info} {bin} not found on PATH (optional engine)"),
-            None => {}
-        }
-    }
-}
-
-/// Whether `bin` is on `PATH`, or `None` after a `marker` line that names why the check could
-/// not run. A failed check must not read as "not installed" (#2753).
-fn on_path(bin: &str, marker: &str) -> Option<bool> {
-    match crate::adapter::binary_on_path(bin) {
-        Ok(found) => Some(found),
-        Err(e) => {
-            eprintln!("{marker} cannot check whether {bin} is on PATH: {e:#}");
-            None
         }
     }
 }
@@ -1396,14 +1302,7 @@ pub(super) fn run_doctor(
     // `--all`: "why isn't my permission rule working on opencode" is the
     // question doctor exists to answer.
     // Collected once: each `installed_adapters` call repeats its disabled_engines warning.
-    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> = super::installed_adapters(&config)
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "{} cannot list the installed engines, so the engine checks are skipped: {e:#}",
-                super::doctor_fail(use_color)
-            );
-            Vec::new()
-        });
+    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> = super::installed_adapters(&config);
     let claude_installed = has_engine(&installed, "claude_code");
     {
         let caps = doctor_manifest

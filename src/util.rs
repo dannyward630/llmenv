@@ -72,6 +72,41 @@ pub(crate) fn display_safe(s: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// Lexically normalize a path: resolve `..` and `.` components without touching
+/// the filesystem. This prevents `..`-based traversal bypasses when checking
+/// path prefixes on paths that may not exist yet.
+pub(crate) fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Whether `expanded_path` lies within `cache_root`. Components are compared, not text, so
+/// `/cache2` is not within `/cache`. When both paths exist, links are resolved first, so a link
+/// outside the root that points into it counts as within. Otherwise `..` components are
+/// normalized lexically, so `/cache/llmenv/../../../etc/passwd` cannot pass for a path that does
+/// not exist yet.
+#[must_use]
+pub(crate) fn is_within(cache_root: &std::path::Path, expanded_path: &str) -> bool {
+    let path = std::path::Path::new(expanded_path);
+    match (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(cache_root),
+    ) {
+        (Ok(path), Ok(root)) => path.starts_with(root),
+        _ => normalize_path(path).starts_with(cache_root),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +168,49 @@ mod tests {
         fn display_safe_output_never_contains_a_raw_control_char(s in ".{0,100}") {
             let out = display_safe(&s);
             proptest::prop_assert!(!out.chars().any(char::is_control));
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+#[test]
+#[expect(clippy::unwrap_used, reason = "test code")]
+fn a_link_into_the_root_counts_as_within() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("cache");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("settings.json"), "{}").unwrap();
+    let link = dir.path().join("outside-link.json");
+    std::os::unix::fs::symlink(root.join("settings.json"), &link).unwrap();
+    assert!(is_within(&root, &link.display().to_string()));
+    assert!(!is_within(
+        &root,
+        &dir.path().join("other").display().to_string()
+    ));
+}
+
+#[cfg(test)]
+mod normalize_props {
+    use proptest::prelude::*;
+    use std::path::{Component, PathBuf};
+
+    use super::normalize_path;
+
+    proptest! {
+        #[test]
+        fn a_normalized_path_has_no_dot_parts_and_is_stable(
+            parts in proptest::collection::vec("(\\.\\.|\\.|[a-z]{1,4})", 0..8),
+        ) {
+            let path: PathBuf = std::iter::once("/".to_string()).chain(parts).collect();
+            let once = normalize_path(&path);
+            prop_assert!(
+                once.components()
+                    .all(|c| !matches!(c, Component::ParentDir | Component::CurDir)),
+                "{}",
+                once.display()
+            );
+            prop_assert_eq!(normalize_path(&once), once);
         }
     }
 }

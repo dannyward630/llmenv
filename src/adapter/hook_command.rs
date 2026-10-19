@@ -150,11 +150,11 @@ pub(crate) fn resolve_hook_command(
 /// characters, and does not point into a system directory. Shell syntax such as the jq `//`
 /// operator, `2>/dev/null`, and `$(...)` does not count.
 fn unresolved_path_tokens(command: &str, cache: &Path) -> Vec<String> {
-    let cache = cache.to_string_lossy();
     command
         .split_whitespace()
         .map(|word| split_word(word).1)
-        .filter(|word| is_script_path(word) && !word.starts_with(cache.as_ref()))
+        // Components, not text: `/cache/../etc/x` and `/cache2/x` are outside `/cache` (#2923).
+        .filter(|word| is_script_path(word) && !crate::util::is_within(cache, word))
         .map(str::to_string)
         .collect()
 }
@@ -229,6 +229,13 @@ mod tests {
         ] {
             assert_eq!(tokens(command), [token], "{command}");
         }
+    }
+
+    #[test]
+    fn a_path_that_only_looks_like_it_is_in_the_cache_is_named() {
+        assert!(tokens("sh /cache/hooks/x.sh").is_empty());
+        assert_eq!(tokens("sh /cache/../etc/x.sh"), ["/cache/../etc/x.sh"]);
+        assert_eq!(tokens("sh /cache2/x.sh"), ["/cache2/x.sh"]);
     }
 
     #[test]

@@ -124,14 +124,33 @@ fn is_proxy_command(command: &str) -> bool {
 /// a long line, which would hide the `-- icm serve` tail.
 fn command_of(pid: u32) -> anyhow::Result<Option<String>> {
     // An absolute path: a `ps` earlier on PATH could answer for any pid.
-    let out = std::process::Command::new("/bin/ps")
-        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .output()
+    let mut cmd = std::process::Command::new("/bin/ps");
+    cmd.args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = crate::process::run_with_timeout(cmd, PS_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the command of pid {pid}: {e}"))?;
+    ps_command(pid, &out)
+}
+
+/// `ps` answers in milliseconds. A stuck `ps` must not hold the proxy check (#2923).
+const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read the `ps` result for `pid`. `ps -p` exits 1 with no output for a pid that does not exist.
+/// Any other failure is an error, so a broken `ps` does not read as "pid gone" (#2923).
+fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result<Option<String>> {
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // `ps -p` exits 1 with no output for a pid that does not exist.
-    Ok((!text.is_empty()).then_some(text))
+    if out.status.success() {
+        return Ok((!text.is_empty()).then_some(text));
+    }
+    if out.status.code() == Some(1) && text.is_empty() && out.stderr.is_empty() {
+        return Ok(None);
+    }
+    anyhow::bail!(
+        "/bin/ps failed to read the command of pid {pid} ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
 }
 
 /// Whether `pid` is a running process that this user can signal.
@@ -189,6 +208,41 @@ mod tests {
     use super::*;
     use crate::mcp::proxy::is_alive;
     use proptest::prelude::*;
+
+    fn ps_output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn a_successful_ps_gives_its_trimmed_output(out in "\\PC{0,40}", err in "\\PC{0,20}") {
+            let read = ps_command(7, &ps_output(0, &out, &err)).unwrap();
+            let trimmed = out.trim();
+            prop_assert_eq!(read, (!trimmed.is_empty()).then(|| trimmed.to_string()));
+        }
+
+        #[test]
+        fn a_failed_ps_never_panics(code in 1i32..128, out in "\\PC{0,20}", err in "\\PC{0,20}") {
+            let _ = ps_command(7, &ps_output(code, &out, &err));
+        }
+    }
+
+    #[test]
+    fn a_ps_failure_is_an_error_and_not_a_gone_pid() {
+        assert_eq!(
+            ps_command(7, &ps_output(0, "icm serve\n", "")).unwrap(),
+            Some("icm serve".to_string())
+        );
+        assert_eq!(ps_command(7, &ps_output(1, "", "")).unwrap(), None);
+        let err = ps_command(7, &ps_output(1, "", "ps: bad option")).unwrap_err();
+        assert!(format!("{err:#}").contains("bad option"), "{err:#}");
+        assert!(ps_command(7, &ps_output(2, "", "")).is_err());
+    }
 
     fn spawner() -> Spawner {
         Spawner {

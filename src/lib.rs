@@ -29,6 +29,7 @@ pub mod memory;
 pub mod merge;
 pub(crate) mod onboarding;
 pub mod panic_hook;
+pub(crate) mod path_lookup;
 pub mod paths;
 pub mod plugins;
 pub(crate) mod process;
