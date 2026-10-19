@@ -148,17 +148,16 @@ pub(super) fn session_state_path(state_dir: &Path, session_id: &str) -> PathBuf 
 
 /// The state file name for one agent of the session. Parallel subagents share the session id,
 /// so each subagent gets its own counter (#2901). The main agent keeps the bare session id,
-/// which `handle_stop` also uses. `None` means the payload's `agent_id` is not safe in a path.
-fn state_key(session_id: &str, stdin_payload: &serde_json::Value) -> Option<String> {
-    let Some(agent_id) = stdin_payload.get("agent_id").and_then(|v| v.as_str()) else {
-        return Some(session_id.to_string());
+/// which `handle_stop` and the `/clear` reset also use. The agent part is a hash of the session id
+/// and the agent id, so any `agent_id` is safe in a path and no two keys are equal.
+fn state_key(session_id: &str, stdin_payload: &serde_json::Value) -> String {
+    let agent_id = match stdin_payload.get("agent_id") {
+        None | Some(serde_json::Value::Null) => return session_id.to_string(),
+        Some(serde_json::Value::String(id)) => id.clone(),
+        Some(other) => other.to_string(),
     };
-    if !crate::paths::is_valid_short_name(agent_id) {
-        tracing::error!("agent_id failed path-safety validation for repeat_detect, rejecting");
-        return None;
-    }
-    // Session ids are UUIDs with no dot, so the dot keeps two keys apart.
-    Some(format!("{session_id}.{agent_id}"))
+    let hash = super::record_hash::hash_prefix(format!("{session_id}\0{agent_id}").as_bytes());
+    format!("{session_id}.agent-{hash}")
 }
 
 /// Handle a `PreToolUse` event for the repeat-detect feature.
@@ -204,9 +203,7 @@ pub(crate) fn handle_pre_tool_use(
         tracing::error!("tool_name missing or not a string for PreToolUse payload");
         return String::new();
     };
-    let Some(state_key) = state_key(session_id, stdin_payload) else {
-        return String::new();
-    };
+    let state_key = state_key(session_id, stdin_payload);
     let tool_input = stdin_payload
         .get("tool_input")
         .cloned()
@@ -322,3 +319,7 @@ mod tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod stop_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod agent_tests;
