@@ -177,27 +177,20 @@ pub(super) fn run_doctor_cbm_index(
     let warn = super::super::doctor_warning(use_color);
     let info = super::super::doctor_info(use_color);
     super::print_check(check(&cache_dir, &project_root), &pass, &warn, &info);
-    print_roots(config, entry, &project_root, (&pass, &warn, &info));
+    print_roots(entry, &project_root, (&pass, &warn, &info));
 }
 
 /// Print the roots that codebase-memory-mcp may index, and any wanted root it lacks (#2406).
 fn print_roots(
-    config: &crate::config::Config,
     entry: &crate::config::CodebaseMemory,
     project_root: &Path,
     (pass, warn, info): (&str, &str, &str),
 ) {
     use llmenv_mcp::cbm_roots;
-    let bases = cbm_roots::RootBases::from_config(config, project_root);
-    let problems = bases
-        .as_ref()
-        .map(|bases| cbm_roots::root_problems(entry, bases))
-        .unwrap_or_default();
-    let check = bases
-        .and_then(|bases| {
-            let wanted = cbm_roots::resolve_allowed_roots(entry, &bases);
-            cbm_roots::check_roots(entry, &wanted, bases.home.as_deref())
-        })
+    let bases = cbm_roots::RootBases::for_project(project_root);
+    let problems = cbm_roots::root_problems(entry, &bases);
+    let wanted = cbm_roots::configured_roots(entry, &bases);
+    let check = cbm_roots::check_roots(entry, &wanted, bases.home.as_deref())
         .map(|report| {
             let (is_warn, text) = cbm_roots::describe(&report);
             (
@@ -211,8 +204,11 @@ fn print_roots(
         })
         .unwrap_or_else(|e| {
             (
-                CheckLevel::Info,
-                format!("codebase-memory: cannot check the allowed roots: {e}"),
+                CheckLevel::Warn,
+                format!(
+                    "codebase-memory: cannot check the allowed roots: {e:#}. Run `llmenv doctor` \
+                     after the fix, and check that codebase-memory-mcp is on PATH."
+                ),
             )
         });
     super::print_check(check, pass, warn, info);

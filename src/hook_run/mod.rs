@@ -9,6 +9,7 @@
 pub(crate) mod action;
 mod adaptive;
 pub(crate) mod agent_config;
+mod bundle_names;
 pub(crate) mod cbm_index_guard;
 pub(crate) mod cd_guard;
 pub(crate) mod checkpoint;
@@ -17,6 +18,7 @@ pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
 mod event;
 mod notice;
+use bundle_names::recall_bundle_names;
 #[cfg(test)]
 pub(crate) use event::HOOK_EVENT_NAMES;
 pub(crate) use event::HookEvent;
@@ -1433,7 +1435,7 @@ fn run_inner(
         // fails the hook before the codebase-memory block below runs, which is the same
         // failure the hook already reported, one step earlier.
         let tags = active.tags.iter().cloned().collect::<Vec<_>>();
-        let bundles = recall_bundle_names(&active);
+        let bundles = recall_bundle_names(&config.bundle, &active);
         // Build per-tag and per-bundle recall queries. Validation rejects query
         // injection; these are the single sources of the tag/bundle→keyword encoding.
         let tag_queries = tag_recall_queries(&tags)?;
@@ -1466,8 +1468,7 @@ fn run_inner(
                 [cm] => match crate::mcp::resolve::codebase_memory_paths() {
                     Ok((project_root, state_dir)) => {
                         // Before the index run, so the server accepts the repository (#2406).
-                        let roots =
-                            llmenv_mcp::cbm_roots::session_start_notice(&config, cm, &project_root);
+                        let roots = llmenv_mcp::cbm_roots::session_start_notice(cm, &project_root);
                         let index = trigger_codebase_memory_index(&project_root, cm, &state_dir);
                         roots_notice = match (roots, index) {
                             (Some(r), Some(i)) => Some(format!("{r}{i}")),
@@ -2182,26 +2183,6 @@ fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
         scope_header_content(ctx),
         scope_metadata_json(ctx),
     )
-}
-
-/// Bundle names for recall keywords and the stored context chunk: every active
-/// scope's `enable_bundles`, deduplicated and sorted, minus anything any scope
-/// disables. `disable_bundles` wins here too (#1125) — a project that opts out
-/// of a bundle must not have it named in queries sent to the memory backend or
-/// in the context chunk stored there. Tag-fired bundles are deliberately
-/// excluded: this list is the *explicitly requested* set, which is what makes a
-/// useful recall keyword.
-fn recall_bundle_names(active: &crate::scope::ActiveScopes) -> Vec<String> {
-    let disabled = crate::bundle_select::marker_disabled_bundle_names(active);
-    active
-        .scopes
-        .iter()
-        .flat_map(|s| s.enable_bundles.iter())
-        .filter(|b| !disabled.contains(*b))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 struct ResolvedMemoryClient {
@@ -4345,65 +4326,6 @@ mod tests {
         assert!(
             client.is_none(),
             "a bundle merge failure must degrade to no client, never propagate"
-        );
-    }
-
-    // #1125: the recall-keyword/context-chunk bundle list is a second selection
-    // that also ignored `disable_bundles`, so a bundle a project opts out of
-    // still became an `llmenv-bundle:<name>` recall query and appeared in the
-    // context chunk stored in the memory backend.
-    #[test]
-    fn recall_bundle_names_excludes_disabled_bundles() {
-        let scope = |id: &str, enable: &[&str], disable: &[&str]| crate::scope::ActiveScope {
-            id: id.to_string(),
-            kind: "project",
-            tags: vec![],
-            project_root: None,
-            enable_bundles: enable.iter().map(|s| (*s).to_string()).collect(),
-            disable_bundles: disable.iter().map(|s| (*s).to_string()).collect(),
-            name: None,
-            description: None,
-            unknown_fields: vec![],
-        };
-
-        let active = crate::scope::ActiveScopes {
-            scopes: vec![
-                scope("user", &["yaks", "rust-dev"], &[]),
-                scope("project", &["web-dev"], &["yaks"]),
-            ],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            recall_bundle_names(&active),
-            vec!["rust-dev".to_string(), "web-dev".to_string()],
-            "a disabled bundle must not reach recall queries or the stored chunk, \
-                 even when another scope enables it"
-        );
-    }
-
-    #[test]
-    fn recall_bundle_names_dedupes_and_sorts() {
-        let scope = |id: &str, enable: &[&str]| crate::scope::ActiveScope {
-            id: id.to_string(),
-            kind: "user",
-            tags: vec![],
-            project_root: None,
-            enable_bundles: enable.iter().map(|s| (*s).to_string()).collect(),
-            disable_bundles: vec![],
-            name: None,
-            description: None,
-            unknown_fields: vec![],
-        };
-
-        let active = crate::scope::ActiveScopes {
-            scopes: vec![scope("a", &["zed", "alpha"]), scope("b", &["alpha"])],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            recall_bundle_names(&active),
-            vec!["alpha".to_string(), "zed".to_string()]
         );
     }
 
