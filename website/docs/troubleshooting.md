@@ -203,6 +203,9 @@ A relative folder such as `.` names a different place in each working folder.
 So a file in a cloned repository could stand in for the real program.
 This covers the engines, `icm`, `mcp-proxy`, `uvx`, `lsof`, and `codebase-memory-mcp`.
 It also covers a stdio MCP server, `git`, and the `gh` that the statusline runs.
+The network and SSID scope detectors are covered too.
+They are `route`, `arp`, `ip`, `networksetup`, `ipconfig`, `iw`, `nmcli`, and `netsh`.
+When one of them is not found, its scopes do not match.
 llmenv also gives `mcp-proxy` the absolute path of `icm`, because `mcp-proxy` would otherwise do its own `PATH` search.
 
 If a program is installed but reported as not found, run `llmenv doctor`.

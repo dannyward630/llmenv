@@ -120,7 +120,7 @@ fn detect_via_nmcli() -> Option<SsidReading> {
 
 #[cfg(windows)]
 fn detect_windows() -> SsidReading {
-    match run("netsh", &["wlan", "show", "interfaces"]) {
+    match run("netsh.exe", &["wlan", "show", "interfaces"]) {
         Some(out) => parse_netsh_ssid(&out).map_or(SsidReading::NotAssociated, SsidReading::Ssid),
         None => SsidReading::Undetermined("`netsh wlan show interfaces` failed".into()),
     }
