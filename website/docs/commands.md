@@ -823,6 +823,11 @@ Nothing turns off the third item.
   progress. The same command runs on the next try.
   The deny marker clears the next time a commit or pull request runs while a task is in progress, so a later gap with no
   task denies once more.
+
+When a reminder cannot do its work, the agent is told why (changed in v3.13.0).
+This covers a hook payload with no session id, and a nudge state that cannot be saved.
+A corrupt nudge state is reset on disk, and the agent is told one time.
+The commit gate denies a shell call whose `tool_input.command` is missing or not a string, and names the field.
   A task that is only `open` or `waiting` does not count as in progress.
   (changed in v3.12.2) The gate reads the command the way the shell does.
   It sees a commit inside `bash -c`, `$( )`, a backtick substitution, or a process substitution (`<( )` and `>( )`).

@@ -82,6 +82,7 @@ fn a_task_in_progress_allows_the_commit_and_rearms_the_deny() {
     assert!(
         !load(&state_path(dir.path(), "s1").unwrap())
             .unwrap()
+            .0
             .commit_denied
     );
     assert!(
