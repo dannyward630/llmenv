@@ -73,7 +73,7 @@ pub(crate) fn handle_roots(
 /// The `codebase_memory` entries of the root config and of the firing bundles, as export merges
 /// them. The hook config holds the root entries only, and a bundle-only entry must still bound
 /// the roots (#2922).
-fn codebase_memory_entries(
+pub(crate) fn codebase_memory_entries(
     config: &crate::config::Config,
     config_dir: &std::path::Path,
     active: &crate::scope::ActiveScopes,

@@ -2,9 +2,14 @@
 
 use crate::config::Config;
 
-use super::has_remote_memory_host;
+use super::active_features::ActiveFeatures;
 
-pub(super) fn run_doctor_tool_availability(use_color: bool, config: &Config) {
+/// Report the programs that the config and its active `features` entries need (#2944).
+pub(super) fn run_doctor_tool_availability(
+    use_color: bool,
+    config: &Config,
+    features: &ActiveFeatures,
+) {
     let pass = super::super::doctor_pass(use_color);
     let fail = super::super::doctor_fail(use_color);
     let info = super::super::doctor_info(use_color);
@@ -21,21 +26,16 @@ pub(super) fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         );
     }
 
-    let has_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.memory.is_empty());
-
-    // icm — required when features.memory has entries
-    // mcp-proxy or uvx — required when any memory server_host is remote
-    if has_memory {
+    // icm — required when an active features.memory entry exists
+    // mcp-proxy or uvx — required when an active memory server_host is remote
+    if !features.memory.is_empty() {
         if crate::adapter::binary_on_path("icm") {
             eprintln!("{pass} icm found on PATH");
         } else {
             eprintln!("{fail} icm not found on PATH (required when features.memory is configured)");
         }
 
-        if has_remote_memory_host(config) {
+        if features.has_remote_memory_host() {
             if crate::adapter::binary_on_path("mcp-proxy") || crate::adapter::binary_on_path("uvx")
             {
                 eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
@@ -48,12 +48,8 @@ pub(super) fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         }
     }
 
-    // codebase-memory-mcp — required when features.codebase_memory has entries
-    let has_codebase_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.codebase_memory.is_empty());
-    if has_codebase_memory {
+    // codebase-memory-mcp — required when an active features.codebase_memory entry exists
+    if !features.codebase_memory.is_empty() {
         if crate::adapter::binary_on_path("codebase-memory-mcp") {
             eprintln!("{pass} codebase-memory-mcp found on PATH");
         } else {

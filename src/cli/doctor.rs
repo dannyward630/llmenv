@@ -5,6 +5,7 @@ use anyhow::Context;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+mod active_features;
 mod autocompact;
 mod background;
 pub(super) mod cache_gc;
@@ -330,20 +331,6 @@ fn is_local_addr(addr: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Whether any memory block references a remote (non-local) server_host.
-/// Returns `true` when a `server_host` maps to a non-local address in the host
-/// table, or when the host table has no entry for it (assume remote).
-fn has_remote_memory_host(config: &Config) -> bool {
-    config.features.as_ref().is_some_and(|f| {
-        f.memory.iter().any(|mem| {
-            config
-                .host
-                .get(&mem.server_host)
-                .is_none_or(|h| !is_local_addr(&h.addr))
-        })
-    })
-}
-
 /// Check that external tools referenced by the active config are available on
 /// `$PATH`. Printed to stderr using the doctor pass/fail/info helpers inline
 /// with the rest of `llmenv doctor`.
@@ -610,35 +597,6 @@ fn run_doctor_icm_server(
         Ok(version) => print_check(icm_server_check(&version), &pass, &warn, &info),
         Err(reason) => eprintln!("{warn} {reason}"),
     }
-}
-
-/// Report installed versions and update commands for the tools llmenv depends
-/// on but doesn't ship (#1185). Tools that aren't installed are skipped —
-/// `run_doctor_tool_availability` already reports those, and repeating it here
-/// would say the same thing twice with less context.
-///
-/// Deliberately offline: no "an update is available" claim is made, because
-/// checking would mean a network round trip per tool on every `doctor` run.
-/// The `ANTHROPIC_MODEL` problem to show. Only an enabled memory entry on the `anthropic-api`
-/// backend reads the variable, so any other config gets no warning.
-fn anthropic_model_warning(
-    config: &Config,
-    model_var: Result<String, std::env::VarError>,
-) -> Option<String> {
-    let uses_api = config
-        .features
-        .iter()
-        .flat_map(|f| f.memory.iter())
-        .filter_map(|m| m.consolidation.as_ref())
-        .any(|c| {
-            c.enabled && matches!(c.backend, crate::config::ConsolidationBackend::AnthropicApi)
-        });
-    if !uses_api {
-        return None;
-    }
-    crate::consolidation::model_problem(model_var).map(|problem| {
-        format!("{problem} This stops consolidation with the anthropic-api backend at every session end.")
-    })
 }
 
 fn run_doctor_dependent_tools(use_color: bool) {
@@ -1085,10 +1043,6 @@ pub(super) fn run_doctor(
         );
     }
 
-    if let Some(problem) = anthropic_model_warning(&config, std::env::var("ANTHROPIC_MODEL")) {
-        eprintln!("{warn} {problem}");
-    }
-
     for hit in hooks_with_glob_like_matchers(&config) {
         eprintln!(
             "{warn} hook {} looks like a file-extension glob, but Claude Code matches \
@@ -1213,6 +1167,17 @@ pub(super) fn run_doctor(
 
     let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
+    let features = active_features::ActiveFeatures::resolve(&config, &config_dir, &active)
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{warn} cannot read the features of the firing bundles: {e:#}. The checks below \
+                 use the root config only."
+            );
+            active_features::ActiveFeatures::root_only(&config, &active)
+        });
+    if let Some(problem) = features.anthropic_model_warning(std::env::var("ANTHROPIC_MODEL")) {
+        eprintln!("{warn} {problem}");
+    }
 
     // Cross-engine hook compatibility (#543 follow-up): name any hook that will
     // be silently skipped when materializing for an installed adapter with a
@@ -1644,7 +1609,7 @@ pub(super) fn run_doctor(
         native_claude_settings,
     );
 
-    run_doctor_tool_availability(use_color, &config);
+    run_doctor_tool_availability(use_color, &config, &features);
     run_doctor_dependent_tools(use_color);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
@@ -1718,8 +1683,8 @@ mod tests {
     use super::opencode::ColonPrefixRule;
     use super::*;
     use crate::config::{
-        Bundle, Capabilities, Features, Hook, HostEntry, Marketplace, Memory,
-        NativePermissionRules, PermissionRule, Permissions, PluginCollection,
+        Bundle, Capabilities, Features, Hook, Marketplace, Memory, NativePermissionRules,
+        PermissionRule, Permissions, PluginCollection,
     };
     use proptest::prelude::*;
 
@@ -2125,63 +2090,6 @@ mod tests {
     // #1131: memory works in `~/` and silently stops the moment you `cd` into a
     // project that disables the only bundle supplying it — with a green doctor,
     // because every other check builds from the post-disable firing set.
-    fn config_with_consolidation(backend: crate::config::ConsolidationBackend) -> Config {
-        let consolidation = crate::config::ConsolidationConfig {
-            enabled: true,
-            backend,
-            max_rules_per_session: 10,
-        };
-        Config {
-            features: Some(Features {
-                memory: vec![Memory {
-                    always_load: None,
-                    server_host: "still".into(),
-                    port: 7878,
-                    listen_host: "127.0.0.1".into(),
-                    when: vec![],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: Some(consolidation),
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
-                }],
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn anthropic_model_warning_is_silent_for_the_claude_cli_backend() {
-        let config = config_with_consolidation(crate::config::ConsolidationBackend::ClaudeCli);
-        let warning = anthropic_model_warning(&config, Ok("opus".to_string()));
-        assert_eq!(warning, None, "claude-cli never reads ANTHROPIC_MODEL");
-    }
-
-    #[test]
-    fn anthropic_model_warning_names_an_alias_for_the_api_backend() {
-        let config = config_with_consolidation(crate::config::ConsolidationBackend::AnthropicApi);
-        let warning = anthropic_model_warning(&config, Ok("opus".to_string()))
-            .expect("an alias fails the anthropic-api backend");
-        assert!(
-            warning.contains("\"opus\" is not a full model ID"),
-            "{warning}"
-        );
-        assert!(warning.contains("anthropic-api backend"), "{warning}");
-    }
-
-    #[test]
-    fn anthropic_model_warning_is_silent_for_a_full_model_id() {
-        let config = config_with_consolidation(crate::config::ConsolidationBackend::AnthropicApi);
-        let warning = anthropic_model_warning(&config, Ok("claude-sonnet-5".to_string()));
-        assert_eq!(warning, None);
-    }
-
     #[test]
     fn doctor_flags_memory_orphaned_by_disable_bundles() {
         let (root, config, active) = disabled_memory_bundle_fixture();
@@ -2931,92 +2839,6 @@ mod tests {
     #[test]
     fn is_local_addr_accepts_unspecified_v4() {
         assert!(is_local_addr("0.0.0.0"));
-    }
-
-    // -- run_doctor_tool_availability --
-
-    #[test]
-    fn tool_avail_no_crash_default_config() {
-        let config = Config::default();
-        // Should not panic: checks claude + crush (both may warn), no memory entries
-        run_doctor_tool_availability(false, &config);
-    }
-
-    #[test]
-    fn tool_avail_no_crash_with_memory() {
-        let config = Config {
-            features: Some(Features {
-                memory: vec![Memory {
-                    always_load: None,
-                    server_host: "local".into(),
-                    port: 4343,
-                    listen_host: "127.0.0.1".into(),
-                    when: vec!["local".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
-                }],
-                ..Features::default()
-            }),
-            host: BTreeMap::from([(
-                "local".into(),
-                HostEntry {
-                    addr: "127.0.0.1".into(),
-                },
-            )]),
-            ..Config::default()
-        };
-        run_doctor_tool_availability(false, &config);
-    }
-
-    #[test]
-    fn tool_avail_no_crash_with_remote_memory() {
-        let config = Config {
-            features: Some(Features {
-                memory: vec![Memory {
-                    always_load: None,
-                    server_host: "remote".into(),
-                    port: 4343,
-                    listen_host: "0.0.0.0".into(),
-                    when: vec!["remote".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
-                }],
-                ..Features::default()
-            }),
-            host: BTreeMap::from([(
-                "remote".into(),
-                HostEntry {
-                    addr: "10.0.0.4".into(),
-                },
-            )]),
-            ..Config::default()
-        };
-        run_doctor_tool_availability(false, &config);
-    }
-
-    #[test]
-    fn tool_avail_no_crash_claude_disabled() {
-        let config = Config {
-            disabled_engines: vec!["claude_code".into()],
-            ..Config::default()
-        };
-        run_doctor_tool_availability(false, &config);
     }
 
     // #1185: the two tools differ in what llmenv can actually do for them —
