@@ -5,9 +5,6 @@
 //! and added as segments, so the checks never recurse on their own. Split from `task_nudge` so
 //! the hook state code stays separate from the parsing (#2627, #2542).
 
-use std::iter::Peekable;
-use std::str::Chars;
-
 /// The deepest nesting that the splitter follows. The budget counts substitutions, `eval`
 /// arguments, and `sh -c` scripts together. Deeper input fails closed, so the hook process stack
 /// does not grow with the input (#2544).
@@ -97,41 +94,24 @@ fn split_at_depth(command: &str, depth: usize) -> Result<String, NestingTooDeep>
     Ok(out)
 }
 
+/// Whether `command` ends with a substitution and nothing after it, as in `ls && $(cd /x)`. The
+/// substitution runs in a subshell, but the split puts its command in the last segment, because
+/// the command that holds it is empty (#2937).
+///
+/// # Errors
+/// Returns [`NestingTooDeep`] when the nesting goes past the depth bound.
+pub(super) fn ends_with_substitution(command: &str) -> Result<bool, NestingTooDeep> {
+    let command = command.trim_end();
+    if !command.ends_with([')', '`']) {
+        return Ok(false);
+    }
+    Ok(split_at_depth(command, 0)?.trim_end().ends_with(';'))
+}
+
 /// One substitution as a `;`-terminated part. The `;` on each side is a segment boundary for
 /// the splitter. The part sits outside any quote, because it goes at a segment start.
 fn part(inner: &str) -> String {
     format!(";{inner};")
-}
-
-/// Take the text up to the `)` that closes a `$(` already read, counting nested parentheses.
-/// Quotes and escapes group as they do in the outer splitter, so a `)` inside quotes is text.
-pub(super) fn take_until_close(chars: &mut Peekable<Chars<'_>>) -> String {
-    let mut depth = 0_usize;
-    let (mut single, mut double) = (false, false);
-    let mut inner = String::new();
-    while let Some(c) = chars.next() {
-        if single {
-            single = c != '\'';
-        } else {
-            match c {
-                '\\' => {
-                    inner.push(c);
-                    if let Some(next) = chars.next() {
-                        inner.push(next);
-                    }
-                    continue;
-                }
-                '\'' if !double => single = true,
-                '"' => double = !double,
-                ')' if !double && depth == 0 => break,
-                ')' if !double => depth = depth.saturating_sub(1),
-                '(' if !double => depth = depth.saturating_add(1),
-                _ => {}
-            }
-        }
-        inner.push(c);
-    }
-    inner
 }
 
 /// Split `command` into segments at the shell operators `;`, `|`, `&`, and a newline, and each
@@ -258,6 +238,8 @@ pub(super) fn program(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
+mod scan;
+pub(super) use scan::take_until_close;
 mod wrappers;
 use wrappers::WRAPPERS;
 

@@ -9,7 +9,9 @@
 //! current call's `tool_input.command`, no per-session tracking needed.
 
 use crate::config::CdGuard;
-use crate::hook_run::shell_split::{NestingTooDeep, program_words, shell_segments};
+use crate::hook_run::shell_split::{
+    NestingTooDeep, ends_with_substitution, program_words, shell_segments,
+};
 
 const ADVISORY: &str = "note: this command ends with `cd`, so the next Bash call starts in \
 that directory in the main agent, and a subagent can start elsewhere. Run the commands that need \
@@ -50,6 +52,13 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
 /// shell, so a `cd` just before the closer still outlives the call.
 const CLOSERS: [&str; 4] = ["}", "fi", "done", "esac"];
 
+/// Whether the last command of a call sits before this segment. A closer ends a group or a
+/// compound command, and an `eval` segment comes after the commands it runs.
+fn is_transparent(words: &[String]) -> bool {
+    words.first().is_some_and(|w| CLOSERS.contains(&w.as_str()))
+        || program_words(words).first() == Some(&"eval")
+}
+
 /// The words that open a branch or a loop body ahead of the command they run.
 const OPENERS: [&str; 3] = ["then", "do", "else"];
 
@@ -71,11 +80,12 @@ fn runs_cd_in_this_shell(words: &[String]) -> bool {
 /// top level. A command nested too deeply to split gets no advisory, and the parse failure is
 /// logged instead.
 fn command_ends_with_cd(command: &str) -> bool {
-    match shell_segments(command) {
-        Ok(segments) => segments
+    match shell_segments(command).and_then(|s| Ok((s, ends_with_substitution(command)?))) {
+        Ok((_, true)) => false,
+        Ok((segments, false)) => segments
             .iter()
             .rev()
-            .find(|words| !words.first().is_some_and(|w| CLOSERS.contains(&w.as_str())))
+            .find(|words| !is_transparent(words))
             .is_some_and(|words| runs_cd_in_this_shell(words)),
         Err(NestingTooDeep) => {
             tracing::error!("cd guard: command nests too deep to check for cd; no advisory");
@@ -116,6 +126,7 @@ mod tests {
     #[test]
     fn detects_cd_after_semicolon() {
         assert!(command_ends_with_cd("ls; cd /tmp"));
+        assert!(command_ends_with_cd("ls; cd /tmp;"));
     }
 
     #[test]
@@ -166,6 +177,31 @@ mod tests {
         ] {
             assert!(command_ends_with_cd(command), "{command}");
         }
+    }
+
+    #[test]
+    fn a_trailing_cd_in_a_substitution_gets_no_advisory() {
+        for command in [
+            "$(cd /tmp)",
+            "ls && $(cd /tmp)",
+            "`cd /tmp`",
+            "ls; $(cd /tmp)  ",
+        ] {
+            assert!(!command_ends_with_cd(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_cd_to_a_substituted_path_gets_the_advisory() {
+        assert!(command_ends_with_cd("cd $(git rev-parse --show-toplevel)"));
+        assert!(command_ends_with_cd("cd \"$(pwd)\""));
+    }
+
+    #[test]
+    fn a_cd_that_eval_runs_gets_the_advisory() {
+        assert!(command_ends_with_cd("eval cd /x"));
+        assert!(command_ends_with_cd("ls && eval \"cd /x\""));
+        assert!(!command_ends_with_cd("cd /x; eval true"));
     }
 
     #[test]
