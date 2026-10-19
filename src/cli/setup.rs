@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 mod command;
 mod discover;
+mod launch;
 pub(super) use command::{SetupArgs, run_setup_command};
 use discover::{
     count_project_entries, read_claude_md, read_claude_plugins, read_claude_settings,
@@ -152,43 +153,7 @@ fn engine_handoff_prompt(
     eprintln!("(The AI will guide you through the rest of the setup.)");
     eprintln!();
 
-    match engine_id.as_str() {
-        "claude_code" => {
-            let status = std::process::Command::new("claude")
-                .arg("-p")
-                .arg(&skill_content)
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()
-                .context("launching claude")?;
-            if !status.success() {
-                anyhow::bail!("claude exited with status {status}");
-            }
-        }
-        "crush" => {
-            use std::io::Write;
-            let mut child = std::process::Command::new("crush")
-                .arg("run")
-                .arg("--quiet")
-                .arg("Execute the setup-llmenv skill")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .spawn()
-                .context("launching crush")?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(skill_content.as_bytes())
-                    .context("writing skill to crush stdin")?;
-            }
-            let status = child.wait().context("waiting for crush")?;
-            if !status.success() {
-                anyhow::bail!("crush exited with status {status}");
-            }
-        }
-        other => anyhow::bail!("unsupported engine: {other}"),
-    }
+    launch::launch_engine(engine_id, &skill_content)?;
 
     eprintln!("✓ Setup complete!");
     Ok(())

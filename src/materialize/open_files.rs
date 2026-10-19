@@ -19,7 +19,9 @@ use anyhow::Context;
 /// remove an entry that a live process uses, so the sweep stops instead.
 #[cfg(unix)]
 pub fn open_paths() -> anyhow::Result<Vec<PathBuf>> {
-    lsof_paths("lsof", DEFAULT_LSOF_TIMEOUT)
+    let lsof = crate::path_lookup::resolve_program("lsof")
+        .context("finding `lsof` to list the entries in use; the sweep stopped")?;
+    lsof_paths(&lsof, DEFAULT_LSOF_TIMEOUT)
 }
 
 /// The longest wait for `lsof`. A full list takes a few seconds on a busy host, and a hung
@@ -41,7 +43,7 @@ pub fn open_paths() -> anyhow::Result<Vec<PathBuf>> {
 /// Run `program -F n` and read the paths it names. `program` is a parameter so a test can
 /// name a binary that fails or hangs.
 #[cfg(unix)]
-fn lsof_paths(program: &str, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> {
+fn lsof_paths(program: &std::path::Path, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> {
     let mut cmd = Command::new(program);
     cmd.args(["-F", "n"])
         .stdin(Stdio::null())
@@ -50,16 +52,17 @@ fn lsof_paths(program: &str, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> 
     let output = match crate::process::run_with_timeout(cmd, timeout) {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => anyhow::bail!(
-            "`{program}` gave no answer within {} s, so it was stopped; the state/tmp sweep \
-             stopped. A hung network or SMB mount can block lsof. Fix: run `mount` to find the \
+            "`{}` gave no answer within {} s, so it was stopped; the sweep stopped. A hung network or SMB mount can block lsof. Fix: run `mount` to find the \
              hung network mount, unmount or reconnect it, then run `llmenv clean` again",
+            program.display(),
             timeout.as_secs()
         ),
         Err(e) => {
             return Err(e).with_context(|| {
                 format!(
-                    "running `{program}` to find entries in use; the state/tmp sweep stopped. \
-                     Fix: install lsof, then run `llmenv clean` again"
+                    "running `{}` to find entries in use; the sweep stopped. \
+                     Fix: install lsof, then run `llmenv clean` again",
+                    program.display()
                 )
             });
         }
@@ -69,8 +72,9 @@ fn lsof_paths(program: &str, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> 
     let stderr = stderr.trim();
     if output.status.code() != Some(0) {
         anyhow::bail!(
-            "`{program}` exited with {}: {stderr}; the state/tmp sweep stopped. \
+            "`{}` exited with {}: {stderr}; the sweep stopped. \
              Fix: resolve the lsof error above, then run `llmenv clean` again",
+            program.display(),
             output.status
         );
     }
@@ -105,6 +109,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{lsof_paths, parse_lsof_names};
+    use std::path::Path;
 
     const WAIT: Duration = Duration::from_secs(10);
 
@@ -149,11 +154,11 @@ mod tests {
 
     #[test]
     fn a_missing_lsof_is_an_error_that_names_the_fix() {
-        let err = lsof_paths("llmenv-no-such-lsof-binary", WAIT).unwrap_err();
+        let err = lsof_paths(Path::new("llmenv-no-such-lsof-binary"), WAIT).unwrap_err();
         let text = format!("{err:#}");
         assert!(text.contains("Fix:"), "no fix named: {text}");
         assert!(
-            text.contains("state/tmp sweep stopped"),
+            text.contains("the sweep stopped"),
             "no effect named: {text}"
         );
     }
@@ -170,7 +175,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let paths = lsof_paths(fake.to_str().unwrap(), WAIT).unwrap();
+        let paths = lsof_paths(&fake, WAIT).unwrap();
 
         assert_eq!(paths, vec![std::path::PathBuf::from("/work/open")]);
     }
@@ -178,7 +183,7 @@ mod tests {
     #[test]
     fn an_lsof_exit_other_than_zero_is_an_error_even_with_empty_output() {
         // `false` exits 1 and prints nothing. An exit 1 is a failure, not an empty list.
-        let err = lsof_paths("false", WAIT).unwrap_err();
+        let err = lsof_paths(Path::new("false"), WAIT).unwrap_err();
         assert!(format!("{err:#}").contains("exited with"), "{err:#}");
     }
 
@@ -191,7 +196,7 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let start = std::time::Instant::now();
-        let err = lsof_paths(fake.to_str().unwrap(), Duration::from_millis(200)).unwrap_err();
+        let err = lsof_paths(&fake, Duration::from_millis(200)).unwrap_err();
 
         assert!(
             start.elapsed() < Duration::from_secs(10),

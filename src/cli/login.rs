@@ -53,7 +53,8 @@ pub(super) fn run_login_capture(
     let tmp = tempfile::TempDir::new()
         .map_err(|e| anyhow::anyhow!("creating temp dir for login: {e}"))?;
 
-    let status = std::process::Command::new("claude")
+    let claude = crate::path_lookup::resolve_program("claude")?;
+    let status = std::process::Command::new(claude)
         .args(["auth", "login"])
         .env("CLAUDE_CONFIG_DIR", tmp.path())
         .stdin(std::process::Stdio::inherit())
