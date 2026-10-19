@@ -249,7 +249,7 @@ mod set_props;
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
-    use super::guard::{decide, decide_with_reads, guard_decision_with, path_outside_roots};
+    use super::guard::{decide, decide_with_reads, path_outside_roots};
     use super::*;
     use proptest::prelude::*;
 
@@ -351,45 +351,6 @@ mod tests {
         assert_eq!(crate::util::shell_word(Path::new("/a b")), "'/a b'");
         assert_eq!(crate::util::shell_word(Path::new("/it's")), "'/it'\\''s'");
         assert_eq!(crate::util::shell_word(Path::new("")), "''");
-    }
-
-    fn tagged(when: &str, index_path: &str) -> CodebaseMemory {
-        CodebaseMemory {
-            when: vec![when.into()],
-            index_path: Some(index_path.into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn the_guard_reads_only_the_entry_that_serves_the_session() {
-        let confined = tempfile::tempdir().unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
-        let entries = [tagged("open", "/idx/open"), tagged("tight", "/idx/tight")];
-        let root = confined.path().to_path_buf();
-        let list = |cm: &CodebaseMemory| -> anyhow::Result<Vec<PathBuf>> {
-            Ok(match cm.index_path.as_deref() {
-                Some("/idx/tight") => vec![root.clone()],
-                _ => vec![],
-            })
-        };
-        let repo = elsewhere.path().display().to_string();
-        let tags = |t: &str| std::collections::BTreeSet::from([t.to_string()]);
-        assert_eq!(
-            guard_decision_with(&repo, &entries, Some(&tags("open")), list),
-            None,
-            "the unconfined server of this session decides for itself"
-        );
-        assert!(guard_decision_with(&repo, &entries, Some(&tags("tight")), list).is_some());
-        assert!(
-            guard_decision_with(&repo, &entries, None, list).is_some(),
-            "unknown scopes check every entry, so the guard fails closed"
-        );
-        assert_eq!(
-            guard_decision_with(&repo, &entries, Some(&tags("none")), list),
-            None,
-            "no entry serves the session"
-        );
     }
 
     #[test]

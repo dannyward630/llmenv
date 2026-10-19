@@ -338,7 +338,7 @@ They also name a recorded root that no configured root covers.
 A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the recorded roots,
 once any root is recorded.
 (changed in v3.13.0) The guard reads the roots of the `codebase_memory` entry whose `when` tags are active, which is the server of the session.
-When the scopes cannot be read, it reads every entry, so it denies rather than guesses.
+When no entry's tags are active, as after a `cd` out of the project, or when the scopes cannot be read, it reads every entry, as before.
 The deny text asks you to record the folder.
 The guard also denies a call while the recorded roots cannot be read, and denies a relative `repo_path`.
 codebase-memory-mcp has no command to remove a root.

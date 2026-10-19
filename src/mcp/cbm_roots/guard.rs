@@ -28,9 +28,11 @@ pub(super) fn path_outside_roots(repo_path: &Path, roots: &[PathBuf]) -> Option<
 }
 
 /// The reason to deny an `index_repository` call, or `None` to let it pass (#2406). The allowed
-/// set is what the server records, so a root that the user recorded counts. Only the entry that
-/// serves this session counts: its `when` tags are active (#2922). `active_tags` is `None` when
-/// the scopes cannot be read, and every entry then counts, so the guard fails closed.
+/// set is what the server records, so a root that the user recorded counts. The entry whose
+/// `when` tags are active serves the session, so only its roots count (#2922). The hook reads the
+/// tags from its own folder, which a `cd` can move away from the session's project, so when no
+/// entry matches, or the scopes cannot be read (`active_tags` is `None`), every entry counts, as
+/// before #2922. The server's own root check stays the backstop.
 pub(crate) fn guard_decision(
     repo_path: &str,
     config: &Config,
@@ -50,23 +52,39 @@ pub(super) fn guard_decision_with(
     active_tags: Option<&BTreeSet<String>>,
     list: impl Fn(&CodebaseMemory) -> anyhow::Result<Vec<PathBuf>>,
 ) -> Option<String> {
+    // Without scopes the config may also lack the entries that bundles add, so an empty list
+    // proves nothing.
+    if active_tags.is_none() && entries.is_empty() {
+        return Some(format!(
+            "{repo_path} cannot be checked: the scopes of this session could not be read, so its \
+             codebase-memory entry is unknown. Ask the user to run `llmenv doctor`."
+        ));
+    }
     // Only one entry may be active (`resolve_codebase_memory_entries`). With two, both count.
-    let serving: Vec<&CodebaseMemory> = entries
+    let mut serving: Vec<&CodebaseMemory> = entries
         .iter()
-        .filter(|cm| active_tags.is_none_or(|tags| cm.when.iter().any(|t| tags.contains(t))))
+        .filter(|cm| active_tags.is_some_and(|tags| cm.when.iter().any(|t| tags.contains(t))))
         .collect();
     if serving.is_empty() {
-        return None;
+        serving = entries.iter().collect();
     }
     let mut listed = Vec::new();
     let mut unreadable = Vec::new();
     for cm in serving {
         match list(cm) {
             Ok(roots) => listed.extend(roots),
-            Err(e) => unreadable.push(format!("{e:#}")),
+            Err(e) => unreadable.push(format!("{} ({e:#})", entry_name(cm))),
         }
     }
     decide_with_reads(repo_path, listed, &unreadable)
+}
+
+/// How a message names an entry: its `index_path`, or the default cache.
+fn entry_name(cm: &CodebaseMemory) -> String {
+    cm.index_path.as_deref().map_or_else(
+        || "the entry with the default index path".to_string(),
+        |path| format!("the entry with index_path {path}"),
+    )
 }
 
 /// [`guard_decision`] given the listed roots and the failed reads. An empty record with a failed
@@ -113,7 +131,19 @@ pub(super) fn decide(repo_path: &str, listed: Vec<PathBuf>) -> Option<String> {
              codebase-memory allowed roots. Pass the absolute path of the repository."
         ));
     }
-    let roots: Vec<PathBuf> = listed.iter().filter_map(|root| canonical(root)).collect();
+    let roots: Vec<PathBuf> = listed
+        .iter()
+        .filter_map(|root| {
+            let resolved = canonical(root);
+            if resolved.is_none() {
+                tracing::error!(
+                    "recorded root {} does not resolve, so it is skipped",
+                    root.display()
+                );
+            }
+            resolved
+        })
+        .collect();
     if roots.is_empty() {
         return Some(format!(
             "{repo_path} cannot be checked: none of the {} recorded roots resolves to a folder. \
@@ -129,3 +159,7 @@ pub(super) fn decide(repo_path: &str, listed: Vec<PathBuf>) -> Option<String> {
         )),
     }
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests;

@@ -1,5 +1,5 @@
 pub(crate) mod agents_md;
-mod bundle_file;
+pub(crate) mod bundle_file;
 #[cfg(test)]
 use bundle_file::BUNDLE_YAML_KNOWN_KEYS;
 pub(crate) use bundle_file::read_bundle_yaml;
