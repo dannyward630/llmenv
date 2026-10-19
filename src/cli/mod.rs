@@ -1575,7 +1575,7 @@ fn run_export(
     }
 
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
-    crate::memory::auto_prune::auto_prune_if_enabled(&config, &use_active.tags);
+    crate::memory::auto_prune::auto_prune_if_enabled(&config, &config_dir, &use_active);
 
     if explain {
         let bundle_list = firing
@@ -1779,7 +1779,7 @@ fn run_regenerate() -> anyhow::Result<()> {
     }
 
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
-    crate::memory::auto_prune::auto_prune_if_enabled(&config, &active.tags);
+    crate::memory::auto_prune::auto_prune_if_enabled(&config, &config_dir, &active);
 
     Ok(())
 }

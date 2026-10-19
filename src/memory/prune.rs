@@ -30,36 +30,8 @@ use crate::hook_run::mcp_client::McpHttpClient;
 /// CLI timeout — longer than hook timeout since users are waiting.
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A parsed memory record from the non-compact `icm_memory_recall` output.
-#[derive(Debug, Clone)]
-struct MemoryRecord {
-    id: String,
-    importance: Importance,
-}
-
-/// Parsed importance levels from the MCP output.
-#[derive(Debug, Clone, PartialEq)]
-enum Importance {
-    Critical,
-    High,
-    Medium,
-    Low,
-}
-
-impl Importance {
-    fn from_str(s: &str) -> Self {
-        match s.trim() {
-            "critical" => Self::Critical,
-            "high" => Self::High,
-            "medium" => Self::Medium,
-            _ => Self::Low,
-        }
-    }
-
-    fn should_prune(&self) -> bool {
-        matches!(self, Self::Medium | Self::Low)
-    }
-}
+mod records;
+use records::{Importance, MemoryRecord, parse_recall_output};
 
 /// Result of a single prune run.
 #[derive(Debug, Default, PartialEq)]
@@ -109,15 +81,11 @@ fn ensure_retention_unset(
 }
 
 fn connect(
-    config_path: &std::path::Path,
     config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
 ) -> anyhow::Result<McpHttpClient> {
-    let config_dir = config_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let env = crate::scope::matcher::Env::detect_for_config(config)?;
-    let active = crate::scope::evaluate(config, &env);
-    let url = crate::hook_run::memory_url(config, config_dir, &active)?.into_url()?;
+    let url = crate::hook_run::memory_url(config, config_dir, active)?.into_url()?;
     McpHttpClient::new(url, CLI_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
 }
@@ -136,71 +104,6 @@ fn call_tool_blocking(
             .join()
             .map_err(|_| anyhow::anyhow!("call_tool_blocking thread panicked"))?
     })
-}
-
-/// Parse the non-compact `icm_memory_recall` output into structured records.
-///
-/// The format (per ICM's `format_memory_output` with compact=false):
-///
-/// ```text
-/// --- <id> ---
-///   topic: ...
-///   importance: ...
-///   weight: ...
-///   summary: ...
-///   keywords: ...
-///   raw: ...
-///   score: ...
-/// ```
-fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
-    let mut records = Vec::new();
-    let mut current_id: Option<String> = None;
-    let mut current_importance: Option<Importance> = None;
-    // `has_weight` guards against partial records: we only finalize a record
-    // once both importance and weight have been seen.
-    let mut has_weight = false;
-    let mut weight_seen = false;
-
-    // A record header starts at column 0, and the fields of a record are indented. Memory
-    // content is free text, so a line inside it must not forge a header: only an unindented
-    // header counts. The first `importance` and `weight` of a record win, so a later line in
-    // the summary cannot change them.
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = line.strip_prefix("--- ") {
-            // new record start: "--- <id> ---"
-            if let Some(id) = rest.strip_suffix(" ---") {
-                // Finalize previous record
-                if let (Some(id), Some(importance)) = (current_id.take(), current_importance.take())
-                    && has_weight
-                {
-                    records.push(MemoryRecord { id, importance });
-                }
-                has_weight = false;
-                weight_seen = false;
-                current_id = Some(id.to_string());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("importance:") {
-            if current_importance.is_none() {
-                current_importance = Some(Importance::from_str(rest));
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("weight:")
-            && !weight_seen
-        {
-            weight_seen = true;
-            // `f64::from_str` also accepts `nan` and `inf`, which are not weights.
-            has_weight = rest.trim().parse::<f64>().is_ok_and(f64::is_finite);
-        }
-    }
-
-    // Finalize the last record
-    if let (Some(id), Some(importance)) = (current_id, current_importance)
-        && has_weight
-    {
-        records.push(MemoryRecord { id, importance });
-    }
-
-    records
 }
 
 /// The recall arguments for the records to prune: the project's own, at most [`RECALL_LIMIT`].
@@ -236,8 +139,23 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
         &crate::scope::matcher::Env::detect_for_config(&config)?,
     );
     let merged = crate::hook_run::merged_memory(&config, config_dir, &active)?;
-    ensure_retention_unset(&merged.memory, &active.tags)?;
-    let client = connect(&config_path, &config)?;
+    run_with(&config, config_dir, &active, &merged.memory, dry_run)
+}
+
+/// [`run`] for scopes and memory entries that the caller already resolved, so the caller's
+/// `auto_prune` check and the pruned backend come from the same entry (#2947).
+///
+/// # Errors
+/// The active entry sets `retention`, the memory server cannot be reached, or a call fails.
+pub(super) fn run_with(
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+    memory: &[crate::config::Memory],
+    dry_run: bool,
+) -> anyhow::Result<PruneResult> {
+    ensure_retention_unset(memory, &active.tags)?;
+    let client = connect(config, config_dir, active)?;
     let cwd = std::env::current_dir().map_err(|e| {
         anyhow::anyhow!("cannot read the working directory to name the project: {e}")
     })?;
