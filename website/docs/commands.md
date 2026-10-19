@@ -441,6 +441,7 @@ Flags:
   This covers the cache folders and every age-based sweep.
   A real run can still fail on an item that the dry run lists, for example a folder without write access.
 - `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
+  A folder that does not exist is not listed.
 
 `clean` exits non-zero when a cache folder, a plugin cache entry, or a sweep item could not be removed.
 It also exits non-zero when an error made it skip a sweep.
@@ -1018,7 +1019,7 @@ It also has `found`: the binary found on `PATH`, or `null`.
 ICM and codebase-memory-mcp come first as the recommended default, each with the `features` key that a yes turns on.
 The report reads only absolute `PATH` folders, makes no network call, and installs nothing.
 A binary counts as found only when the current user can run it.
-A script install downloads the script and opens it for reading before it runs, so you can check it first.
+A script install downloads the script and prints the command to run it, so you read the script before you run it.
 
 ## `config-context`
 
@@ -1278,3 +1279,4 @@ It prints `llmenv prune is deprecated; use llmenv clean` first.
 
 (deprecated in v3.13.0) Use [`llmenv clean`](#clean).
 `llmenv doctor --gc` keeps the sweeps it ran before, and prints `llmenv doctor --gc is deprecated; use llmenv clean`.
+Like `clean`, it exits non-zero when a sweep item could not be removed or an error made it skip a sweep.

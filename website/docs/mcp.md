@@ -339,6 +339,8 @@ A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outs
 once any root is recorded.
 (changed in v3.13.0) The guard reads the roots of the `codebase_memory` entry whose `when` tags are active, which is the server of the session.
 When no entry's tags are active, as after a `cd` out of the project, or when the scopes cannot be read, it reads every entry, as before.
+The entries are those of `config.yaml` and of the bundles that fire, as `llmenv export` merges them.
+A `bundle.yaml` that cannot be read denies the call, because its entry may set the roots.
 The deny text asks you to record the folder.
 The guard also denies a call while the recorded roots cannot be read, and denies a relative `repo_path`.
 codebase-memory-mcp has no command to remove a root.
