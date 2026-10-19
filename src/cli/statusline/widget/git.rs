@@ -92,7 +92,8 @@ pub(super) fn git_branch(dir: &Path) -> Result<Option<String>, String> {
         return Ok(None);
     };
     let head_path = git_dir.join("HEAD");
-    let head = match std::fs::read_to_string(&head_path) {
+    // The repository can be a cloned one, so the read refuses a FIFO or a huge file (#2945).
+    let head = match crate::paths::bounded::state_text_io(&head_path) {
         Ok(head) => head,
         // A pruned worktree points at a gitdir that is gone. That is no branch, not a read error.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -113,12 +114,15 @@ pub(super) fn find_git_dir(start: &Path) -> Result<Option<PathBuf>, String> {
         let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
             continue;
         };
-        if meta.is_dir() {
+        // git accepts a `.git` link to a git directory, so a link is followed for that check.
+        let is_dir = meta.is_dir() || (meta.is_symlink() && dot_git.is_dir());
+        if is_dir {
             return Ok(Some(dot_git));
         }
         // `.git` file: `gitdir: <path>` pointer (worktree/submodule). A file that cannot be read
         // or has no pointer is an error, not "no repository", so the branch label can say so.
-        let content = std::fs::read_to_string(&dot_git)
+        // The bounded read refuses a FIFO, which would block every render (#2945).
+        let content = crate::paths::bounded::state_text_io(&dot_git)
             .map_err(|e| format!("cannot read {}: {e}", dot_git.display()))?;
         let gitdir = content
             .trim()
@@ -129,4 +133,45 @@ pub(super) fn find_git_dir(start: &Path) -> Result<Option<PathBuf>, String> {
         return Ok(Some(dir.join(gitdir)));
     }
     Ok(None)
+}
+
+#[cfg(all(test, unix))]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    fn mkfifo(path: &Path) {
+        let made = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+    }
+
+    #[test]
+    fn a_dot_git_link_to_a_git_directory_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.git");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        std::os::unix::fs::symlink(&real, repo.join(".git")).unwrap();
+        assert_eq!(git_branch(&repo).unwrap().as_deref(), Some("main"));
+    }
+
+    /// A FIFO at `.git` or at `HEAD` is an error at once, so a render does not block.
+    #[test]
+    fn a_fifo_dot_git_or_head_is_an_error_not_a_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        mkfifo(&repo.join(".git"));
+        assert!(find_git_dir(&repo).unwrap_err().contains(".git"));
+
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        mkfifo(&other.join(".git").join("HEAD"));
+        assert!(git_branch(&other).unwrap_err().contains("HEAD"));
+    }
 }
