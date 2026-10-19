@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
 
-use super::{is_within_any, missing_roots, path_outside_roots, undeclared_roots};
+use super::guard::path_outside_roots;
+use super::{is_within_any, missing_roots, undeclared_roots};
 
 /// Folders of the test tree, relative to its root. Some nest, so containment has both answers,
 /// and `ab` shares a text prefix with `a` without being under it, so a text-prefix check fails.

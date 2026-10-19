@@ -46,7 +46,13 @@ pub(crate) fn handle_roots(
     else {
         return String::new();
     };
-    crate::mcp::cbm_roots::guard_decision(repo_path, config)
+    let active_tags = crate::scope::matcher::Env::detect_for_config(config)
+        .map(|env| crate::scope::evaluate(config, &env).tags)
+        .inspect_err(|e| {
+            tracing::error!("index guard checks every codebase-memory entry: scopes unread: {e:#}");
+        })
+        .ok();
+    crate::mcp::cbm_roots::guard_decision(repo_path, config, active_tags.as_ref())
         .map_or_else(String::new, |reason| format!("__DENY__:{reason}"))
 }
 
