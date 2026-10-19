@@ -2,7 +2,7 @@
 
 Branch `unattended/local-main`, based on `release/3.x` (the integration branch stands in for `release/3.x` during the run).
 Scope: the open issues of milestone v3.13.0.
-The branch holds 74 commits above `release/3.x`, in nine sprint merges.
+The branch holds 84 commits above `release/3.x`: nine sprint merges and the wrap-up review fixes.
 The signer locked during the run, so the run turned off signing in the repo config and committed unsigned.
 All commits were signed again with `resign.sh` before the push.
 
