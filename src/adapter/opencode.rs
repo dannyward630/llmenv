@@ -402,7 +402,12 @@ impl AgentAdapter for OpencodeAdapter {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
-        Ok(vec![("OPENCODE_CONFIG_DIR".into(), dir.to_owned())])
+        // opencode 2.x also loads the skills in `~/.claude` and a project `.claude` folder on
+        // every session, outside llmenv's scope rules. This variable turns those roots off (#2843).
+        Ok(vec![
+            ("OPENCODE_CONFIG_DIR".into(), dir.to_owned()),
+            ("OPENCODE_DISABLE_CLAUDE_CODE".into(), "1".into()),
+        ])
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -1615,6 +1620,8 @@ fn render_opencode_default_models(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    mod hook_table;
     use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
     use crate::merge::rules::RuleFile;
@@ -3342,69 +3349,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_hook_unsupported_event_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        manifest.capabilities.hooks.push(crate::config::Hook {
-            event: "Notification".into(),
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
-                command: Some("echo n".into()),
-                tool: None,
-            },
-            bundle_origin: None,
-        });
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src =
-            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
-        assert!(!shim_src.contains("\"event\":\"Notification\""));
-    }
-
-    #[test]
-    fn materialize_shim_contains_auto_hooks() {
-        let tmp = tempfile::tempdir().unwrap();
-        OpencodeAdapter
-            .materialize(&MergedManifest::default(), tmp.path())
-            .unwrap();
-        let shim_src =
-            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
-        assert!(shim_src.contains("check-stale --engine opencode"));
-        assert!(shim_src.contains("config-context --engine opencode"));
-        assert!(shim_src.contains("config-guard --engine opencode"));
-    }
-
-    #[test]
-    fn materialize_hook_with_supported_event_rendered_in_shim() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        manifest.capabilities.hooks.push(crate::config::Hook {
-            event: "PreToolUse".into(),
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
-                command: Some("echo hi".into()),
-                tool: None,
-            },
-            bundle_origin: None,
-        });
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src =
-            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
-        assert!(shim_src.contains("echo hi"));
-        assert!(shim_src.contains("check-stale --engine opencode"));
-    }
-
-    #[test]
-    fn materialize_no_hooks_still_emits_shim_for_auto_hooks() {
-        let tmp = tempfile::tempdir().unwrap();
-        OpencodeAdapter
-            .materialize(&MergedManifest::default(), tmp.path())
-            .unwrap();
-        assert!(tmp.path().join("plugin/llmenv.js").exists());
-    }
-
-    #[test]
     fn translate_command_md_keeps_description() {
         let src = "---\ndescription: My test command\nmodel: claude-sonnet-4-20250514\nallowed_tools: [Bash]\n---\n\nRun this command.";
         let result = translate_command_md(src, "test").unwrap();
@@ -3567,6 +3511,13 @@ mod tests {
             "OPENCODE_CONFIG_DIR".into(),
             tmp.path().to_string_lossy().into_owned()
         )));
+    }
+
+    #[test]
+    fn env_vars_turn_off_the_claude_skill_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vars = OpencodeAdapter.env_vars(tmp.path(), tmp.path()).unwrap();
+        assert!(vars.contains(&("OPENCODE_DISABLE_CLAUDE_CODE".into(), "1".into())));
     }
 
     #[test]
@@ -3769,35 +3720,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_plugin_hooks_happy_and_warnings() {
-        let out = tempfile::tempdir().unwrap();
-        let plugin_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(plugin_dir.path().join("hooks")).unwrap();
-        std::fs::write(
-            plugin_dir.path().join("hooks/hooks.json"),
-            serde_json::json!({
-                "hooks": {
-                    "PreToolUse": [{"hooks": [{"type": "command", "command": "echo ok"}]}],
-                    "Notification": [{"hooks": [{"type": "command", "command": "echo n"}]}],
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
-        let manifest = MergedManifest {
-            plugins,
-            marketplaces,
-            ..Default::default()
-        };
-        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
-        let shim_src =
-            std::fs::read_to_string(out.path().join("plugin/llmenv-hooks.json")).unwrap();
-        assert!(shim_src.contains("echo ok"));
-        assert!(!shim_src.contains("echo n"), "Notification is unsupported");
-    }
-
-    #[test]
     fn materialize_plugin_hooks_parse_error_skips_only_that_plugin() {
         let out = tempfile::tempdir().unwrap();
         let bad_dir = tempfile::tempdir().unwrap();
@@ -3840,26 +3762,6 @@ mod tests {
         // Must succeed overall, and the good plugin's content must still land.
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
         assert!(out.path().join("command/__plugin_still-works.md").exists());
-    }
-
-    #[test]
-    fn materialize_manifest_hook_mcp_tool_kind_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        manifest.capabilities.hooks.push(crate::config::Hook {
-            event: "PreToolUse".into(),
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::McpTool,
-                command: None,
-                tool: Some("some_tool".into()),
-            },
-            bundle_origin: None,
-        });
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src =
-            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
-        assert!(!shim_src.contains("some_tool"));
     }
 
     #[test]
@@ -4123,35 +4025,6 @@ mod tests {
     // #1304: same `block_engine_task_tools` opt-out Claude Code got in #980 —
     // a user who wants the tracker but keeps opencode's native todo list turns
     // it off and no redirect is registered.
-    #[test]
-    fn todowrite_redirect_follows_the_task_tracker_gate() {
-        let tracker = |enabled: bool, block: bool| {
-            let mut m = crate::merge::MergedManifest::default();
-            m.capabilities.features = Some(crate::config::Features {
-                task_tracker: Some(crate::config::TaskTracker {
-                    enabled,
-                    block_engine_task_tools: block,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-            m
-        };
-        let registered = |m: &crate::merge::MergedManifest| {
-            let tmp = tempfile::tempdir().unwrap();
-            OpencodeAdapter.materialize(m, tmp.path()).unwrap();
-            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json"))
-                .unwrap()
-                .contains("hook-run pre_tool_use")
-        };
-        assert!(registered(&tracker(true, true)), "tracker on, redirect on");
-        assert!(
-            !registered(&tracker(true, false)),
-            "block_engine_task_tools off must leave the native todo list alone"
-        );
-        assert!(!registered(&tracker(false, true)), "tracker off");
-    }
-
     #[test]
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
         let with = hook_bridge::hook_table(&[], true, &[]).to_string();

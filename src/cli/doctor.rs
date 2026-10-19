@@ -14,6 +14,8 @@ mod instruction_size;
 mod marketplace_pins;
 mod mcp_text;
 mod network;
+mod opencode;
+pub(super) use opencode::claude_only_colon_permission_patterns;
 mod task_text;
 mod tool_availability;
 use tool_availability::run_doctor_tool_availability;
@@ -816,77 +818,6 @@ fn inexact_tool_mappings(
     hits
 }
 
-/// A permission rule that is dead config under opencode (#838).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ColonPrefixRule {
-    /// `"allow"`, `"ask"`, or `"deny"` — the tier the rule was declared in.
-    pub tier: &'static str,
-    /// `"<tool>(<pattern>)"`, as the user would recognize it.
-    pub rule: String,
-}
-
-impl ColonPrefixRule {
-    /// The diagnostic for this rule. A dead `deny` fails **open** — the rule the
-    /// user wrote to block something doesn't block it — so it gets stronger
-    /// wording than a dead `allow`, which merely fails closed into a prompt.
-    pub fn message(&self) -> String {
-        let Self { tier, rule } = self;
-        let consequence = if *tier == "deny" {
-            "so the deny is NOT enforced there — whatever it was meant to block is left \
-             to opencode's default"
-        } else {
-            "so the grant never applies there"
-        };
-        format!(
-            "permission rule {rule} ({tier}) uses Claude Code's colon-prefix syntax, which \
-             opencode matches as a literal glob, {consequence}. Use a space-separated pattern \
-             (e.g. `git commit *`) for a rule both engines honour, or move the Claude-only form \
-             to `native_permissions.claude_code`"
-        )
-    }
-}
-
-/// Returns every neutral permission rule whose pattern uses Claude Code's
-/// colon-prefix syntax, for a config where opencode is also materialized (#838).
-///
-/// opencode matches a permission pattern as a plain glob against the whole
-/// command string, so `git commit:*` matches nothing there. Only the
-/// engine-neutral `permissions` block is checked; `native_permissions.claude_code`
-/// is Claude-scoped on purpose and correct as written.
-///
-/// Takes merged `capabilities` so rules contributed by a `bundle.yaml` are
-/// covered — a dead `deny` shipped in a shared bundle is the case most worth
-/// catching. `opencode_active` is passed in rather than probed so the check is
-/// testable without depending on the host's `PATH`.
-pub(super) fn claude_only_colon_permission_patterns(
-    capabilities: &Capabilities,
-    opencode_active: bool,
-) -> Vec<ColonPrefixRule> {
-    if !opencode_active {
-        return Vec::new();
-    }
-    let perms = &capabilities.permissions;
-    [
-        ("allow", &perms.allow),
-        ("ask", &perms.ask),
-        ("deny", &perms.deny),
-    ]
-    .into_iter()
-    .flat_map(|(tier, rules)| rules.iter().map(move |rule| (tier, rule)))
-    .filter_map(|(tier, rule)| {
-        let pattern = rule.pattern.as_deref()?;
-        uses_colon_prefix_syntax(pattern).then(|| ColonPrefixRule {
-            tier,
-            rule: format!(
-                "{}({})",
-                crate::util::display_safe(&rule.tool),
-                crate::util::display_safe(pattern)
-            ),
-        })
-    })
-    .collect()
-}
-
 /// Whether `matcher` is shaped like a file-extension glob (`*.rs`, `**/*.py`)
 /// or a bare extension (`.rs`) rather than a tool-name pattern.
 fn looks_like_file_glob(matcher: &str) -> bool {
@@ -1307,6 +1238,11 @@ pub(super) fn run_doctor(
     // Collected once: each `installed_adapters` call repeats its disabled_engines warning.
     let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> = super::installed_adapters(&config);
     let claude_installed = has_engine(&installed, "claude_code");
+    if let Some(home) = std::env::var_os("HOME").filter(|_| has_engine(&installed, "opencode"))
+        && let Some(msg) = opencode::agents_skills_warning(Path::new(&home))
+    {
+        eprintln!("{warn} {msg}");
+    }
     {
         let caps = doctor_manifest
             .as_ref()
@@ -1779,6 +1715,7 @@ pub(super) fn run_doctor(
     clippy::unreachable
 )]
 mod tests {
+    use super::opencode::ColonPrefixRule;
     use super::*;
     use crate::config::{
         Bundle, Capabilities, Features, Hook, HostEntry, Marketplace, Memory,

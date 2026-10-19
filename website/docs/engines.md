@@ -370,9 +370,12 @@ The `additionalContext` of a hook reaches the model as system text, and so does 
 
 ### Env vars
 
-| Variable              | Points to                                         | Notes                                                                           |
-|-----------------------|---------------------------------------------------|---------------------------------------------------------------------------------|
-| `OPENCODE_CONFIG_DIR` | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` folder from here |
+| Variable                       | Points to                                         | Notes                                                                                           |
+|--------------------------------|---------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| `OPENCODE_CONFIG_DIR`          | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` folder from here                 |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | `1`                                               | opencode does not load skills from `~/.claude` or a project `.claude` folder (added in v3.13.0) |
+
+opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns that folder off. `llmenv doctor` warns when the folder exists and opencode is installed (added in v3.13.0).
 
 ### What the opencode adapter emits
 
