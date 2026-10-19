@@ -86,8 +86,7 @@ impl Config {
             Err(_) => std::borrow::Cow::Borrowed(path),
         };
         let path = path.as_ref();
-        let s = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read config file: {}", path.display()))?;
+        let s = read_config_text(path)?;
         let mut cfg: Self = serde_yaml::from_str(&s)
             .with_context(|| format!("failed to parse config file: {}", path.display()))?;
         if let Some(features) = cfg.features.as_mut() {
@@ -102,10 +101,56 @@ impl Config {
     }
 }
 
+/// The largest config file that llmenv reads. A hand-written config is a few KiB, so this cap
+/// leaves room for a generated config and still stops a runaway file before it fills memory.
+const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Read the config file at `path` through a bounded reader, so a FIFO or a huge file fails at
+/// once (#2942). A missing file is a `NotFound` error, as from `std::fs::read_to_string`.
+pub(crate) fn read_config_text(path: &Path) -> anyhow::Result<String> {
+    llmenv_paths::read_text_bounded(path, MAX_CONFIG_FILE_BYTES)
+        .and_then(|text| text.ok_or_else(|| std::io::ErrorKind::NotFound.into()))
+        .with_context(|| format!("failed to read config file: {}", path.display()))
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn load_fails_at_once_on_a_fifo_and_names_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&p)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let err = format!("{:#}", Config::load(&p).unwrap_err());
+        assert!(err.contains(&p.display().to_string()), "{err}");
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_a_file_over_the_cap_and_names_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.yaml");
+        let size = usize::try_from(MAX_CONFIG_FILE_BYTES).unwrap() + 1;
+        std::fs::write(&p, vec![b'#'; size]).unwrap();
+        let err = format!("{:#}", Config::load(&p).unwrap_err());
+        assert!(err.contains(&p.display().to_string()), "{err}");
+        assert!(err.contains("more than"), "{err}");
+    }
+
+    #[test]
+    fn load_of_a_missing_file_is_a_not_found_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = Config::load(&tmp.path().join("config.yaml")).unwrap_err();
+        let io = err.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn context_mode_source_is_pinned_not_floating() {

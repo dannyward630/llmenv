@@ -1,61 +1,21 @@
 //! Reads of a bundle's `AGENTS.md` and `bundle.yaml` (#2933).
 
-use std::io::Read as _;
 use std::path::Path;
 
 use crate::config::Capabilities;
-
-use rustix::fs::{Mode, OFlags};
 
 /// The largest bundle text file that a merge reads. The text goes into every session, so a file
 /// this large is a mistake, not content.
 const MAX_BUNDLE_FILE_BYTES: u64 = 1024 * 1024;
 
-/// Read the bundle text file at `path`, or `None` when there is none. A link is followed, because
-/// a linked `AGENTS.md` can be deliberate. The open does not block on a FIFO, and the open file
-/// must be a regular file of at most [`MAX_BUNDLE_FILE_BYTES`] bytes of UTF-8 text. The checks
-/// and the read use the same open file, so a swap between them cannot change what is read.
+/// Read the bundle text file at `path`, or `None` when there is none, through
+/// [`llmenv_paths::read_text_bounded`] with a cap of [`MAX_BUNDLE_FILE_BYTES`]. A link is
+/// followed, because a linked `AGENTS.md` can be deliberate.
 ///
 /// # Errors
 /// The file cannot be opened or read, is not a regular file, is too large, or is not UTF-8.
 pub(crate) fn read_bundle_text(path: &Path) -> std::io::Result<Option<String>> {
-    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let fd = match rustix::fs::open(path, flags, Mode::empty()) {
-        Ok(fd) => fd,
-        // A link whose target is gone also gives ENOENT. Its bundle meant to have the file, so
-        // that is an error, not an absent file.
-        Err(rustix::io::Errno::NOENT) if rustix::fs::lstat(path).is_ok() => {
-            return Err(invalid(
-                "it is a link to a file that does not exist".to_string(),
-            ));
-        }
-        Err(rustix::io::Errno::NOENT) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let st = rustix::fs::fstat(&fd)?;
-    let kind = rustix::fs::FileType::from_raw_mode(st.st_mode as rustix::fs::RawMode);
-    if kind != rustix::fs::FileType::RegularFile {
-        return Err(invalid(format!("it is not a regular file ({kind:?})")));
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::from(fd)
-        .take(MAX_BUNDLE_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_BUNDLE_FILE_BYTES {
-        return Err(invalid(format!(
-            "it holds more than {MAX_BUNDLE_FILE_BYTES} bytes"
-        )));
-    }
-    String::from_utf8(bytes).map(Some).map_err(|e| {
-        invalid(format!(
-            "it is not UTF-8 text (the first bad byte is at offset {})",
-            e.utf8_error().valid_up_to()
-        ))
-    })
-}
-
-fn invalid(reason: String) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, reason)
+    llmenv_paths::read_text_bounded(path, MAX_BUNDLE_FILE_BYTES)
 }
 
 /// Keys that a `bundle.yaml` fragment is allowed to declare. Any other top-level
@@ -239,55 +199,6 @@ mod tests {
                 .as_deref(),
             Some("rules")
         );
-    }
-
-    #[test]
-    fn a_link_to_a_text_file_is_followed() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("shared.md"), "shared").unwrap();
-        std::os::unix::fs::symlink(dir.path().join("shared.md"), dir.path().join("AGENTS.md"))
-            .unwrap();
-        assert_eq!(
-            read_bundle_text(&dir.path().join("AGENTS.md"))
-                .unwrap()
-                .as_deref(),
-            Some("shared")
-        );
-    }
-
-    #[test]
-    fn a_dangling_link_a_folder_and_bad_text_are_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let link = dir.path().join("AGENTS.md");
-        std::os::unix::fs::symlink(dir.path().join("moved.md"), &link).unwrap();
-        let err = read_bundle_text(&link).unwrap_err();
-        assert!(err.to_string().contains("does not exist"), "{err}");
-        let folder = dir.path().join("bundle.yaml");
-        std::fs::create_dir(&folder).unwrap();
-        let err = read_bundle_text(&folder).unwrap_err();
-        assert!(err.to_string().contains("not a regular file"), "{err}");
-        let bad = dir.path().join("bad.md");
-        std::fs::write(&bad, b"ok\xffno").unwrap();
-        let err = read_bundle_text(&bad).unwrap_err();
-        assert!(err.to_string().contains("offset 2"), "{err}");
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn small_files_read_back_exactly_or_fail_as_bad_text(
-            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
-        ) {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("AGENTS.md");
-            std::fs::write(&path, &bytes).unwrap();
-            match (read_bundle_text(&path), std::str::from_utf8(&bytes)) {
-                (Ok(Some(text)), Ok(expected)) => proptest::prop_assert_eq!(text.as_str(), expected),
-                (Err(e), Err(_)) => {
-                    proptest::prop_assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
-                }
-                (got, want) => proptest::prop_assert!(false, "{got:?} vs {want:?}"),
-            }
-        }
     }
 
     #[test]

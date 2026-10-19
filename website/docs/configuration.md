@@ -11,6 +11,9 @@ The config directory is resolved in this order:
 1. `$LLMENV_CONFIG_DIR`, if set.
 2. The platform config dir (`~/.config/llmenv` on Linux/macOS).
 
+(changed in v3.13.0) `config.yaml` must be a regular file of at most 4 MiB.
+A FIFO, a folder, or a larger file fails the load at once with an error that names the file.
+
 ## Top-level blocks
 
 | Block | Shape | Purpose |
@@ -1777,6 +1780,10 @@ Skills declared here are merged with per-bundle skills from `bundle.yaml`; the
 union is what gets wired up for the active scope. Name collisions are resolved
 by declaration order (first wins).
 
+(changed in v3.13.0) Each file in a skill folder must be at most 64 MiB.
+A larger file fails the skill copy with an error that names the file.
+A FIFO or another special file in a skill folder is not copied.
+
 ## `output_styles:`
 
 (added in v3.10.0)
@@ -1851,6 +1858,10 @@ are reported by `llmenv doctor`, which also flags a `disable_bundles`/
 appearing in both lists. Malformed YAML degrades to defaults derived from the
 folder basename. See [Concepts → Project markers](concepts.md#project-markers)
 for discovery rules.
+
+(changed in v3.13.0) llmenv reads a marker only when it is a regular file of at most 64 KiB.
+A FIFO, a folder, or a larger file is not read: llmenv logs the error and uses the defaults from the folder basename.
+The project id of `llmenv task` also shows the error as a notice that names the file.
 
 Disabling a bundle withdraws *everything* it contributes, not just its
 permissions and instruction files. That includes any `features.memory` or

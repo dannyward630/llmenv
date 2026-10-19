@@ -338,12 +338,11 @@ fn move_file_at(
     if dirfd::rename_at(src_dir, name, dst_dir, name).is_ok() {
         return Ok(());
     }
-    let bytes = dirfd::read_file_at(src_dir, name)
-        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
     // Owner-only, matching everything else llmenv writes into the durable
     // store; the replace semantics (unlink, then create) are what keep a
-    // symlink at the destination from being written through (#1065).
-    dirfd::write_file_at(dst_dir, name, &bytes, rustix::fs::Mode::from(0o600))
+    // symlink at the destination from being written through (#1065). The copy
+    // streams, because a transcript can be hundreds of MiB.
+    dirfd::copy_file_at(src_dir, dst_dir, name, rustix::fs::Mode::from(0o600))
         .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
     if let Err(e) = dirfd::remove_file_at(src_dir, name) {
         tracing::debug!("inherit: could not drop {} after copy: {e}", from.display());
@@ -877,7 +876,7 @@ mod tests {
     //
     // #1066: both properties now belong to the fd-relative helpers — the
     // path-based `copy_replacing`/`is_newer` they were written against are
-    // gone, replaced by `write_file_at`/`is_newer_at`, so the tests move with
+    // gone, replaced by `copy_file_at`/`is_newer_at`, so the tests move with
     // them rather than being deleted alongside the code.
     #[cfg(unix)]
     #[test]
