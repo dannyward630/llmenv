@@ -49,7 +49,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{MOST_SPECIFIC_RANK, UNSCOPED_RANK, tag_specificity};
+    use super::{UNSCOPED_RANK, tag_specificity};
     use crate::scope::{ActiveScope, ActiveScopes};
 
     /// The kind table, written out again so a broken table in `tag_specificity` cannot agree
@@ -117,8 +117,9 @@ mod tests {
                     *slot = (*slot).min(kind_rank(scope.kind));
                 }
             }
+            // An extra tag ranks as a project tag. 1 is the lowest rank, so it wins outright.
             for tag in &extra {
-                expected.insert(tag.clone(), MOST_SPECIFIC_RANK);
+                expected.insert(tag.clone(), kind_rank("project"));
             }
             prop_assert_eq!(ranks, expected);
         }

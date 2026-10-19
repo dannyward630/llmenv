@@ -9,8 +9,9 @@ use proptest::prelude::*;
 
 use super::{is_within_any, missing_roots, path_outside_roots, undeclared_roots};
 
-/// Folders of the test tree, relative to its root. Some nest, so containment has both answers.
-const FOLDERS: [&str; 6] = ["a", "a/x", "a/x/deep", "b", "c", "c/y"];
+/// Folders of the test tree, relative to its root. Some nest, so containment has both answers,
+/// and `ab` shares a text prefix with `a` without being under it, so a text-prefix check fails.
+const FOLDERS: [&str; 7] = ["a", "a/x", "a/x/deep", "ab", "b", "c", "c/y"];
 /// Names that do not exist, so the "does not resolve" paths are covered too.
 const ABSENT: [&str; 2] = ["gone", "a/gone"];
 
@@ -24,9 +25,11 @@ fn tree() -> (tempfile::TempDir, PathBuf) {
     (dir, root)
 }
 
-fn pick() -> impl Strategy<Value = Vec<&'static str>> {
+/// A subset of the tree's folders and absent names.
+fn folder_subset() -> impl Strategy<Value = Vec<&'static str>> {
     let names: Vec<&str> = FOLDERS.iter().chain(ABSENT.iter()).copied().collect();
-    proptest::sample::subsequence(names.clone(), 0..=names.len())
+    let count = names.len();
+    proptest::sample::subsequence(names, 0..=count)
 }
 
 fn exists(root: &Path, rel: &str) -> bool {
@@ -49,7 +52,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
-    fn containment_matches_the_component_prefix_rule(path in pick(), roots in pick()) {
+    fn containment_matches_the_component_prefix_rule(path in folder_subset(), roots in folder_subset()) {
         let (_dir, root) = tree();
         let listed = paths(&root, &roots);
         for rel in &path {
@@ -64,8 +67,8 @@ proptest! {
 
     #[test]
     fn missing_roots_are_the_declared_folders_that_no_record_covers(
-        wanted in pick(),
-        listed in pick(),
+        wanted in folder_subset(),
+        listed in folder_subset(),
     ) {
         let (_dir, root) = tree();
         let got = missing_roots(&paths(&root, &wanted), &paths(&root, &listed));
@@ -83,8 +86,8 @@ proptest! {
 
     #[test]
     fn undeclared_roots_are_the_records_that_no_declared_root_covers(
-        listed in pick(),
-        wanted in pick(),
+        listed in folder_subset(),
+        wanted in folder_subset(),
     ) {
         let (_dir, root) = tree();
         let got = undeclared_roots(&paths(&root, &listed), &paths(&root, &wanted));

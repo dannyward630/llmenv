@@ -105,29 +105,65 @@ mod tests {
         proptest::sample::subsequence(BUNDLES.to_vec(), 0..=BUNDLES.len())
     }
 
+    #[test]
+    fn a_bundle_that_fires_by_tag_but_a_scope_disables_is_not_named() {
+        let bundles = vec![crate::config::Bundle {
+            name: "web-dev".into(),
+            when: vec!["web".into()],
+        }];
+        let active = ActiveScopes {
+            scopes: vec![scope("project", &["web"], &[], &["web-dev"])],
+            tags: std::iter::once("web".to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(recall_bundle_names(&bundles, &active).is_empty());
+    }
+
+    const TAGS: [&str; 3] = ["t1", "t2", "t3"];
+
     proptest! {
-        /// The names are sorted, unique, and hold every enabled name that no scope disables,
-        /// and nothing else (#2924).
+        /// The names are the enabled names and the bundles whose `when` meets an active tag,
+        /// minus every name a scope disables: sorted and unique (#1125, #2924).
         #[test]
-        fn names_are_sorted_unique_and_never_disabled(
+        fn names_are_the_fired_and_enabled_bundles_minus_the_disabled(
             scopes in proptest::collection::vec((subset(), subset()), 0..4),
+            when in proptest::collection::vec(
+                proptest::option::of(proptest::sample::select(TAGS.to_vec())),
+                BUNDLES.len(),
+            ),
+            tags in proptest::sample::subsequence(TAGS.to_vec(), 0..=TAGS.len()),
         ) {
+            let bundles: Vec<crate::config::Bundle> = BUNDLES
+                .iter()
+                .zip(&when)
+                .map(|(name, tag)| crate::config::Bundle {
+                    name: (*name).to_string(),
+                    when: tag.iter().map(|t| (*t).to_string()).collect(),
+                })
+                .collect();
             let active = ActiveScopes {
                 scopes: scopes
                     .iter()
                     .map(|(enable, disable)| scope("project", &[], enable, disable))
                     .collect(),
+                tags: tags.iter().map(|t| (*t).to_string()).collect(),
                 ..Default::default()
             };
             let disabled: std::collections::BTreeSet<&str> =
                 scopes.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+            let fired = BUNDLES
+                .iter()
+                .zip(&when)
+                .filter(|(_, tag)| tag.is_some_and(|t| tags.contains(&t)))
+                .map(|(name, _)| *name);
             let expected: std::collections::BTreeSet<&str> = scopes
                 .iter()
                 .flat_map(|(e, _)| e.iter().copied())
+                .chain(fired)
                 .filter(|name| !disabled.contains(name))
                 .collect();
 
-            let got = recall_bundle_names(&[], &active);
+            let got = recall_bundle_names(&bundles, &active);
 
             prop_assert_eq!(got, expected.into_iter().map(String::from).collect::<Vec<_>>());
         }
