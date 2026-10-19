@@ -56,8 +56,6 @@ pub(crate) mod task_tools;
 pub(crate) mod transcript;
 mod transcript_link;
 use respawn::respawn_job;
-#[cfg(test)]
-use respawn::{respawn_job_with_exe, spawn_detached};
 use stop_reminder::resolve_stop_reminder;
 mod web_fetch;
 
@@ -3545,31 +3543,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_detached_runs_in_the_directory_and_feeds_stdin() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "cat > out.txt; pwd > cwd.txt"])
-            .stdin(std::process::Stdio::piped());
-        spawn_detached(cmd, Some("payload"), dir.path()).unwrap();
-        let out = dir.path().join("out.txt");
-        for _ in 0..200 {
-            // The shell creates the file before `pwd` writes it, so wait for content.
-            let written = std::fs::read_to_string(dir.path().join("cwd.txt"))
-                .is_ok_and(|text| !text.is_empty());
-            if written {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        assert_eq!(std::fs::read_to_string(out).unwrap(), "payload");
-        let cwd = std::fs::read_to_string(dir.path().join("cwd.txt")).unwrap();
-        assert_eq!(
-            std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
-            dir.path().canonicalize().unwrap()
-        );
-    }
-
-    #[test]
     fn the_resume_step_starts_a_stale_job_in_its_working_directory() {
         let dir = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
@@ -3598,17 +3571,6 @@ mod tests {
             1,
             "SessionStart starts the indexer itself, so a resume would only count an attempt"
         );
-    }
-
-    #[test]
-    fn a_job_whose_working_directory_is_gone_is_not_resumed() {
-        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
-        cp.cwd = Some("/definitely/not/a/directory".into());
-        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
-        assert!(err.to_string().contains("is gone"), "{err}");
-        cp.cwd = None;
-        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
-        assert!(err.to_string().contains("not recorded"), "{err}");
     }
 
     #[test]
@@ -3645,21 +3607,6 @@ mod tests {
         assert_eq!(out, "first");
         append_section(&mut out, "second");
         assert_eq!(out, "first\nsecond");
-    }
-
-    #[test]
-    fn a_job_whose_image_cannot_be_resolved_is_a_failed_start() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
-        cp.cwd = Some(dir.path().display().to_string());
-        let err = respawn_job_with_exe(&cp, std::path::Path::new("/s/x.json"), || {
-            Err(std::io::Error::other("no image"))
-        })
-        .expect_err("a failed lookup is a failed start, which uses an attempt");
-        assert!(
-            format!("{err:#}").contains("cannot resolve current_exe"),
-            "{err:#}"
-        );
     }
 
     #[test]
@@ -3874,6 +3821,10 @@ mod tests {
             &serde_json::Value::Null,
         );
         assert!(text.contains("tests"), "the critique is present: {text:?}");
+        assert!(
+            !text.starts_with('\n'),
+            "no separator before the first part: {text:?}"
+        );
 
         let without = crate::config::Config {
             features: Some(crate::config::Features {

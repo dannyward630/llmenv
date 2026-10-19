@@ -85,3 +85,91 @@ pub(super) fn spawn_detached(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn spawn_detached_runs_in_the_directory_and_feeds_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "cat > out.txt; pwd > cwd.txt"])
+            .stdin(std::process::Stdio::piped());
+        spawn_detached(cmd, Some("payload"), dir.path()).unwrap();
+        let out = dir.path().join("out.txt");
+        for _ in 0..200 {
+            // The shell creates the file before `pwd` writes it, so wait for content.
+            let written = std::fs::read_to_string(dir.path().join("cwd.txt"))
+                .is_ok_and(|text| !text.is_empty());
+            if written {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(std::fs::read_to_string(out).unwrap(), "payload");
+        let cwd = std::fs::read_to_string(dir.path().join("cwd.txt")).unwrap();
+        assert_eq!(
+            std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_job_whose_working_directory_is_gone_is_not_resumed() {
+        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        cp.cwd = Some("/definitely/not/a/directory".into());
+        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
+        assert!(err.to_string().contains("is gone"), "{err}");
+        cp.cwd = None;
+        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
+        assert!(err.to_string().contains("not recorded"), "{err}");
+    }
+
+    #[test]
+    fn a_job_whose_image_cannot_be_resolved_is_a_failed_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        cp.cwd = Some(dir.path().display().to_string());
+        let err = respawn_job_with_exe(&cp, std::path::Path::new("/s/x.json"), || {
+            Err(std::io::Error::other("no image"))
+        })
+        .expect_err("a failed lookup is a failed start, which uses an attempt");
+        assert!(
+            format!("{err:#}").contains("cannot resolve current_exe"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_working_directory_that_is_a_file_is_not_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        cp.cwd = Some(file.display().to_string());
+        let err = respawn_job(&cp, std::path::Path::new("/s/x.json")).unwrap_err();
+        assert!(err.to_string().contains("is not a folder"), "{err}");
+    }
+
+    #[test]
+    fn a_working_directory_that_cannot_be_read_names_the_cause() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir_all(locked.join("cwd")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
+        cp.cwd = Some(locked.join("cwd").display().to_string());
+        let err = respawn_job(&cp, std::path::Path::new("/s/x.json")).unwrap_err();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let text = format!("{err:#}");
+        assert!(text.contains("cannot use the working directory"), "{text}");
+        assert!(
+            !text.contains("is gone"),
+            "a stat error is not a gone folder: {text}"
+        );
+    }
+}

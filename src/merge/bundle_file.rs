@@ -215,6 +215,11 @@ mod tests {
     }
 
     #[test]
+    fn the_bundle_cap_is_the_documented_1_mib() {
+        assert_eq!(MAX_BUNDLE_FILE_BYTES, 1_048_576);
+    }
+
+    #[test]
     fn an_oversized_file_fails_with_its_size_rule() {
         let dir = tempfile::tempdir().unwrap();
         let big = dir.path().join("bundle.yaml");

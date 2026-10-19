@@ -6,6 +6,24 @@ pub(super) fn cp(kind: JobKind, n: u32) -> Checkpoint {
 }
 
 #[test]
+fn a_checkpoint_load_refuses_a_fifo_and_a_file_over_128_kib() {
+    assert_eq!(MAX_CHECKPOINT_BYTES, 131_072);
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("fifo.json");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let err = load(&fifo).unwrap_err();
+    assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+    let big = dir.path().join("big.json");
+    std::fs::write(&big, vec![b' '; 131_073]).unwrap();
+    let err = load(&big).unwrap_err();
+    assert!(format!("{err:#}").contains("more than"), "{err:#}");
+}
+
+#[test]
 fn job_inputs_come_from_stdin_when_it_parses() {
     let got: serde_json::Value = inputs_or_checkpoint(r#"{"a":1}"#, None).unwrap();
     assert_eq!(got, serde_json::json!({"a": 1}));

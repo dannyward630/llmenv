@@ -141,6 +141,11 @@ mod tests {
     }
 
     #[test]
+    fn the_config_cap_is_the_documented_4_mib() {
+        assert_eq!(MAX_CONFIG_FILE_BYTES, 4_194_304);
+    }
+
+    #[test]
     fn load_rejects_a_file_over_the_cap_and_names_the_file() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("config.yaml");

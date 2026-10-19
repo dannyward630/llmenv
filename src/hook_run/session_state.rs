@@ -258,6 +258,13 @@ pub(crate) fn unix_now() -> i64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_key_hashes_the_session_and_the_agent_id_as_text() {
+        let key = agent_state_key("s1", &serde_json::json!({ "agent_id": "a7" }));
+        let hash = super::super::record_hash::hash_prefix(b"s1\0a7");
+        assert_eq!(key, format!("s1.agent-{hash}"));
+    }
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
