@@ -3535,7 +3535,7 @@ mod tests {
         }
     }
 
-    use super::web_fetch::{handle_web_fetch_in, web_fetch_store_args};
+    use super::web_fetch::handle_web_fetch_in;
     use super::*;
 
     /// Every event `from_str` accepts. Kept as strings so a new variant that
@@ -3646,13 +3646,18 @@ mod tests {
         let payload = json!({
             "session_id": "sess-1", "tool_use_id": "tu1", "tool_name": "WebFetch",
             "tool_input": {"url": "https://example.com"}, "tool_response": "body",
+            "cwd": dir.path().join("proj-a").display().to_string(),
         });
+        std::fs::create_dir(dir.path().join("proj-a")).unwrap();
         let child = handle_web_fetch_in(Some(dir.path()), &payload);
         let listed = checkpoint::checkpoint_entries_for_test(dir.path());
         assert_eq!(listed.len(), 1, "{listed:?}");
         let (kind, inputs, session) = &listed[0];
         assert_eq!(*kind, checkpoint::JobKind::IcmStore);
-        assert_eq!(inputs["topic"], "web-fetch");
+        assert_eq!(
+            inputs["topic"], "web-fetch-proj-a",
+            "the page keeps its project (#2911)"
+        );
         assert!(
             !inputs[detached_store::REQUEST_ID_FIELD]
                 .as_str()
@@ -6884,174 +6889,6 @@ mod tests {
         assert!(
             out.contains("episodic"),
             "existing marker must survive: {out}"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_extracts_url_and_summary() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "# Hello\n\nThis is fetched content",
-        });
-        let args = web_fetch_store_args(&payload).expect("should detect WebFetch");
-        assert_eq!(args["topic"], "web-fetch");
-        assert_eq!(args["importance"], "low");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("https://example.com"), "url in content");
-        assert!(content.contains("WebFetch"), "tool name in content");
-        assert!(
-            content.contains("Fetched at (epoch)"),
-            "timestamp in content"
-        );
-        assert!(content.contains("Hello"), "content preview in content");
-    }
-
-    #[test]
-    fn web_fetch_request_id_is_stable_per_tool_call_and_keyed_by_session() {
-        let payload = |tool_use_id: &str, url: &str| {
-            json!({
-                "session_id": "sess-1", "tool_use_id": tool_use_id, "tool_name": "WebFetch",
-                "tool_input": {"url": url}, "tool_response": "body",
-            })
-        };
-        let a = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
-        let again = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
-        assert_eq!(
-            a[detached_store::REQUEST_ID_FIELD],
-            again[detached_store::REQUEST_ID_FIELD]
-        );
-        assert_eq!(a[detached_store::REQUEST_KEY_FIELD], "sess-1");
-        let other_call = web_fetch_store_args(&payload("tu2", "https://a")).expect("args");
-        assert_ne!(
-            a[detached_store::REQUEST_ID_FIELD],
-            other_call[detached_store::REQUEST_ID_FIELD]
-        );
-        let other_url = web_fetch_store_args(&payload("tu1", "https://b")).expect("args");
-        assert_ne!(
-            a[detached_store::REQUEST_ID_FIELD],
-            other_url[detached_store::REQUEST_ID_FIELD]
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_supports_web_search() {
-        let payload = json!({
-            "tool_name": "WebSearch",
-            "tool_input": {"query": "rust programming"},
-            "tool_response": "Search results here",
-        });
-        let args = web_fetch_store_args(&payload).expect("should detect WebSearch");
-        assert_eq!(args["topic"], "web-fetch");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("WebSearch"));
-        assert!(content.contains("Search results"));
-        assert!(content.contains("Query: rust programming"));
-        assert!(content.contains("Tool: WebSearch"));
-    }
-
-    #[test]
-    fn web_fetch_store_args_ignores_non_web_fetch_tools() {
-        let payload = json!({
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "tool_response": "result",
-        });
-        assert!(
-            web_fetch_store_args(&payload).is_none(),
-            "non-WebFetch tool should return None"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_missing_url_or_tool_input() {
-        // Missing url key within tool_input.
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {},
-            "tool_response": "content",
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle missing url");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("unknown"), "should fall back to 'unknown'");
-
-        // Missing entire tool_input key — same serde_json Null path.
-        let payload2 = json!({
-            "tool_name": "WebFetch",
-            "tool_response": "content",
-        });
-        let args2 = web_fetch_store_args(&payload2).expect("should handle missing tool_input");
-        let content2 = args2["content"].as_str().unwrap();
-        assert!(
-            content2.contains("unknown"),
-            "should fall back to 'unknown'"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_empty_response() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "",
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle empty response");
-        let content = args["content"].as_str().unwrap();
-        assert!(
-            content.contains("Content preview:\n"),
-            "empty content after preview header"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_truncates_long_content() {
-        let long = "x".repeat(2000);
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": long,
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle long content");
-        let content = args["content"].as_str().unwrap();
-        let preview = content.split("Content preview:\n").nth(1).unwrap_or("");
-        assert!(
-            preview.ends_with("... (truncated)"),
-            "truncation indicator should be present, got: {preview:?}"
-        );
-        let truncated = preview.strip_suffix("... (truncated)").unwrap_or(preview);
-        assert!(
-            truncated.len() <= 1000,
-            "truncated content should be at most 1000 chars, got {}",
-            truncated.len()
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_returns_none_for_null_payload() {
-        assert!(web_fetch_store_args(&serde_json::Value::Null).is_none());
-    }
-
-    #[test]
-    fn web_fetch_store_args_returns_none_for_missing_tool_name() {
-        let payload = json!({
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "content",
-        });
-        assert!(web_fetch_store_args(&payload).is_none());
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_object_tool_response() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": {"content": [{"type": "text", "text": "hello world"}]},
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle object response");
-        let content = args["content"].as_str().unwrap();
-        assert!(
-            content.contains("hello world"),
-            "extracted text from object response"
         );
     }
 

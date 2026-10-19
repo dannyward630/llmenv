@@ -3,7 +3,7 @@
 //! Design: docs/superpowers/specs/2026-09-27-adaptive-icm-recall-design.md
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -23,6 +23,7 @@ mod failure;
 mod outcome;
 mod session_reset;
 mod subagent;
+mod waves;
 
 #[cfg(test)]
 use cut::cut_items_notice;
@@ -31,6 +32,7 @@ use outcome::Outcome;
 use session_reset::{FirstUpdate, first_update_notice, resets_ledger};
 use subagent::agent_key;
 pub(super) use subagent::subagent_start;
+use waves::waves;
 
 const FAILURE_BUDGET_BYTES: usize = 2_000;
 const SUBAGENT_BUDGET_BYTES: usize = 4_000;
@@ -122,58 +124,6 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> String {
             String::new()
         }
     }
-}
-
-/// The recall texts for `text`, in budget order: the session project's main
-/// recall, the all-projects main recall, keyword fanout, topic fanout. The flag
-/// says whether a main recall succeeded.
-async fn waves(
-    client: &McpHttpClient,
-    text: &str,
-    keywords: &[String],
-    project: Option<&str>,
-) -> (Outcome, bool) {
-    let scoped = project.map(|p| RecallQuery {
-        project: Some(p.to_string()),
-        ..query(text, MAIN_LIMIT)
-    });
-    let keyword = |i: usize| {
-        keywords.get(i).map(|k| RecallQuery {
-            keyword: Some(k.clone()),
-            ..query(text, FANOUT_LIMIT)
-        })
-    };
-    let start = Instant::now();
-    let (own, main, kw0, kw1) = tokio::join!(
-        recall(client, scoped),
-        recall(client, Some(query(text, MAIN_LIMIT))),
-        recall(client, keyword(0)),
-        recall(client, keyword(1)),
-    );
-    let main_ok = matches!(own, Some(Ok(_))) || matches!(main, Some(Ok(_)));
-    let mut outcome = Outcome::default();
-    [own, main, kw0, kw1]
-        .into_iter()
-        .for_each(|r| outcome.push(r));
-    if start.elapsed() < WAVE2_CUTOFF {
-        let topics: Vec<String> = outcome
-            .texts
-            .iter()
-            .flat_map(|t| split_recall_records(t))
-            .filter_map(|r| relevance::record_topic(&r).map(str::to_string))
-            .collect();
-        let siblings = relevance::sibling_topics(&topics);
-        let topic = |i: usize| {
-            siblings.get(i).map(|t| RecallQuery {
-                topic: Some(t.clone()),
-                ..query(text, FANOUT_LIMIT)
-            })
-        };
-        let (t0, t1) = tokio::join!(recall(client, topic(0)), recall(client, topic(1)));
-        outcome.push(t0);
-        outcome.push(t1);
-    }
-    (outcome, main_ok)
 }
 
 /// Notice for a context reset that the ledger did not apply. Records seen before the
