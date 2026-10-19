@@ -21,7 +21,7 @@ pub(super) fn respawn_job(
 }
 
 /// [`respawn_job`] with the image lookup passed in, so a test can make it fail.
-pub(super) fn respawn_job_with_exe(
+fn respawn_job_with_exe(
     cp: &checkpoint::Checkpoint,
     path: &std::path::Path,
     current_exe: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
@@ -71,7 +71,7 @@ pub(super) fn respawn_job_with_exe(
 
 /// Spawn `cmd` as a detached child in `cwd` with the shared bounded stderr log, and write `stdin`
 /// to it. Not waited on.
-pub(super) fn spawn_detached(
+fn spawn_detached(
     mut cmd: std::process::Command,
     stdin: Option<&str>,
     cwd: &std::path::Path,
