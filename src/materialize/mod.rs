@@ -117,7 +117,7 @@ pub fn materialize_with_mode(
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(abs, &out)?;
+        std::fs::write(&out, crate::paths::bounded::asset(abs)?)?;
     }
     match std::fs::rename(&staging, &dest) {
         Ok(()) => Ok(Rendered { path: dest, hash }),
@@ -174,7 +174,7 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(abs, &out)?;
+        std::fs::write(&out, crate::paths::bounded::asset(abs)?)?;
     }
     prune_empty_dirs(dest)?;
     Ok(())

@@ -52,7 +52,7 @@ pub struct ResolvedMcp {
 }
 
 /// Settings that `hook_run` reads from the active `features.memory` entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryHookSettings {
     /// Token budget for the `icm_wake_up` call (#1216).
     pub(crate) wakeup_max_tokens: Option<u32>,
@@ -63,6 +63,8 @@ pub struct MemoryHookSettings {
     pub(crate) default_type: Option<llmenv_config::MemoryType>,
     /// Importance marker for stored chunks without their own marker (R3).
     pub(crate) default_importance: Option<llmenv_config::ImportanceLevel>,
+    /// The topics that the per-turn recall reads across every project (#2950).
+    pub(crate) global_topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +312,7 @@ fn resolve_memory(
             adaptive_recall: mem.adaptive_recall,
             default_type: mem.default_type,
             default_importance: mem.default_importance,
+            global_topics: mem.global_topics.clone(),
         }),
         // #2356: the ICM tools are used on most prompts, so they load up front by default.
         always_load: Some(mem.always_load.unwrap_or(true)),
@@ -499,21 +502,12 @@ mod tests {
 
     fn memory() -> Memory {
         Memory {
-            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(), // mirrors schema::default_listen_host()
             when: vec!["network-home".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..Memory::default()
         }
     }
 
@@ -653,6 +647,7 @@ mod tests {
                 adaptive_recall: false,
                 default_type: Some(llmenv_config::MemoryType::Semantic),
                 default_importance: Some(llmenv_config::ImportanceLevel::High),
+                global_topics: vec![],
             })
         );
     }
@@ -664,10 +659,9 @@ mod tests {
         assert_eq!(
             resolved[0].memory_hook,
             Some(MemoryHookSettings {
-                wakeup_max_tokens: None,
                 adaptive_recall: true,
-                default_type: None,
-                default_importance: None,
+                global_topics: vec![],
+                ..MemoryHookSettings::default()
             })
         );
     }
@@ -675,38 +669,20 @@ mod tests {
     #[test]
     fn memory_ambiguous_errors() {
         let home = Memory {
-            always_load: None,
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..Memory::default()
         };
         let work = Memory {
-            always_load: None,
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()], // same tag — ambiguous when both active
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..Memory::default()
         };
         let mut host = base_host();
         host.insert(
@@ -726,38 +702,20 @@ mod tests {
     fn memory_scoped_selects_matching_entry() {
         // Two daemons with different tags: only the one matching active tags resolves.
         let home = Memory {
-            always_load: None,
             server_host: "still".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..Memory::default()
         };
         let work = Memory {
-            always_load: None,
             server_host: "hesitation-marks".into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
             when: vec!["work".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..Memory::default()
         };
         let mut host = base_host();
         host.insert(

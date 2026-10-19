@@ -105,7 +105,7 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
     for (rel, abs) in &m.files {
         let rel_str = rel.to_string_lossy();
         update_len_prefixed(&mut h, rel_str.as_bytes());
-        let bytes = std::fs::read(abs)?;
+        let bytes = crate::paths::bounded::asset(abs)?;
         update_len_prefixed(&mut h, &bytes);
     }
     // Note: the cache key is a function of (relative path, file contents) only.

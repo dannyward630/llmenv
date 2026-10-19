@@ -37,11 +37,14 @@ pub(crate) const MAX_DESCRIPTION_BYTES: usize = 1024;
 /// marker holds a few short fields, so a larger file is a mistake or an attack (#2942).
 pub(crate) const MAX_MARKER_FILE_BYTES: u64 = 64 * 1024;
 
+/// Read a marker under its link policy (#2946).
+pub(crate) use super::marker_link::read_marker;
+
 /// Parse `.llmenv.yaml` file into a `ProjectFile`. Empty file → all defaults.
 /// Malformed YAML → log warning and return defaults. The `description`
 /// field is truncated to `MAX_DESCRIPTION_BYTES` if oversized.
 fn read_project_file(path: &std::path::Path) -> ProjectFile {
-    let body = match llmenv_paths::read_text_bounded(path, MAX_MARKER_FILE_BYTES) {
+    let body = match super::marker_link::read_marker(path, MAX_MARKER_FILE_BYTES) {
         Ok(Some(body)) => body,
         Ok(None) => return ProjectFile::default(),
         Err(e) => {

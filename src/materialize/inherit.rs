@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 mod fold;
+mod link_site;
 use fold::move_dir_newest_wins;
+use link_site::clear_link_site;
 
 /// Subdirectory of the durable state dir holding Claude Code's transcripts.
 const PROJECTS_DIR: &str = "projects";
@@ -201,54 +203,18 @@ pub(crate) fn migrate_stranded_projects(
     let target = state_dir.join(PROJECTS_DIR);
     let mut folded = 0usize;
     for src in stranded_projects_dirs(adapter_root, state_dir) {
-        move_dir_newest_wins(&src, &target)
+        let skipped = move_dir_newest_wins(&src, &target)
             .with_context(|| format!("folding stranded transcripts from {}", src.display()))?;
+        if !skipped.is_empty() {
+            tracing::warn!(
+                "{} entries stay in {}, which the fold does not move",
+                skipped.len(),
+                src.display()
+            );
+        }
         folded = folded.saturating_add(1);
     }
     Ok(folded)
-}
-
-/// Free the link site, returning whether a link should now be created.
-///
-/// `Ok(false)` means "nothing to do" — either the link is already correct, or the
-/// path is something we deliberately refuse to replace.
-fn clear_link_site(link: &Path, target: &Path) -> anyhow::Result<bool> {
-    let file_type = match std::fs::symlink_metadata(link) {
-        Ok(md) => md.file_type(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(e) => return Err(anyhow::anyhow!("inspecting {}: {e}", link.display())),
-    };
-    if file_type.is_symlink() {
-        if std::fs::read_link(link).is_ok_and(|dest| dest == target) {
-            return Ok(false);
-        }
-        std::fs::remove_file(link)
-            .with_context(|| format!("replacing stale link {}", link.display()))?;
-        return Ok(true);
-    }
-    if file_type.is_dir() {
-        move_dir_newest_wins(link, target)?;
-        // Deliberately not remove_dir_all: Claude Code writes into this directory
-        // while the session runs, so anything it created between the fold above
-        // and this call would be destroyed rather than inherited. Prune the empty
-        // skeleton the fold left, then require the directory itself to be empty —
-        // if it isn't, new transcripts landed mid-swap, so leave everything alone
-        // and let the next export fold them in.
-        crate::materialize::prune_empty_dirs(link)?;
-        if let Err(e) = std::fs::remove_dir(link) {
-            tracing::warn!(
-                "{} refilled during the swap ({e}); leaving it for the next export",
-                link.display()
-            );
-            return Ok(false);
-        }
-        return Ok(true);
-    }
-    tracing::warn!(
-        "{} is a regular file, not Claude Code's transcript dir — leaving it alone",
-        link.display()
-    );
-    Ok(false)
 }
 
 /// Attach the durable store to the config dir.

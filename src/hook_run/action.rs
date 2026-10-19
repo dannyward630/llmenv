@@ -7,7 +7,13 @@ use tracing::{debug, error};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::{BundleRecallQuery, TagRecallQuery};
 
+mod records;
 mod response;
+
+pub(crate) use records::split_recall_records;
+#[cfg(test)]
+use records::{MAX_TOPIC_CHARS, is_record_start};
+use records::{SCOPE_CONTEXT_TOPIC, without_unscoped_records};
 use response::strip_advisory;
 
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
@@ -180,7 +186,7 @@ impl Action {
                 args
             }
             Action::Store => {
-                let mut args = json!({ "content": chunk, "topic": "llmenv-scope-context" });
+                let mut args = json!({ "content": chunk, "topic": SCOPE_CONTEXT_TOPIC });
                 if let Some(mtyp) = parse_type_marker(chunk) {
                     args["type"] = json!(mtyp);
                 }
@@ -192,12 +198,8 @@ impl Action {
         }
     }
 
-    /// Execute the action: call the tool and return its text result.
-    ///
-    /// # Errors
-    /// Propagates any client/network error from `call_tool`.
-    /// Whether this recall searches every project. A fetched page belongs to the project that
-    /// fetched it, so such a recall leaves fetched pages out (#2911).
+    /// Whether this recall searches every project. Such a recall leaves out the records that
+    /// belong to one project but carry no project (see [`without_unscoped_records`]).
     fn recalls_all_projects(&self) -> bool {
         match self {
             Action::Recall(project) => project.is_empty(),
@@ -207,6 +209,10 @@ impl Action {
         }
     }
 
+    /// Execute the action: call the tool and return its text result.
+    ///
+    /// # Errors
+    /// Propagates any client/network error from `call_tool`.
     pub async fn run(
         &self,
         client: &McpHttpClient,
@@ -220,7 +226,7 @@ impl Action {
             .map(|text| {
                 let text = strip_advisory(&text);
                 if self.recalls_all_projects() {
-                    crate::hook_run::web_fetch::without_web_pages(&text)
+                    without_unscoped_records(&text)
                 } else {
                     text
                 }
@@ -230,46 +236,6 @@ impl Action {
                 e
             })
     }
-}
-
-/// Longest topic, in characters, that a record's first line may carry.
-const MAX_TOPIC_CHARS: usize = 200;
-
-/// Whether `line` opens an ICM recall record: `[<topic>] <text>`.
-///
-/// Phases: the line starts with `[`; the first `]` ends the topic; the topic has 1 to
-/// [`MAX_TOPIC_CHARS`] characters; a space follows the `]`.
-fn is_record_start(line: &str) -> bool {
-    let Some(after_open) = line.strip_prefix('[') else {
-        return false;
-    };
-    let Some((topic, after_topic)) = after_open.split_once(']') else {
-        return false;
-    };
-    (1..=MAX_TOPIC_CHARS).contains(&topic.chars().count()) && after_topic.starts_with(' ')
-}
-
-/// Split one recall action's text into ICM records, so a byte budget can keep
-/// whole records and drop the rest (#2159).
-///
-/// A record starts at a `[<topic>] ` line and runs to the next such line. Lines
-/// before the first record form a record of their own. Text with no record
-/// line is one record, so a change to ICM's format degrades to per-action
-/// behavior and never loses text. Each record has trailing whitespace removed,
-/// and empty records are dropped.
-pub(crate) fn split_recall_records(text: &str) -> Vec<String> {
-    let mut records: Vec<Vec<&str>> = Vec::new();
-    for line in text.lines() {
-        match records.last_mut() {
-            Some(current) if !is_record_start(line) => current.push(line),
-            _ => records.push(vec![line]),
-        }
-    }
-    records
-        .into_iter()
-        .map(|lines| lines.join("\n").trim_end().to_string())
-        .filter(|record| !record.is_empty())
-        .collect()
 }
 
 #[cfg(test)]
@@ -533,7 +499,7 @@ mod tests {
         // icm_memory_store's schema requires "topic" alongside "content"; a
         // call missing it fails server-side with "missing required field: topic".
         let args = Action::Store.arguments("query", "chunk");
-        assert_eq!(args["topic"], serde_json::json!("llmenv-scope-context"));
+        assert_eq!(args["topic"], serde_json::json!(SCOPE_CONTEXT_TOPIC));
     }
 
     #[test]

@@ -114,7 +114,7 @@ pub(crate) fn list() -> anyhow::Result<()> {
 /// a permission error as "no snapshot" — which would then overwrite an existing
 /// baseline with the current state and silently skip the diff.
 fn read_or_init_snapshot(snapshot_path: &Path, current: &str) -> anyhow::Result<Option<String>> {
-    match std::fs::read_to_string(snapshot_path) {
+    match crate::paths::bounded::state_text_io(snapshot_path) {
         Ok(previous) => Ok(Some(previous)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             crate::paths::write_owner_only_atomic(snapshot_path, current.as_bytes())?;

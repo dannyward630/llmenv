@@ -9,7 +9,8 @@ pub(super) const DEFAULT_DETECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Run a scope-detection command for at most `timeout` and capture its stdout.
 ///
-/// Returns `None` on spawn error, timeout, non-zero exit, or non-UTF-8 output. These
+/// Returns `None` when `program` is not in an absolute `PATH` folder, and on spawn error,
+/// timeout, non-zero exit, or non-UTF-8 output. These
 /// detectors run on every shell prompt, so a failure is intentionally silent at
 /// the return value (→ the scope simply doesn't match); the `tracing::debug!`
 /// keeps the cause recoverable under `RUST_LOG=debug` without spamming normal
@@ -22,7 +23,16 @@ pub(super) fn capture_stdout(
     args: &[&str],
     timeout: Duration,
 ) -> Option<String> {
-    let mut cmd = std::process::Command::new(program);
+    // A spawn by bare name searches relative PATH folders too, and the working folder can be a
+    // cloned repository that holds a planted copy (#2948).
+    let path = match llmenv_paths::program::resolve_program(program) {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::debug!("{label}: {e:#}");
+            return None;
+        }
+    };
+    let mut cmd = std::process::Command::new(path);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -72,5 +82,21 @@ mod tests {
     fn capture_stdout_returns_the_output_of_a_command_that_answers() {
         let out = capture_stdout("test", "/bin/echo", &["hi"], DEFAULT_DETECT_TIMEOUT);
         assert_eq!(out.as_deref(), Some("hi\n"));
+    }
+
+    /// A bare name runs the copy in an absolute PATH folder. `find_on_path` skips relative
+    /// folders, as its own tests show (#2948).
+    #[cfg(unix)]
+    #[test]
+    fn capture_stdout_finds_a_bare_name_on_the_absolute_path() {
+        let out = capture_stdout("test", "echo", &["hi"], DEFAULT_DETECT_TIMEOUT);
+        assert_eq!(out.as_deref(), Some("hi\n"));
+        let missing = capture_stdout(
+            "test",
+            "llmenv-no-such-program-2948",
+            &[],
+            DEFAULT_DETECT_TIMEOUT,
+        );
+        assert_eq!(missing, None);
     }
 }

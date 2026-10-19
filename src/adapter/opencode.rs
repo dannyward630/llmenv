@@ -12,12 +12,21 @@ use crate::merge::MergedManifest;
 /// cache dir and exports `OPENCODE_CONFIG_DIR` so opencode discovers them.
 ///
 /// Skills use the claude-compatible `SKILL.md` format opencode reads natively.
-/// Hooks are bridged via a generated `plugin/llmenv.js` shim (§3).
+/// Hooks are bridged by the `plugin/llmenv.js` plugin and its `plugin/llmenv-hooks.json` table.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpencodeAdapter;
 
+mod hook_bridge;
+mod permissions;
+mod translate;
+#[cfg(test)]
+use translate::{OPENCODE_AGENT_KEYS, dropped_agent_keys, split_frontmatter};
+use translate::{translate_agent_md, translate_command_md};
+
 const OPENCODE_JSON_FILE: &str = "opencode.json";
 const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
+/// The background-server settings that opencode reads from its config folder.
+const OPENCODE_SERVICE_FILE: &str = "service.json";
 
 // ── Typed output structs for opencode.json ──
 
@@ -75,9 +84,9 @@ struct OpencodeConfig {
     /// Paths to instruction files.
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<Vec<String>>,
-    /// Permission rules — per-tool pattern→action maps.
+    /// Permission rules, in the order opencode evaluates them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    permission: Option<BTreeMap<String, PermissionValue>>,
+    permissions: Option<Vec<permissions::Rule>>,
     /// Custom/self-hosted model provider endpoints, keyed by provider id. Kept
     /// as Value because the block goes through a `native_model_providers`
     /// overlay after construction (same reason as `mcp`).
@@ -182,19 +191,6 @@ struct LspServerEntry {
     init_options: Option<serde_json::Value>,
 }
 
-/// A permission value — either a bare action string (when the tool has only
-/// a wildcard pattern covering all inputs) or a pattern→action map (when the
-/// tool has specific input patterns with distinct actions).
-#[derive(serde::Serialize, JsonSchema)]
-#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
-#[serde(untagged)]
-enum PermissionValue {
-    /// Single action covering all patterns (e.g. `"allow"`).
-    Simple(String),
-    /// Mapping from input patterns to actions (e.g. `{"echo *": "allow", "rm *": "deny"}`).
-    PatternMap(BTreeMap<String, String>),
-}
-
 /// opencode supports exactly these hook events via its JS plugin API.
 /// See spec §3 for the event mapping.
 const SUPPORTED_HOOK_EVENTS: &[&str] = &[
@@ -205,123 +201,6 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[
     "PostToolUse",
     "Stop",
 ];
-
-/// Template for `plugin/llmenv.js` — a self-contained ES module bridging
-/// opencode's JS plugin API to llmenv's hook-run subprocess calls.
-/// `${HOOK_TABLE}` is replaced at render time with a JSON array of
-/// `{ event, opencode, commands: [{command, timeout}] }` entries.
-const SHIM_TEMPLATE: &str = r#"// llmenv hook bridge for opencode — auto-generated, do not edit.
-const HOOK_TABLE = ${HOOK_TABLE};
-
-let sessionContext = null;
-
-export default {
-  id: "llmenv-hooks",
-  name: "llmenv",
-  dispose() {
-    runHooks("SessionEnd", null);
-  },
-  async event(input) {
-    const event = input.event;
-    if (event.event === "session.created") {
-      sessionContext = await runHooks("SessionStart", null);
-    } else if (event.event === "session.idle") {
-      runHooks("Stop", null);
-    } else if (event.event === "session.deleted") {
-      runHooks("SessionEnd", null);
-    }
-  },
-  async "chat.message"(input, output) {
-    const ctx = await runHooks("UserPromptSubmit", null);
-    if (ctx && output.message && output.message.content && Array.isArray(output.message.content)) {
-      output.message.content.push({ type: "text", text: ctx });
-    }
-    if (sessionContext && output.message && output.message.content && Array.isArray(output.message.content)) {
-      output.message.content.push({ type: "text", text: `Additional context: ${sessionContext}` });
-      sessionContext = null;
-    }
-  },
-  async "tool.execute.before"(input, output) {
-    const ctx = await runHooks("PreToolUse", {
-      tool_name: input.tool,
-      tool_input: output?.args || {},
-    });
-    if (ctx === "__LLMENV_BLOCK__") {
-      throw new Error("Blocked by llmenv hook");
-    }
-  },
-  async "tool.execute.after"(input, output) {
-    runHooks("PostToolUse", {
-      tool_name: input.tool,
-      tool_input: input.args || {},
-      tool_response: output?.output ?? null,
-    });
-  },
-};
-
-async function runHooks(event, extra) {
-  const entries = HOOK_TABLE.filter(e => e.event === event);
-  let collected = "";
-  for (const entry of entries) {
-    for (const hk of entry.commands) {
-      try {
-        const result = await spawnHook(event, hk.command, hk.timeout, extra);
-        if (result.blocked) {
-          if (event === "PreToolUse") return "__LLMENV_BLOCK__";
-          continue;
-        }
-        if (result.stderr) {
-          console.error(`llmenv hook ${event} ('${hk.command}') stderr:`, result.stderr);
-        }
-        if (result.stdout) {
-          try {
-            const parsed = JSON.parse(result.stdout);
-            if (parsed?.hookSpecificOutput?.additionalContext) {
-              collected += parsed.hookSpecificOutput.additionalContext + "\n";
-            } else {
-              collected += result.stdout + "\n";
-            }
-          } catch {
-            collected += result.stdout + "\n";
-          }
-        }
-      } catch (e) {
-        console.error(`llmenv hook ${event} failed:`, e);
-      }
-    }
-  }
-  return collected || null;
-}
-
-async function spawnHook(event, command, timeoutMs, extra) {
-  const payload = {
-    hook_event_name: event,
-    session_id: process.env.OPENCODE_SESSION_ID || "",
-    cwd: process.cwd(),
-    ...(extra || {}),
-  };
-  const { spawn } = await import("node:child_process");
-  return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", command], {
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: timeoutMs || 30000,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => { stdout += d.toString(); });
-    child.stderr.on("data", (d) => { stderr += d.toString(); });
-    child.on("close", (code) => {
-      resolve({
-        blocked: code === 2 && event === "PreToolUse",
-        stdout: stdout.trim() || null,
-        stderr: stderr.trim() || null,
-      });
-    });
-    child.stdin.write(JSON.stringify(payload));
-    child.stdin.end();
-  });
-}
-"#;
 
 // ── Plugin hooks manifest deserialization ──
 
@@ -360,13 +239,16 @@ fn parse_plugin_hooks(
     // #915: `Ok(None)` means a manifest of this name is absent — the caller
     // tries the next candidate name. A real read error (e.g. permission
     // denied) propagates rather than being masked by a caller `exists()` guard.
-    let source = match std::fs::read_to_string(hooks_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("reading {}", hooks_path.display())));
-        }
-    };
+    let source =
+        match llmenv_paths::read_text_bounded(hooks_path, crate::paths::bounded::MAX_ASSET_BYTES) {
+            Ok(Some(s)) => s,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("reading {}", hooks_path.display()))
+                );
+            }
+        };
     let manifest: PluginHooksManifest = serde_json::from_str(&source)?;
 
     let mut hooks = Vec::new();
@@ -423,11 +305,12 @@ fn parse_plugin_mcp_entries(
     // #915: a missing file means the plugin ships no MCP config — nothing to
     // translate. Other read errors (e.g. permission denied) propagate rather
     // than being masked by a caller `exists()` guard.
-    let content = match std::fs::read_to_string(mcp_json_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::Map::new());
-        }
+    let content = match llmenv_paths::read_text_bounded(
+        mcp_json_path,
+        crate::paths::bounded::MAX_ASSET_BYTES,
+    ) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(serde_json::Map::new()),
         Err(e) => {
             return Err(anyhow::anyhow!(
                 "plugin '{plugin_name}': failed to read {mcp_json_path:?}: {e}"
@@ -512,12 +395,21 @@ impl AgentAdapter for OpencodeAdapter {
     fn env_vars(
         &self,
         cache_dir: &Path,
-        _state_dir: &Path,
+        state_dir: &Path,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
-        Ok(vec![("OPENCODE_CONFIG_DIR".into(), dir.to_owned())])
+        let (_, temp_vars) = crate::adapter::temp_dir::temp_dir_vars(state_dir)?;
+        // opencode 2.x also loads the skills in `~/.claude` and a project `.claude` folder on
+        // every session, outside llmenv's scope rules. This variable turns those roots off (#2843).
+        Ok(vec![
+            ("OPENCODE_CONFIG_DIR".into(), dir.to_owned()),
+            ("OPENCODE_DISABLE_CLAUDE_CODE".into(), "1".into()),
+        ]
+        .into_iter()
+        .chain(temp_vars)
+        .collect())
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -535,7 +427,10 @@ impl AgentAdapter for OpencodeAdapter {
             owned.push(PathBuf::from("AGENTS.md"));
         }
 
-        // 2. rules/*.md — written verbatim; paths collected for instructions[]
+        // 2. rules/*.md — written verbatim; paths collected for instructions[].
+        // opencode 2.x looks for a relative entry upward from the session folder, not in the
+        // config folder, so each entry is an absolute path (#2842).
+        let out_abs = std::path::absolute(out)?;
         let mut instructions: Vec<String> = Vec::new();
         for r in &manifest.rules {
             if crate::paths::is_unsafe_join_target(r.rel.to_string_lossy().as_ref()) {
@@ -547,7 +442,7 @@ impl AgentAdapter for OpencodeAdapter {
                 std::fs::create_dir_all(parent)?;
             }
             crate::paths::write_owner_only(&dest, r.raw.as_bytes())?;
-            instructions.push(r.rel.to_string_lossy().into_owned());
+            instructions.push(out_abs.join(&r.rel).to_string_lossy().into_owned());
             owned.push(r.rel.clone());
         }
 
@@ -614,27 +509,22 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap::new();
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
         let mut plugin_hooks: Vec<crate::config::Hook> = Vec::new();
-        // Names of plugins that provide native opencode support (e.g. a
-        // TypeScript plugin registered via "plugin" key in opencode.json).
-        // Known: context-mode ships a native opencode plugin, but any plugin
-        // can declare the same support — detection isn't limited to that name.
-        let mut native_opencode_plugins: Vec<String> = Vec::new();
-
         // Hoisted: command/ dir needed by plugin and bundle sections below.
         std::fs::create_dir_all(out.join("command"))?;
 
         for (plugin, payload, plugin_skills) in &plugin_payloads {
-            // Does this plugin provide native opencode support (e.g. a
-            // TypeScript plugin registered via "plugin" key in opencode.json)?
-            // Known: context-mode ships a native opencode plugin.
-            let is_native_opencode = plugin.plugin == "context-mode";
-
-            // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON). Skip for native
-            //     opencode plugins — they register their own tools internally
-            //     and including MCP entries would duplicate them.
-            if is_native_opencode {
-                native_opencode_plugins.push(plugin.plugin.clone());
-            } else {
+            // context-mode's native opencode plugin exports the 1.x shape, which opencode 2.0
+            // refuses to load (#2840), so it runs like any other plugin: its MCP server and its
+            // hooks go through the llmenv bridge.
+            if plugin.plugin == crate::config::CONTEXT_MODE_PLUGIN {
+                eprintln!(
+                    "warning: context-mode has no opencode 2.x plugin yet, so opencode gets its \
+                     MCP server and hooks only. Fix: none needed; this changes when context-mode \
+                     ships a 2.x build"
+                );
+            }
+            // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON).
+            {
                 let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
                 // #915: a missing file yields Ok(empty); only a real read/parse
                 // error warns, instead of an exists() guard masking permission
@@ -664,8 +554,8 @@ impl AgentAdapter for OpencodeAdapter {
                             path.display(),
                         )
                     })?;
-                    let source = std::fs::read_to_string(&path)?;
-                    let translated = translate_command_md(&source, name)?;
+                    let source = crate::paths::bounded::asset_text(&path)?;
+                    let translated = translate_command_md(&source)?;
                     let out_name = format!("command/__plugin_{name}.md");
                     crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                     plugin_skill_paths.push(PathBuf::from(&out_name));
@@ -688,9 +578,12 @@ impl AgentAdapter for OpencodeAdapter {
                             path.display(),
                         )
                     })?;
-                    let source = std::fs::read_to_string(&path)?;
-                    let translated = translate_agent_md(&source, name)?;
-                    let out_name = format!("command/__plugin_agent_{name}.md");
+                    let source = crate::paths::bounded::asset_text(&path)?;
+                    let translated = translate_agent_md(&source)?;
+                    // opencode 2.x reads agents from `agents/`; a file in `command/` is a slash
+                    // command (#2844).
+                    let out_name = format!("agents/{name}.md");
+                    std::fs::create_dir_all(out.join("agents"))?;
                     crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                     plugin_skill_paths.push(PathBuf::from(&out_name));
                 }
@@ -703,8 +596,7 @@ impl AgentAdapter for OpencodeAdapter {
             plugin_skill_paths.extend(paths);
 
             // 4e. Plugin hooks from hooks/ dir — translate to top-level hooks.
-            //     Skip for native opencode plugins — they handle hooks internally.
-            if !is_native_opencode {
+            {
                 let hooks_dir = payload.join("hooks");
                 for manifest_name in ["hooks.json", "claude-codex-hooks.json"] {
                     let hooks_path = hooks_dir.join(manifest_name);
@@ -764,15 +656,6 @@ impl AgentAdapter for OpencodeAdapter {
         crate::adapter::skills::validate_skills(out)?;
 
         // 6. Build opencode.json with what we have so far
-        // Register native opencode TypeScript plugins (e.g. context-mode) that
-        // ship their own hook/tool implementations independent of the llmenv JS
-        // shim. These are resolved by opencode's plugin system at startup.
-        let config_plugin = if native_opencode_plugins.is_empty() {
-            None
-        } else {
-            Some(native_opencode_plugins)
-        };
-
         // 7. MCP servers
         let config_mcp = {
             if !manifest.mcps.is_empty()
@@ -887,177 +770,11 @@ impl AgentAdapter for OpencodeAdapter {
             None
         };
 
-        // 9. Permissions — opencode uses `permission` with per-tool pattern→action maps.
-        //     Format: { "bash": { "otool *": "allow", "rm *": "deny" } }
-        let perms = &manifest.capabilities.permissions;
-        let native_perms = manifest.capabilities.native_permissions.get("opencode");
-
-        let mut permission_map: std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, String>,
-        > = std::collections::BTreeMap::new();
-
-        // Convert a PermissionRule into (opencode_tool, pattern) pairs.
-        // Rules with a pattern use it; rules with paths use each path as a pattern;
-        // bare rules (no pattern, no paths) wildcard-match everything for the tool.
-        // Empty when the tool has no opencode equivalent (see opencode_tool_name).
-        //
-        // #1371: rendering is silent about an unmapped tool. It used to `eprintln!`
-        // here — once per *rule*, so a repeated tool name warned repeatedly, in the
-        // middle of the progress output where it read as though the previous
-        // adapter had failed. The two cases it conflated are reported properly
-        // elsewhere now: a name outside the neutral vocabulary is a config error
-        // that `cli::warn_dead_config` reports once, and a known tool that this
-        // engine has no analog for is an adapter particularity documented in
-        // `website/docs/engines.md` and listed by `doctor` — not something to
-        // reprint on every shell prompt.
-        fn rule_to_patterns(rule: &crate::config::PermissionRule) -> Vec<(String, String)> {
-            let Some(tool) = opencode_tool_name(&rule.tool) else {
-                return Vec::new();
-            };
-            if let Some(pat) = &rule.pattern {
-                vec![(tool.to_string(), pat.clone())]
-            } else if !rule.paths.is_empty() {
-                rule.paths
-                    .iter()
-                    .map(|p| (tool.to_string(), p.clone()))
-                    .collect()
-            } else {
-                vec![(tool.to_string(), "*".to_string())]
-            }
-        }
-
-        // Parse a native string like "bash(otool *)" or bare "bash" back into
-        // (opencode_tool, pattern). A bare tool name wildcard-matches everything.
-        // Anything else missing a balanced, non-empty `(pattern)` is a malformed
-        // rule and must error rather than silently fall back to a wildcard —
-        // a typo like "bash(" would otherwise wildcard-allow all bash commands.
-        //
-        // #1326 (security-audit): unlike `rule_to_patterns`, this does NOT run
-        // the tool portion through `opencode_tool_name`. `native_permissions.
-        // opencode` is the escape hatch for authoring opencode's *own* native
-        // vocabulary directly — its own permission keys (`lsp`, `skill`,
-        // `question`, `external_directory`, `doom_loop`, or a bare `"*"`
-        // deny-all baseline) have no neutral equivalent at all, so routing
-        // them through the neutral-name allowlist silently dropped every
-        // native rule that wasn't one of the twelve mapped PascalCase names
-        // — including a plain lowercase `deny: ["bash(rm -rf *)"]`, turning a
-        // working deny into a prompt. Only lowercase for forgiving case, same
-        // as before this fix.
-        // A permission key with whitespace in it can never match a tool name,
-        // so it would render as a rule that silently does nothing (#1328).
-        fn reject_spaced_tool(tool: &str, rule: &str, action: &str) -> anyhow::Result<()> {
-            anyhow::ensure!(
-                !tool.contains(char::is_whitespace),
-                "native_permissions.opencode.{action}: rule {rule:?} has whitespace inside its \
-                 tool name ({tool:?}) — opencode would never match it against a tool, so the \
-                 rule could not take effect. Write the tool name without spaces."
-            );
-            Ok(())
-        }
-
-        fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
-            match (s.find('('), s.rfind(')')) {
-                (None, None) => {
-                    let tool = s.trim().to_ascii_lowercase();
-                    anyhow::ensure!(
-                        !tool.is_empty(),
-                        "native_permissions.opencode.{action}: empty rule string"
-                    );
-                    reject_spaced_tool(&tool, s, action)?;
-                    Ok((tool, "*".to_string()))
-                }
-                (Some(start), Some(end)) if start < end => {
-                    // #1328: an untrimmed name renders a key like `"webfetch "`,
-                    // which opencode's rest-record accepts but never matches
-                    // against the real tool — a permanently inert rule that also
-                    // slips past the action-only check.
-                    let tool = s[..start].trim().to_ascii_lowercase();
-                    let pattern = &s[start + 1..end];
-                    anyhow::ensure!(
-                        !tool.is_empty(),
-                        "native_permissions.opencode.{action}: rule {s:?} has no tool name before '('"
-                    );
-                    reject_spaced_tool(&tool, s, action)?;
-                    anyhow::ensure!(
-                        !pattern.is_empty(),
-                        "native_permissions.opencode.{action}: rule {s:?} has an empty pattern '()'"
-                    );
-                    Ok((tool, pattern.to_string()))
-                }
-                _ => anyhow::bail!(
-                    "native_permissions.opencode.{action}: rule {s:?} has unbalanced parentheses"
-                ),
-            }
-        }
-
-        // Insert (tool, pattern) pairs into the per-tool map.
-        // Deny overrides ask overrides allow for the same tool+pattern
-        // (last-write-wins).
-        fn insert_patterns(
-            map: &mut std::collections::BTreeMap<
-                String,
-                std::collections::BTreeMap<String, String>,
-            >,
-            iter: impl Iterator<Item = (String, String)>,
-            action: &str,
-        ) {
-            for (tool, pattern) in iter {
-                map.entry(tool)
-                    .or_default()
-                    .insert(pattern, action.to_string());
-            }
-        }
-
-        // Insertion order: interleaved by action tier (allow, then ask, then
-        // deny), structured before native within each tier. This guarantees
-        // deny always wins for a given tool+pattern regardless of which
-        // source (structured config or native_permissions) wrote it — the
-        // deny tier is inserted last across both sources. A native wildcard
-        // `*` for a tool still shadows all structured patterns for that tool
-        // within the same tier; use one category (structured OR native) per
-        // tool to avoid that shadowing.
-        for (action, structured, native) in [
-            ("allow", &perms.allow, native_perms.map(|n| &n.allow)),
-            ("ask", &perms.ask, native_perms.map(|n| &n.ask)),
-            ("deny", &perms.deny, native_perms.map(|n| &n.deny)),
-        ] {
-            insert_patterns(
-                &mut permission_map,
-                structured.iter().flat_map(rule_to_patterns),
-                action,
-            );
-            if let Some(n) = native {
-                let native_patterns: Vec<(String, String)> = n
-                    .iter()
-                    .map(|s| parse_native_rule(s, action))
-                    .collect::<anyhow::Result<_>>()?;
-                insert_patterns(&mut permission_map, native_patterns.into_iter(), action);
-            }
-        }
-
-        let config_permission = if !permission_map.is_empty() {
-            check_rule_ordering(&permission_map)?;
-            let mut perm_entries: BTreeMap<String, PermissionValue> = BTreeMap::new();
-            for (tool, patterns) in &permission_map {
-                check_permission_patterns(tool, patterns)?;
-                // Bare tool (single wildcard pattern) -> emit action string directly.
-                // Tool with specific patterns -> emit pattern->action object.
-                if patterns.len() == 1 && patterns.contains_key("*") {
-                    perm_entries
-                        .insert(tool.clone(), PermissionValue::Simple(patterns["*"].clone()));
-                } else {
-                    let mut pmap: BTreeMap<String, String> = BTreeMap::new();
-                    for (pattern, action) in patterns {
-                        pmap.insert(pattern.clone(), action.clone());
-                    }
-                    perm_entries.insert(tool.clone(), PermissionValue::PatternMap(pmap));
-                }
-            }
-            Some(perm_entries)
-        } else {
-            None
-        };
+        // 9. Permissions — an ordered rule list; opencode applies the last rule that matches.
+        let config_permissions = permissions::render(
+            &manifest.capabilities.permissions,
+            manifest.capabilities.native_permissions.get("opencode"),
+        )?;
 
         // 9b. Model providers + default models.
         let config_provider = {
@@ -1082,6 +799,7 @@ impl AgentAdapter for OpencodeAdapter {
             "mcp",
             "lsp",
             "permission",
+            "permissions",
             "provider",
             "model",
             "small_model",
@@ -1090,12 +808,12 @@ impl AgentAdapter for OpencodeAdapter {
             super::reject_modeled_native_keys(native, OPENCODE_MODELED_KEYS, "opencode")?;
         }
         let config = OpencodeConfig {
-            plugin: config_plugin,
+            plugin: None,
             mcp: config_mcp,
             lsp: config_lsp,
             schema: format!("./{OPENCODE_SCHEMA_FILE}"),
             instructions: config_instructions,
-            permission: config_permission,
+            permissions: config_permissions,
             provider: config_provider,
             model: config_model,
             small_model: config_small_model,
@@ -1115,6 +833,12 @@ impl AgentAdapter for OpencodeAdapter {
         let out_path = out.join(OPENCODE_JSON_FILE);
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
         owned.push(PathBuf::from(OPENCODE_JSON_FILE));
+
+        // opencode 2.x clients attach to one shared background server, which can run with the
+        // config folder of another scope. `disabled` makes each client start a private server
+        // that has this environment, as `--standalone` does (#2845).
+        crate::paths::write_owner_only(&out.join(OPENCODE_SERVICE_FILE), br#"{"disabled":true}"#)?;
+        owned.push(PathBuf::from(OPENCODE_SERVICE_FILE));
 
         // Write JSON Schema sidecar.
         if let Some(schema) = self.config_schema() {
@@ -1156,24 +880,13 @@ impl AgentAdapter for OpencodeAdapter {
             .collect();
         all_hooks.extend(plugin_hooks);
 
-        let guards_index_repository = manifest
-            .mcps
-            .iter()
-            .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
-        // Same gate #980 gave Claude Code: a user who wants the tracker but
-        // still wants opencode's native todo list keeps `block_engine_task_tools`
-        // off and the redirect isn't registered.
-        let redirects_todowrite = manifest
-            .capabilities
-            .features
-            .as_ref()
-            .and_then(|f| f.task_tracker.as_ref())
-            .is_some_and(|t| t.enabled && t.block_engine_task_tools);
-        let shim_js = generate_shim_js(&all_hooks, guards_index_repository || redirects_todowrite)?;
-        let plugin_dir = out.join("plugin");
-        std::fs::create_dir_all(&plugin_dir)?;
-        crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
-        owned.push(PathBuf::from("plugin/llmenv.js"));
+        let mcp_servers: Vec<&str> = manifest.mcps.iter().map(|m| m.name.as_str()).collect();
+        owned.extend(hook_bridge::write(
+            out,
+            &all_hooks,
+            &hook_bridge::pre_tool_hook_tools(manifest),
+            &mcp_servers,
+        )?);
 
         // 12. Bundle-level commands/agents from manifest.files
         for (rel, abs) in &manifest.files {
@@ -1182,34 +895,29 @@ impl AgentAdapter for OpencodeAdapter {
             }
             let rel_str = rel.to_string_lossy();
             if rel_str.starts_with("commands/") && rel_str.ends_with(".md") {
-                let source = std::fs::read_to_string(abs).map_err(|e| {
-                    anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
+                let source = crate::paths::bounded::asset_text(abs).map_err(|e| {
+                    anyhow::anyhow!("failed to read bundle file '{}': {e:#}", rel.display())
                 })?;
-                let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "bundle command file '{}' has no valid file stem",
-                        rel.display(),
-                    )
-                })?;
-                let translated = translate_command_md(&source, name)?;
-                let out_name = format!("command/__bundle_{name}.md");
-                crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
-                owned.push(PathBuf::from(&out_name));
+                // The bundle copy at `rel` is already in a folder opencode reads, so the
+                // translation replaces it and the command is not listed two times (#2844).
+                let translated = translate_command_md(&source)?;
+                write_translated(out, rel, &translated)?;
+                owned.push(rel.clone());
             }
             if rel_str.starts_with("agents/") && rel_str.ends_with(".md") {
-                let source = std::fs::read_to_string(abs).map_err(|e| {
-                    anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
+                let source = crate::paths::bounded::asset_text(abs).map_err(|e| {
+                    anyhow::anyhow!("failed to read bundle file '{}': {e:#}", rel.display())
                 })?;
-                let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "bundle agent file '{}' has no valid file stem",
-                        rel.display(),
-                    )
-                })?;
-                let translated = translate_agent_md(&source, name)?;
-                let out_name = format!("command/__bundle_agent_{name}.md");
-                crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
-                owned.push(PathBuf::from(&out_name));
+                let translated = translate_agent_md(&source)?;
+                if owned.contains(rel) {
+                    eprintln!(
+                        "warning: bundle agent '{}' replaces the plugin agent of the same name \
+                         for opencode. Fix: rename one of the two agents",
+                        rel.display()
+                    );
+                }
+                write_translated(out, rel, &translated)?;
+                owned.push(rel.clone());
             }
         }
 
@@ -1222,8 +930,8 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String {
-        // The generated shim adds SessionStart context to the first message
-        // (`session.created` in SHIM_TEMPLATE).
+        // The plugin adds SessionStart context to every model request of the session, as a
+        // system part (`session.hook("context")` in `opencode/plugin.js`).
         super::emit_hook_context(
             hook_event_name,
             memory,
@@ -1231,517 +939,6 @@ impl AgentAdapter for OpencodeAdapter {
             super::SessionStartContext::Accepted,
         )
     }
-}
-
-/// Map a neutral permission-rule tool name (Claude Code's vocabulary —
-/// `Bash`, `Read`, `Write`, ...) to opencode's own permission config key.
-///
-/// #1326: source-verified against opencode's
-/// `packages/core/src/v1/config/permission.ts` schema — the real keys are
-/// `read, edit, glob, grep, list, bash, task, todowrite, webfetch,
-/// websearch, lsp, skill`, not a simple lowercase of the neutral name.
-/// `write`/`patch` are explicitly normalized to `edit`
-/// (`v1/config/migrate.ts`'s `normalizeAction`) — there is no separate
-/// opencode `write` or `multiedit` key — and the list-tool key is `list`,
-/// not `ls`.
-///
-/// Returns `None` for a neutral name with no confirmed opencode equivalent
-/// (e.g. `NotebookEdit`) rather than guessing at a lowercase pass-through —
-/// the design doc's own policy is "best-effort tool-name mapping; unknown
-/// names dropped with warning"
-/// (`docs/superpowers/specs/2026-07-10-opencode-adapter-design.md`), and
-/// silently emitting an unverified name would repeat exactly the mistake
-/// this fix corrects for `Write`/`MultiEdit`/`LS`.
-///
-/// #1371: the mapping itself now lives in [`crate::adapter::tools`] alongside
-/// crush's, because the two hand-written tables had drifted apart — this is the
-/// opencode column of that one table.
-fn opencode_tool_name(neutral: &str) -> Option<&'static str> {
-    crate::adapter::tools::opencode_key(neutral)
-}
-
-/// opencode permission keys typed as a bare `"ask"`/`"allow"`/`"deny"` string
-/// rather than the `Action | {pattern: action}` union every other key accepts.
-/// Rendering a pattern map for one of these fails opencode's schema decode, and
-/// its loader then discards the *entire* config file with no diagnostic (#1328).
-///
-/// Verified against `packages/core/src/v1/config/permission.ts` at opencode
-/// `ab7cbc808f61e062af20d9a9a838ae93ed8f940d` — these are exactly the keys
-/// declared `Schema.optional(Action)`. Listing a key that is no longer
-/// action-only only costs a spurious error; *missing* one brings back the
-/// silent whole-config discard, so re-check this list against that file when
-/// bumping the supported opencode version.
-const ACTION_ONLY_PERMISSION_KEYS: &[&str] = &[
-    "doom_loop",
-    "question",
-    "todowrite",
-    "webfetch",
-    "websearch",
-];
-
-/// Reject a pattern map opencode's schema cannot represent (#1328).
-///
-/// opencode discards the entire config file when any one key fails to decode,
-/// with no diagnostic, so this has to be a hard error rather than a warning.
-fn check_permission_patterns(
-    tool: &str,
-    patterns: &BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    if ACTION_ONLY_PERMISSION_KEYS.contains(&tool) {
-        let scoped: Vec<&str> = patterns
-            .keys()
-            .filter(|p| p.as_str() != "*")
-            .map(String::as_str)
-            .collect();
-        anyhow::ensure!(
-            scoped.is_empty(),
-            "opencode: permission key `{tool}` accepts only a bare \"allow\"/\"ask\"/\"deny\", \
-             not a pattern-scoped rule (got {scoped:?}). opencode discards the entire config \
-             file when any one key fails its schema, so this cannot be rendered. Drop the \
-             pattern/paths so the rule covers the whole tool."
-        );
-    }
-    Ok(())
-}
-
-/// Reject a rule pair whose rendered order inverts the user's intent.
-///
-/// opencode flattens *every* permission key into one ordered rule list, in the
-/// rendered JSON's key order (`v1/config/migrate.ts`'s `permissions()`), then
-/// resolves a request with `findLast` over it — wildcard-matching both the key
-/// against the tool name and the pattern against the resource
-/// (`permission.ts`'s `evaluate`). So the last rule that matches wins, and that
-/// is only what the user meant when it is the *narrower* of the two; otherwise
-/// the earlier rule silently stops applying where they overlap.
-///
-/// llmenv emits keys sorted and each key's patterns sorted, so iterating the
-/// map in order reproduces exactly the list opencode evaluates. Comparing
-/// across keys as well as within them is what makes a wildcard key (`*`,
-/// authored via `native_permissions.opencode`) participate — #1344; a per-key
-/// check never saw it against the concrete keys it shadows.
-///
-/// Only pairs with differing actions matter — when both say `deny`, whichever
-/// wins gives the same answer.
-fn check_rule_ordering(
-    permission_map: &BTreeMap<String, BTreeMap<String, String>>,
-) -> anyhow::Result<()> {
-    // (key, pattern, action) in rendered order — the order opencode sees.
-    let rules: Vec<(&str, &str, &str)> = permission_map
-        .iter()
-        .flat_map(|(tool, patterns)| {
-            patterns
-                .iter()
-                .map(move |(pattern, action)| (tool.as_str(), pattern.as_str(), action.as_str()))
-        })
-        .collect();
-
-    for (i, (early_tool, early_pat, early_action)) in rules.iter().enumerate() {
-        for (late_tool, late_pat, late_action) in rules.iter().skip(i + 1) {
-            let inverts = late_action != early_action
-                && patterns_overlap(early_tool, late_tool)
-                && patterns_overlap(early_pat, late_pat)
-                && !(pattern_subsumes(early_tool, late_tool)
-                    && pattern_subsumes(early_pat, late_pat));
-            if !inverts {
-                continue;
-            }
-            anyhow::bail!(
-                "opencode: permission rules {early} ({early_action}) and {late} ({late_action}) \
-                 both match some tool and input, and {late} sorts last so opencode applies it \
-                 wherever they overlap — {early} would not take effect there. {remedy}",
-                early = render_rule(early_tool, early_pat),
-                late = render_rule(late_tool, late_pat),
-                remedy = ordering_remedy(early_tool, early_pat, late_tool, late_pat),
-            );
-        }
-    }
-    Ok(())
-}
-
-/// How to rewrite an inverted pair so opencode resolves it as intended.
-///
-/// When the two rules sit on *different* permission keys the earlier one is
-/// almost always a wildcard key, and there is no way to narrow the later rule
-/// out of its way — opencode has no exclusion syntax and llmenv sorts the keys,
-/// so the user cannot reorder around it either. The fix that does work is to
-/// restate the earlier rule on the later rule's key, where it sorts after the
-/// broad pattern and wins.
-fn ordering_remedy(early_tool: &str, early_pat: &str, late_tool: &str, late_pat: &str) -> String {
-    if early_tool == late_tool {
-        return format!(
-            "Rewrite {late} so it only covers what {early} does not, or give the two the \
-             same action.",
-            late = render_rule(late_tool, late_pat),
-            early = render_rule(early_tool, early_pat),
-        );
-    }
-    format!(
-        "Move {early} onto the `{late_tool}` key so it sorts after {late} — e.g. \
-         `native_permissions.opencode` rule {moved} — or give the two the same action.",
-        early = render_rule(early_tool, early_pat),
-        late = render_rule(late_tool, late_pat),
-        moved = render_rule(late_tool, early_pat),
-    )
-}
-
-/// A rule in opencode's own `tool(pattern)` syntax.
-///
-/// That is the authoring syntax for `native_permissions.opencode`; a rule that
-/// came from `capabilities.permissions` is shown the same way, since this is
-/// how it lands in the generated config.
-fn render_rule(tool: &str, pattern: &str) -> String {
-    if pattern == "*" {
-        format!("`{tool}`")
-    } else {
-        format!("`{tool}({pattern})`")
-    }
-}
-
-/// True when some input matches both patterns.
-///
-/// Decides `L(a) ∩ L(b) ≠ ∅` exactly for opencode's `*`/`?` globs: `*` stands
-/// for any run of characters and `?` for exactly one, so two patterns share an
-/// input when their symbols can be aligned. A pattern ending in `" *"` also
-/// matches its bare prefix, so each side is tested in both spellings.
-fn patterns_overlap(a: &str, b: &str) -> bool {
-    fn spellings(pattern: &str) -> Vec<String> {
-        let pattern = pattern.replace('\\', "/");
-        match pattern.strip_suffix(" *") {
-            Some(prefix) => vec![prefix.to_string(), pattern.clone()],
-            None => vec![pattern],
-        }
-    }
-    let (a, b) = (spellings(a), spellings(b));
-    a.iter().any(|x| b.iter().any(|y| globs_intersect(x, y)))
-}
-
-/// `L(a) ∩ L(b) ≠ ∅` for two anchored `*`/`?` globs, by dynamic programming
-/// over suffix pairs.
-fn globs_intersect(a: &str, b: &str) -> bool {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    // reachable[i][j] — some string is generated by both `a[i..]` and `b[j..]`.
-    let rest_all_stars = |p: &[char]| p.iter().all(|c| *c == '*');
-    let mut reachable = vec![vec![false; b.len() + 1]; a.len() + 1];
-    for i in (0..=a.len()).rev() {
-        for j in (0..=b.len()).rev() {
-            reachable[i][j] = match (a.get(i), b.get(j)) {
-                (None, None) => true,
-                // One side is exhausted: the other must be able to match "".
-                (None, Some(_)) => rest_all_stars(&b[j..]),
-                (Some(_), None) => rest_all_stars(&a[i..]),
-                // A `*` either matches nothing here, or absorbs one more
-                // character that the other side also has to produce.
-                (Some('*'), _) => reachable[i + 1][j] || reachable[i][j + 1],
-                (_, Some('*')) => reachable[i][j + 1] || reachable[i + 1][j],
-                // Otherwise both sides consume exactly one character, which
-                // must be compatible.
-                (Some(x), Some(y)) => (*x == '?' || *y == '?' || x == y) && reachable[i + 1][j + 1],
-            };
-        }
-    }
-    reachable[0][0]
-}
-
-/// True when `broad` appears to match everything `narrow` matches.
-///
-/// Substitutes a sentinel run for each of `narrow`'s `*` so it can be tested as
-/// a concrete string. One length is not enough: a run of `?` in `broad` can
-/// stand in for a short run, and a `*` in `narrow` also stands for *no*
-/// characters at all, which a `broad` like `"*?"` cannot match. So `broad` has
-/// to match every probe length — zero, one, and past `broad`'s own `?` count.
-///
-/// This is a witness test, not a containment proof. It is used only to *exempt*
-/// a pattern pair from the ordering check, so a false negative just costs a
-/// spurious error while the rendered config stays correct — whereas a false
-/// positive would silently skip a real inversion, which is what the probe
-/// lengths guard against.
-fn pattern_subsumes(broad: &str, narrow: &str) -> bool {
-    // U+0001 can't appear in a shell command or URL, so no literal character in
-    // `broad` can match it.
-    const SENTINEL: char = '\u{1}';
-    let widest = broad.chars().filter(|c| *c == '?').count() + 1;
-    [0, 1, widest].iter().all(|run| {
-        let mut witness = String::new();
-        for c in narrow.chars() {
-            match c {
-                '*' => witness.extend(std::iter::repeat_n(SENTINEL, *run)),
-                '?' => witness.push(SENTINEL),
-                other => witness.push(other),
-            }
-        }
-        wildcard_matches(broad, &witness)
-    })
-}
-
-/// Match `input` against an opencode permission pattern.
-///
-/// Mirrors opencode's `Wildcard.match` (`packages/core/src/util/wildcard.ts`):
-/// `*` spans any run of characters, `?` spans exactly one, backslashes
-/// normalize to `/`, and a pattern ending in `" *"` also matches the bare
-/// prefix (so `"git *"` covers a plain `"git"`).
-fn wildcard_matches(pattern: &str, input: &str) -> bool {
-    let normalized: Vec<char> = input.replace('\\', "/").chars().collect();
-    let pattern = pattern.replace('\\', "/");
-    if let Some(prefix) = pattern.strip_suffix(" *")
-        && glob_matches(prefix, &normalized)
-    {
-        return true;
-    }
-    glob_matches(&pattern, &normalized)
-}
-
-/// Anchored glob match over `*` and `?`, backtracking on the most recent `*`.
-fn glob_matches(pattern: &str, input: &[char]) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let (mut p, mut i) = (0_usize, 0_usize);
-    let (mut star, mut resume) = (None, 0_usize);
-    while i < input.len() {
-        match pat.get(p) {
-            Some('*') => {
-                star = Some(p);
-                resume = i;
-                p += 1;
-            }
-            Some('?') => {
-                p += 1;
-                i += 1;
-            }
-            Some(c) if input.get(i) == Some(c) => {
-                p += 1;
-                i += 1;
-            }
-            _ => match star {
-                Some(s) => {
-                    p = s + 1;
-                    resume += 1;
-                    i = resume;
-                }
-                None => return false,
-            },
-        }
-    }
-    pat.iter().skip(p).all(|c| *c == '*')
-}
-
-/// Build the JS source for `plugin/llmenv.js` — the hook bridge shim.
-///
-/// Each user-defined hook is mapped to its opencode event and bundled with
-/// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
-/// that always run on `SessionStart` / `PreToolUse`.
-///
-/// `needs_pre_tool_hook` adds a fourth: `hook-run pre_tool_use`, which serves
-/// two consumers that both need to see tool calls by name —
-///
-/// - the `index_repository` name guard (#1331), since opencode gets the same
-///   `manifest.mcps` Claude Code does and the clobber is reachable here too;
-/// - the `todowrite` redirect (#1304), which mirrors opencode's built-in todo
-///   list into `llmenv task`.
-///
-/// One registration covers both: opencode's plugin API has no per-tool matcher,
-/// so unlike Claude Code's anchored matchers this hook runs on every tool call
-/// and `hook-run` dispatches on `tool_name` itself. That per-call cost is why
-/// it isn't registered unconditionally.
-fn generate_shim_js(
-    hooks: &[crate::config::Hook],
-    needs_pre_tool_hook: bool,
-) -> anyhow::Result<String> {
-    let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
-        std::collections::BTreeMap::new();
-    for hook in hooks {
-        let resolved_command = hook
-            .handler
-            .command
-            .as_deref()
-            .map(|cmd| match &hook.bundle_origin {
-                Some(bundle_dir) => super::resolve_bundle_relative_paths(cmd, bundle_dir)
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            command = %cmd,
-                            bundle_dir = %bundle_dir.display(),
-                            "could not resolve bundle-relative hook command path \
-                             in generate_shim_js — falling back to raw command; \
-                             path may be stale or the bundle restructured"
-                        );
-                        cmd.to_string()
-                    }),
-                None => cmd.to_string(),
-            })
-            .unwrap_or_default();
-        let timeout = 30_000u64;
-        by_event
-            .entry(hook.event.as_str())
-            .or_default()
-            .push(serde_json::json!({ "command": resolved_command, "timeout": timeout }));
-    }
-
-    // Auto-hooks — always present
-    by_event
-        .entry("SessionStart")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv check-stale --engine opencode",
-            "timeout": 5000,
-        }));
-    by_event
-        .entry("SessionStart")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv config-context --engine opencode",
-            "timeout": 5000,
-        }));
-    by_event
-        .entry("PreToolUse")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv config-guard --engine opencode",
-            "timeout": 5000,
-        }));
-    if needs_pre_tool_hook {
-        by_event
-            .entry("PreToolUse")
-            .or_default()
-            .push(serde_json::json!({
-                "command": "llmenv hook-run pre_tool_use --engine opencode",
-                "timeout": 5000,
-            }));
-    }
-
-    let table: Vec<serde_json::Value> = by_event
-        .into_iter()
-        .map(|(event, commands)| {
-            serde_json::json!({
-                "event": event,
-                "commands": commands,
-            })
-        })
-        .collect();
-
-    let table_json = serde_json::to_string(&table)?;
-    Ok(SHIM_TEMPLATE.replace("${HOOK_TABLE}", &table_json))
-}
-
-/// Split markdown source into optional frontmatter and body.
-///
-/// Returns `(parsed_frontmatter_or_None, body_text)`. The body text is the
-/// content after the closing `---` delimiter (leading whitespace trimmed).
-fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
-    let s = source.trim_start();
-    if !s.starts_with("---") {
-        return (None, source);
-    }
-    let after_opener = &s[3..];
-
-    // Find the closing `\n---` (opener + newline + closing delimiter).
-    if let Some(end) = after_opener.find("\n---") {
-        // `end` is the position of `\n` before the closing `---`. YAML
-        // content is between the opening `---` and that `\n`; strip_prefix
-        // (rather than a fixed `[1..]` byte slice) drops the newline right
-        // after the opener without risking a non-UTF-8-boundary panic when
-        // there isn't one (e.g. malformed input like "---é\n---").
-        let content = &after_opener[..end];
-        let fm_raw = content.strip_prefix('\n').unwrap_or(content);
-        let body = &after_opener[(end + 4)..];
-        let fm = match serde_yaml::from_str(fm_raw) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::error!("failed to parse frontmatter YAML (treated as absent): {e}");
-                None
-            }
-        };
-        (fm, body.trim_start())
-    } else {
-        (None, source)
-    }
-}
-
-/// Translate a command markdown file from Claude frontmatter to opencode format.
-///
-/// Keeps only `description` from the frontmatter. Drops `model` and
-/// `allowed_tools` with a warning — those are Claude-specific concepts that
-/// opencode does not support for commands.
-fn translate_command_md(source: &str, _name: &str) -> anyhow::Result<String> {
-    let (fm, body) = split_frontmatter(source);
-    let mut new_fm = serde_yaml::Mapping::new();
-
-    if let Some(serde_yaml::Value::Mapping(ref map)) = fm {
-        if let Some(desc) = map.get(serde_yaml::Value::String("description".into())) {
-            new_fm.insert("description".into(), desc.clone());
-        }
-        let dropped: &[&str] = &["model", "allowed_tools"];
-        for key in dropped {
-            if map.contains_key(serde_yaml::Value::String((*key).into())) {
-                eprintln!(
-                    "warning: opencode adapter does not support '{key}' in \
-                     command frontmatter — dropping this field"
-                );
-            }
-        }
-    }
-
-    if new_fm.is_empty() {
-        Ok(body.to_string())
-    } else {
-        let fm_yaml = serde_yaml::to_string(&new_fm)?;
-        Ok(format!("---\n{}---\n{}", fm_yaml, body))
-    }
-}
-
-/// Frontmatter keys that produce no drop warning: the keys `translate_agent_md` copies, plus
-/// `name`, because opencode takes the agent name from the file name.
-const OPENCODE_AGENT_KEYS: &[&str] = &["description", "model", "tools", "allowed_tools", "name"];
-
-/// Source frontmatter keys that opencode has no field for (#2150), in source order. A key that
-/// is not a string (`1: x`) is rendered as YAML, so it is reported instead of dropped silently.
-fn dropped_agent_keys(map: &serde_yaml::Mapping) -> Vec<String> {
-    map.keys()
-        .filter(|key| {
-            key.as_str()
-                .is_none_or(|k| !OPENCODE_AGENT_KEYS.contains(&k))
-        })
-        .map(|key| match key.as_str() {
-            Some(k) => k.to_owned(),
-            None => serde_yaml::to_string(key)
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        })
-        .collect()
-}
-
-/// Translate an agent markdown file from Claude frontmatter to opencode format.
-///
-/// Keeps `description`, `model`, `tools` / `allowed_tools`, and adds
-/// `mode: subagent` so opencode runs the agent as a sub-process.
-fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
-    let (fm, body) = split_frontmatter(source);
-    let mut new_fm = serde_yaml::Mapping::new();
-
-    if let Some(serde_yaml::Value::Mapping(ref map)) = fm {
-        let keep: &[&str] = &["description", "model"];
-        for key in keep {
-            if let Some(val) = map.get(serde_yaml::Value::String((*key).into())) {
-                new_fm.insert((*key).into(), val.clone());
-            }
-        }
-        for tool_key in &["tools", "allowed_tools"] {
-            if let Some(val) = map.get(serde_yaml::Value::String((*tool_key).into())) {
-                new_fm.insert((*tool_key).into(), val.clone());
-            }
-        }
-
-        for key in dropped_agent_keys(map) {
-            // Agent files come from third-party plugins, so a key can hold terminal escapes.
-            let key = crate::util::escape_control(&key);
-            eprintln!(
-                "warning: opencode adapter does not support '{key}' in \
-                 agent frontmatter — dropping this field"
-            );
-        }
-    }
-
-    new_fm.insert("mode".into(), serde_yaml::Value::String("subagent".into()));
-    let fm_yaml = serde_yaml::to_string(&new_fm)?;
-    Ok(format!("---\n{}---\n{}", fm_yaml, body))
 }
 
 /// Map llmenv's `ModelProvider.api_type` (an open wire-format string) to the
@@ -1833,10 +1030,55 @@ fn render_opencode_default_models(
     )
 }
 
+/// Write the translation of the bundle file `rel` over its copy in `out`.
+fn write_translated(out: &Path, rel: &Path, translated: &str) -> anyhow::Result<()> {
+    let dest = out.join(rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::paths::write_owner_only(&dest, translated.as_bytes())
+        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", dest.display()))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use super::permissions::{
+        check_rule_ordering, glob_matches, opencode_tool_name, pattern_subsumes, patterns_overlap,
+        wildcard_matches,
+    };
     use super::*;
+
+    /// The `permissions` list of `doc`, folded to a `{action: effect | {resource: effect}}` view
+    /// for assertions that do not test the order. `Null` when the list is absent.
+    fn perm_view(doc: &serde_json::Value) -> serde_json::Value {
+        let Some(rules) = doc.get("permissions").and_then(|v| v.as_array()) else {
+            return serde_json::Value::Null;
+        };
+        let mut view = serde_json::Map::new();
+        for rule in rules {
+            let action = rule["action"].as_str().unwrap().to_string();
+            let entry = view
+                .entry(action)
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            entry[rule["resource"].as_str().unwrap()] = rule["effect"].clone();
+        }
+        for entry in view.values_mut() {
+            let only_wildcard = entry
+                .as_object()
+                .is_some_and(|m| m.len() == 1 && m.contains_key("*"));
+            if only_wildcard {
+                *entry = entry["*"].clone();
+            }
+        }
+        serde_json::Value::Object(view)
+    }
+
+    mod agents;
+    mod hook_table;
+    mod permission_list;
+    mod props;
+    mod server;
     use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
     use crate::merge::rules::RuleFile;
@@ -1940,14 +1182,20 @@ mod tests {
         );
         let json_raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&json_raw).unwrap();
-        let instr = doc["instructions"].as_array().unwrap();
+        let instr: Vec<&str> = doc["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let root = std::path::absolute(tmp.path()).unwrap();
+        for rel in ["rules/security.md", "rules/style.md"] {
+            let want = root.join(rel).to_string_lossy().into_owned();
+            assert!(instr.contains(&want.as_str()), "{want} missing: {instr:?}");
+        }
         assert!(
-            instr.contains(&serde_json::json!("rules/security.md")),
-            "instructions must include rules/security.md"
-        );
-        assert!(
-            instr.contains(&serde_json::json!("rules/style.md")),
-            "instructions must include rules/style.md"
+            instr.iter().all(|i| std::path::Path::new(i).is_absolute()),
+            "opencode finds a relative entry from the session folder: {instr:?}"
         );
     }
 
@@ -2621,8 +1869,8 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         // Bare tool (no pattern, no paths) -> emitted as action string directly:
-        // doc["permission"]["bash"] = "allow"
-        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
+        // perm_view(&doc)["shell"] = "allow"
+        assert_eq!(perm_view(&doc)["shell"], serde_json::json!("allow"));
     }
 
     #[test]
@@ -2655,9 +1903,9 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        // Old format: doc["permission"]["allow"] as array with "Bash(echo*)"
-        // New format: doc["permission"]["bash"]["echo*"] = "allow"
-        let bash = &doc["permission"]["bash"];
+        // Old format: perm_view(&doc)["allow"] as array with "Bash(echo*)"
+        // New format: perm_view(&doc)["shell"]["echo*"] = "allow"
+        let bash = &perm_view(&doc)["shell"];
         assert_eq!(bash["echo*"], serde_json::json!("allow"));
     }
 
@@ -2691,13 +1939,13 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
-            doc["permission"]["*"],
+            perm_view(&doc)["*"],
             serde_json::json!("deny"),
             "a bare `*` native deny-all rule must survive verbatim, not be dropped as an \
              unmapped neutral tool: {doc}"
         );
         assert_eq!(
-            doc["permission"]["lsp"],
+            perm_view(&doc)["lsp"],
             serde_json::json!("deny"),
             "opencode-only keys like `lsp` (no neutral equivalent) must survive verbatim: {doc}"
         );
@@ -2711,7 +1959,7 @@ mod tests {
     /// `edit` (`migrate.ts`'s `normalizeAction`) — opencode has no separate
     /// `write`/`multiedit` key — and the list-tool key is `list`, not `ls`.
     #[test]
-    fn materialize_permissions_maps_write_multiedit_ls_to_real_opencode_keys() {
+    fn materialize_permissions_map_write_and_multiedit_to_edit_and_drop_ls() {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = crate::config::Capabilities::default();
         for tool in ["Write", "MultiEdit", "LS"] {
@@ -2729,18 +1977,15 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
-            doc["permission"]["edit"],
+            perm_view(&doc)["edit"],
             serde_json::json!("allow"),
             "Write and MultiEdit must both map to opencode's `edit` key, got: {doc}"
         );
-        assert_eq!(
-            doc["permission"]["list"],
-            serde_json::json!("allow"),
-            "LS must map to opencode's `list` key, got: {doc}"
-        );
-        assert!(doc["permission"].get("write").is_none());
-        assert!(doc["permission"].get("multiedit").is_none());
-        assert!(doc["permission"].get("ls").is_none());
+        // opencode 2.x has no list tool, so an LS rule is dropped (#2846).
+        assert!(perm_view(&doc).get("list").is_none(), "got: {doc}");
+        assert!(perm_view(&doc).get("write").is_none());
+        assert!(perm_view(&doc).get("multiedit").is_none());
+        assert!(perm_view(&doc).get("ls").is_none());
     }
 
     /// #1326: a neutral tool with no confirmed opencode equivalent (e.g.
@@ -2807,96 +2052,18 @@ mod tests {
         // Verify per-tool format: each tool key maps patterns to actions
 
         // Bash has specific patterns -> emitted as pattern->action object
-        let bash = &doc["permission"]["bash"];
+        let bash = &perm_view(&doc)["shell"];
         assert_eq!(bash["otool *"], serde_json::json!("allow"));
         assert_eq!(bash["rm *"], serde_json::json!("deny"));
 
         // Bare tools without patterns -> emitted as action string directly
-        assert_eq!(doc["permission"]["read"], serde_json::json!("allow"));
-        assert_eq!(doc["permission"]["edit"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["read"], serde_json::json!("allow"));
+        assert_eq!(perm_view(&doc)["edit"], serde_json::json!("deny"));
 
         // No flat "allow"/"deny"/"ask" arrays at the permission level
-        assert!(doc["permission"].get("allow").is_none());
-        assert!(doc["permission"].get("deny").is_none());
-        assert!(doc["permission"].get("ask").is_none());
-    }
-
-    /// #1328 gap 1: opencode types `todowrite`/`question`/`webfetch`/
-    /// `websearch`/`doom_loop` as a bare action string, not a pattern map.
-    /// Emitting `{pattern: action}` for one makes opencode's loader discard
-    /// the *entire* config file with no diagnostic, so it has to fail here.
-    #[test]
-    fn materialize_pattern_scoped_rule_on_action_only_key_is_rejected() {
-        for (tool, key) in [
-            ("WebFetch", "webfetch"),
-            ("WebSearch", "websearch"),
-            ("TodoWrite", "todowrite"),
-        ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let mut caps = crate::config::Capabilities::default();
-            caps.permissions.allow.push(crate::config::PermissionRule {
-                tool: tool.into(),
-                pattern: Some("https://example.com/*".into()),
-                paths: vec![],
-            });
-            let manifest = MergedManifest {
-                capabilities: caps,
-                ..Default::default()
-            };
-            let err = OpencodeAdapter
-                .materialize(&manifest, tmp.path())
-                .unwrap_err();
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains(key) && msg.contains("https://example.com/*"),
-                "error must name the key and the offending pattern: {msg}"
-            );
-        }
-    }
-
-    /// The `paths` form lowers to the same pattern map, so it has to be
-    /// rejected on an action-only key too.
-    #[test]
-    fn materialize_path_scoped_rule_on_action_only_key_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.permissions.deny.push(crate::config::PermissionRule {
-            tool: "TodoWrite".into(),
-            pattern: None,
-            paths: vec!["./notes.md".into()],
-        });
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("todowrite"));
-    }
-
-    /// Same rejection for a hand-authored native rule — `native_permissions`
-    /// bypasses the neutral-name mapping but lands in the same pattern map.
-    #[test]
-    fn materialize_native_pattern_scoped_rule_on_action_only_key_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.native_permissions.insert(
-            "opencode".into(),
-            crate::config::NativePermissionRules {
-                allow: vec!["doom_loop(some-pattern)".into()],
-                ask: vec![],
-                deny: vec![],
-            },
-        );
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("doom_loop"));
+        assert!(perm_view(&doc).get("allow").is_none());
+        assert!(perm_view(&doc).get("deny").is_none());
+        assert!(perm_view(&doc).get("ask").is_none());
     }
 
     /// The unscoped form is the only legal shape for an action-only key, and
@@ -2917,7 +2084,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["webfetch"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["webfetch"], serde_json::json!("deny"));
     }
 
     /// #1328 gap 2: opencode resolves two patterns that both match a resource
@@ -2989,7 +2156,7 @@ mod tests {
             );
             let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
             let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            let bash = &doc["permission"]["bash"];
+            let bash = &perm_view(&doc)["shell"];
             assert_eq!(bash["*"], serde_json::json!(broad_action));
             assert_eq!(bash["git push*"], serde_json::json!(narrow_action));
         }
@@ -3079,7 +2246,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["lsp"]["foo"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["lsp"]["foo"], serde_json::json!("deny"));
     }
 
     /// #1344: opencode wildcard-matches the permission *key* against the tool
@@ -3111,13 +2278,13 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("git push --force*") && msg.contains("bash"),
+            msg.contains("git push --force*") && msg.contains("shell"),
             "error must name the wildcard rule and the key it shadows: {msg}"
         );
         // Narrowing the allow is not expressible in opencode, so the remedy has
         // to be the one that works: restate the deny on the concrete key.
         assert!(
-            msg.contains("`bash(git push --force*)`"),
+            msg.contains("`shell(git push --force*)`"),
             "error must suggest moving the rule onto the shadowed key: {msg}"
         );
     }
@@ -3148,8 +2315,8 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["*"], serde_json::json!("deny"));
-        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
+        assert_eq!(perm_view(&doc)["*"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["shell"], serde_json::json!("allow"));
     }
 
     /// Two concrete keys are distinct literals, so they never overlap and must
@@ -3175,8 +2342,8 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
-        assert_eq!(doc["permission"]["read"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["shell"], serde_json::json!("allow"));
+        assert_eq!(perm_view(&doc)["read"], serde_json::json!("deny"));
     }
 
     /// #1345: opencode has a real `skill` permission key, so a `Skill` rule has
@@ -3197,7 +2364,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["skill"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["skill"], serde_json::json!("deny"));
     }
 
     #[test]
@@ -3440,7 +2607,7 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
-            doc["permission"]["bash"]["rm -rf /"],
+            perm_view(&doc)["shell"]["rm -rf /"],
             serde_json::json!("deny")
         );
     }
@@ -3472,7 +2639,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let bash = &doc["permission"]["bash"];
+        let bash = &perm_view(&doc)["shell"];
         assert_eq!(
             bash["rm *"],
             serde_json::json!("deny"),
@@ -3558,69 +2725,9 @@ mod tests {
     }
 
     #[test]
-    fn materialize_hook_unsupported_event_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        manifest.capabilities.hooks.push(crate::config::Hook {
-            event: "Notification".into(),
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
-                command: Some("echo n".into()),
-                tool: None,
-            },
-            bundle_origin: None,
-        });
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
-        assert!(!shim_src.contains("\"event\":\"Notification\""));
-    }
-
-    #[test]
-    fn materialize_shim_contains_auto_hooks() {
-        let tmp = tempfile::tempdir().unwrap();
-        OpencodeAdapter
-            .materialize(&MergedManifest::default(), tmp.path())
-            .unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
-        assert!(shim_src.contains("check-stale --engine opencode"));
-        assert!(shim_src.contains("config-context --engine opencode"));
-        assert!(shim_src.contains("config-guard --engine opencode"));
-    }
-
-    #[test]
-    fn materialize_hook_with_supported_event_rendered_in_shim() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        manifest.capabilities.hooks.push(crate::config::Hook {
-            event: "PreToolUse".into(),
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
-                command: Some("echo hi".into()),
-                tool: None,
-            },
-            bundle_origin: None,
-        });
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
-        assert!(shim_src.contains("echo hi"));
-        assert!(shim_src.contains("check-stale --engine opencode"));
-    }
-
-    #[test]
-    fn materialize_no_hooks_still_emits_shim_for_auto_hooks() {
-        let tmp = tempfile::tempdir().unwrap();
-        OpencodeAdapter
-            .materialize(&MergedManifest::default(), tmp.path())
-            .unwrap();
-        assert!(tmp.path().join("plugin/llmenv.js").exists());
-    }
-
-    #[test]
     fn translate_command_md_keeps_description() {
         let src = "---\ndescription: My test command\nmodel: claude-sonnet-4-20250514\nallowed_tools: [Bash]\n---\n\nRun this command.";
-        let result = translate_command_md(src, "test").unwrap();
+        let result = translate_command_md(src).unwrap();
         assert!(result.contains("description: My test command"));
         assert!(!result.contains("model:"));
         assert!(!result.contains("allowed_tools:"));
@@ -3630,14 +2737,14 @@ mod tests {
     #[test]
     fn translate_command_md_no_frontmatter_passthrough() {
         let src = "Just raw markdown content.";
-        let result = translate_command_md(src, "test").unwrap();
+        let result = translate_command_md(src).unwrap();
         assert_eq!(result, "Just raw markdown content.");
     }
 
     #[test]
     fn translate_command_md_empty_description_still_works() {
         let src = "---\n---\n\nBody only.";
-        let result = translate_command_md(src, "test").unwrap();
+        let result = translate_command_md(src).unwrap();
         // No valid frontmatter fields → body returned as-is (no --- wrapper)
         assert_eq!(result, "Body only.");
     }
@@ -3645,7 +2752,7 @@ mod tests {
     #[test]
     fn translate_agent_md_keeps_model_description_tools() {
         let src = "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\ntools: [Bash, Read]\n---\n\nDo things autonomously.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("description: My agent"));
         assert!(result.contains("model: claude-sonnet-4-20250514"));
         assert!(result.contains("tools:"));
@@ -3656,7 +2763,7 @@ mod tests {
     #[test]
     fn translate_agent_md_adds_subagent_mode() {
         let src = "---\ndescription: Just description\n---\n\nBody.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("description: Just description"));
         assert!(result.contains("mode: subagent"));
     }
@@ -3664,7 +2771,7 @@ mod tests {
     #[test]
     fn translate_agent_md_no_frontmatter_passthrough() {
         let src = "Just raw content.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("mode: subagent"));
         assert!(result.contains("Just raw content."));
     }
@@ -3672,7 +2779,7 @@ mod tests {
     #[test]
     fn translate_agent_md_accepts_allowed_tools() {
         let src = "---\ndescription: Agent with allowed tools\nallowed_tools: [Bash]\n---\n\nBody.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("allowed_tools:"));
         assert!(result.contains("mode: subagent"));
     }
@@ -3680,7 +2787,7 @@ mod tests {
     #[test]
     fn translate_agent_md_drops_unsupported_keys() {
         let src = "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\nomitClaudeMd: true\neffort: high\nmaxTurns: 5\n---\n\nBody.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         // Supported keys should be present
         assert!(result.contains("description: My agent"));
         assert!(result.contains("model: claude-sonnet-4-20250514"));
@@ -3743,54 +2850,6 @@ mod tests {
         let map: serde_yaml::Mapping =
             serde_yaml::from_str("name: a\ndescription: d\nallowed_tools: [Read]\n").unwrap();
         assert!(dropped_agent_keys(&map).is_empty());
-    }
-
-    #[test]
-    fn materialize_bundle_command_from_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-
-        let src_dir = tempfile::tempdir().unwrap();
-        let cmd_file = src_dir.path().join("test-cmd.md");
-        std::fs::write(
-            &cmd_file,
-            "---\ndescription: A test command\nmodel: claude-sonnet-4-20250514\n---\n\nRun this thing.",
-        )
-        .unwrap();
-
-        manifest
-            .files
-            .insert(PathBuf::from("commands/test-cmd.md"), cmd_file);
-
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-
-        let out_cmd = tmp.path().join("command/__bundle_test-cmd.md");
-        assert!(out_cmd.exists());
-        let content = std::fs::read_to_string(&out_cmd).unwrap();
-        assert!(content.contains("description: A test command"));
-        assert!(!content.contains("model:")); // dropped for commands
-        assert!(content.contains("Run this thing."));
-    }
-
-    #[test]
-    fn env_vars_returns_opencode_config_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vars = OpencodeAdapter.env_vars(tmp.path(), tmp.path()).unwrap();
-        assert!(vars.contains(&(
-            "OPENCODE_CONFIG_DIR".into(),
-            tmp.path().to_string_lossy().into_owned()
-        )));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn env_vars_rejects_non_utf8_cache_dir() {
-        use std::os::unix::ffi::OsStringExt;
-        let non_utf8 = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
-        let err = OpencodeAdapter
-            .env_vars(&non_utf8, Path::new("/tmp"))
-            .unwrap_err();
-        assert!(err.to_string().contains("not valid UTF-8"));
     }
 
     #[test]
@@ -3955,61 +3014,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_plugin_commands_and_agents_translated() {
-        let out = tempfile::tempdir().unwrap();
-        let plugin_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(plugin_dir.path().join("commands")).unwrap();
-        std::fs::write(
-            plugin_dir.path().join("commands/greet.md"),
-            "---\ndescription: greet\n---\nhello\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(plugin_dir.path().join("agents")).unwrap();
-        std::fs::write(
-            plugin_dir.path().join("agents/helper.md"),
-            "---\ndescription: helps\n---\nhelp text\n",
-        )
-        .unwrap();
-        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
-        let manifest = MergedManifest {
-            plugins,
-            marketplaces,
-            ..Default::default()
-        };
-        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
-        assert!(out.path().join("command/__plugin_greet.md").exists());
-        assert!(out.path().join("command/__plugin_agent_helper.md").exists());
-    }
-
-    #[test]
-    fn materialize_plugin_hooks_happy_and_warnings() {
-        let out = tempfile::tempdir().unwrap();
-        let plugin_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(plugin_dir.path().join("hooks")).unwrap();
-        std::fs::write(
-            plugin_dir.path().join("hooks/hooks.json"),
-            serde_json::json!({
-                "hooks": {
-                    "PreToolUse": [{"hooks": [{"type": "command", "command": "echo ok"}]}],
-                    "Notification": [{"hooks": [{"type": "command", "command": "echo n"}]}],
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
-        let manifest = MergedManifest {
-            plugins,
-            marketplaces,
-            ..Default::default()
-        };
-        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
-        let shim_src = std::fs::read_to_string(out.path().join("plugin/llmenv.js")).unwrap();
-        assert!(shim_src.contains("echo ok"));
-        assert!(!shim_src.contains("echo n"), "Notification is unsupported");
-    }
-
-    #[test]
     fn materialize_plugin_hooks_parse_error_skips_only_that_plugin() {
         let out = tempfile::tempdir().unwrap();
         let bad_dir = tempfile::tempdir().unwrap();
@@ -4052,46 +3056,6 @@ mod tests {
         // Must succeed overall, and the good plugin's content must still land.
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
         assert!(out.path().join("command/__plugin_still-works.md").exists());
-    }
-
-    #[test]
-    fn materialize_manifest_hook_mcp_tool_kind_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        manifest.capabilities.hooks.push(crate::config::Hook {
-            event: "PreToolUse".into(),
-            matcher: None,
-            handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::McpTool,
-                command: None,
-                tool: Some("some_tool".into()),
-            },
-            bundle_origin: None,
-        });
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
-        assert!(!shim_src.contains("some_tool"));
-    }
-
-    #[test]
-    fn materialize_bundle_agent_from_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        let src_dir = tempfile::tempdir().unwrap();
-        let agent_file = src_dir.path().join("test-agent.md");
-        std::fs::write(
-            &agent_file,
-            "---\ndescription: A test agent\n---\n\nDo the thing.",
-        )
-        .unwrap();
-        manifest
-            .files
-            .insert(PathBuf::from("agents/test-agent.md"), agent_file);
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let out_agent = tmp.path().join("command/__bundle_agent_test-agent.md");
-        assert!(out_agent.exists());
-        let content = std::fs::read_to_string(&out_agent).unwrap();
-        assert!(content.contains("mode: subagent"));
     }
 
     #[test]
@@ -4239,7 +3203,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_native_opencode_plugin_registers_config_plugin() {
+    fn context_mode_is_not_registered_as_an_opencode_plugin() {
         let out = tempfile::tempdir().unwrap();
         let plugin_dir = tempfile::tempdir().unwrap();
         let manifest = MergedManifest {
@@ -4261,7 +3225,8 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
         let raw = std::fs::read_to_string(out.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["plugin"], serde_json::json!(["context-mode"]));
+        // Its 1.x plugin cannot load on opencode 2.0 (#2840).
+        assert!(doc.get("plugin").is_none(), "{doc}");
     }
 
     #[test]
@@ -4328,48 +3293,19 @@ mod tests {
     }
 
     // #1331: opencode gets the same `manifest.mcps` Claude Code does, so the
-    // same `index_repository` clobber is reachable here. Its plugin API has no
-    // per-tool matcher, so the hook is only registered when that MCP is wired.
-    // #1304: same `block_engine_task_tools` opt-out Claude Code got in #980 —
-    // a user who wants the tracker but keeps opencode's native todo list turns
-    // it off and no redirect is registered.
-    #[test]
-    fn todowrite_redirect_follows_the_task_tracker_gate() {
-        let tracker = |enabled: bool, block: bool| {
-            let mut m = crate::merge::MergedManifest::default();
-            m.capabilities.features = Some(crate::config::Features {
-                task_tracker: Some(crate::config::TaskTracker {
-                    enabled,
-                    block_engine_task_tools: block,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-            m
-        };
-        let registered = |m: &crate::merge::MergedManifest| {
-            let tmp = tempfile::tempdir().unwrap();
-            OpencodeAdapter.materialize(m, tmp.path()).unwrap();
-            std::fs::read_to_string(tmp.path().join("plugin/llmenv.js"))
-                .unwrap()
-                .contains("hook-run pre_tool_use")
-        };
-        assert!(registered(&tracker(true, true)), "tracker on, redirect on");
-        assert!(
-            !registered(&tracker(true, false)),
-            "block_engine_task_tools off must leave the native todo list alone"
-        );
-        assert!(!registered(&tracker(false, true)), "tracker off");
-    }
-
+    // same `index_repository` clobber is reachable here. The hook names only the tools that
+    // need it, so no other tool call pays for it.
     #[test]
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
-        let with = generate_shim_js(&[], true).unwrap();
-        let without = generate_shim_js(&[], false).unwrap();
-        assert!(
-            with.contains("llmenv hook-run pre_tool_use --engine opencode"),
-            "guard hook missing when codebase-memory-mcp is wired"
-        );
+        let with = hook_bridge::hook_table(&[], &["mcp__x__index_repository", "Bash"], &[]);
+        let without = hook_bridge::hook_table(&[], &[], &[]).to_string();
+        let entry = with["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["command"] == "llmenv hook-run pre_tool_use --engine opencode")
+            .unwrap();
+        assert_eq!(entry["matcher"], "mcp__x__index_repository|Bash");
         assert!(
             !without.contains("hook-run pre_tool_use"),
             "no MCP is wired, so every tool call would pay for a hook that \
@@ -4377,49 +3313,33 @@ mod tests {
         );
     }
 
-    // opencode passes a tool call's arguments in the *second* parameter of
-    // `tool.execute.before` and the *first* of `tool.execute.after` (verified
-    // against opencode's `packages/plugin/src/index.ts`). Reading
-    // `input.output.args` yielded `{}` on every PreToolUse call, which would
-    // silently defeat any guard that inspects arguments.
     #[test]
-    fn shim_reads_tool_arguments_from_the_parameter_that_carries_them() {
-        let js = generate_shim_js(&[], true).unwrap();
-        assert!(
-            !js.contains("input.output?.args"),
-            "before-hook args come from the second parameter, not input.output"
-        );
-        assert!(
-            js.contains("tool_input: output?.args || {}"),
-            "before-hook must read output.args"
-        );
-        assert!(
-            js.contains("tool_input: input.args || {}"),
-            "after-hook must read input.args"
-        );
-    }
-
-    #[test]
-    fn generate_shim_js_hook_with_no_command_defaults_empty() {
+    fn a_hook_with_no_command_is_left_out() {
         let hooks = vec![crate::config::Hook {
-            event: "PreToolUse".into(),
+            event: "PostToolUse".into(),
             matcher: None,
             handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
+                kind: crate::config::HookHandlerKind::McpTool,
                 command: None,
-                tool: None,
+                tool: Some("x".into()),
             },
             bundle_origin: None,
         }];
-        let js = generate_shim_js(&hooks, false).unwrap();
-        assert!(js.contains("\"command\":\"\""));
+        let table = hook_bridge::hook_table(&hooks, &[], &[]);
+        let events: Vec<_> = table["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["event"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!events.contains(&"PostToolUse".to_string()), "{events:?}");
     }
 
     #[test]
-    fn generate_shim_js_falls_back_when_bundle_relative_resolution_fails() {
+    fn a_hook_keeps_its_matcher_and_falls_back_to_the_raw_command() {
         let hooks = vec![crate::config::Hook {
             event: "PreToolUse".into(),
-            matcher: None,
+            matcher: Some("Bash".into()),
             handler: crate::config::HookHandler {
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some("echo hello".into()),
@@ -4428,9 +3348,15 @@ mod tests {
             bundle_origin: Some(PathBuf::from("/bundles/foo")),
         }];
         // "echo hello" has no '/' token, so resolve_bundle_relative_paths
-        // returns None and generate_shim_js must fall back to the raw command.
-        let js = generate_shim_js(&hooks, false).unwrap();
-        assert!(js.contains("echo hello"));
+        // returns None and the raw command is used.
+        let table = hook_bridge::hook_table(&hooks, &[], &["codebase-memory-mcp"]);
+        assert_eq!(table["hooks"][0]["command"], "echo hello");
+        assert_eq!(table["hooks"][0]["matcher"], "Bash");
+        assert_eq!(
+            table["mcpServers"]["codebase-memory-mcp"],
+            "codebase-memory-mcp"
+        );
+        assert_eq!(table["tools"]["shell"]["name"], "Bash");
     }
 
     // -- split_frontmatter --
@@ -4509,9 +3435,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        doc.get("permission")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)
+        perm_view(&doc)
     }
 
     fn is_action(s: &str) -> bool {
@@ -4768,7 +3692,7 @@ mod tests {
             } else {
                 "---\ndescription: d\n---\nbody\n"
             };
-            let out = translate_agent_md(source, "n").unwrap();
+            let out = translate_agent_md(source).unwrap();
             let (fm, _) = split_frontmatter(&out);
             let fm = fm.unwrap();
             prop_assert_eq!(
@@ -4786,8 +3710,8 @@ mod tests {
             } else {
                 "---\ndescription: d\n---\nbody\n"
             };
-            let agent_once = translate_agent_md(agent_source, "n").unwrap();
-            let agent_twice = translate_agent_md(&agent_once, "n").unwrap();
+            let agent_once = translate_agent_md(agent_source).unwrap();
+            let agent_twice = translate_agent_md(&agent_once).unwrap();
             prop_assert_eq!(agent_once, agent_twice);
 
             let command_source = if has_extra {
@@ -4795,37 +3719,27 @@ mod tests {
             } else {
                 "no frontmatter here\n"
             };
-            let command_once = translate_command_md(command_source, "n").unwrap();
-            let command_twice = translate_command_md(&command_once, "n").unwrap();
+            let command_once = translate_command_md(command_source).unwrap();
+            let command_twice = translate_command_md(&command_once).unwrap();
             prop_assert_eq!(command_once, command_twice);
         }
 
-        /// The hook shim's embedded `HOOK_TABLE` is always valid JSON, for any
-        /// hook set (including zero hooks — the auto-hooks alone must parse).
+        /// Every hook with a command reaches the table with its event, matcher, and command,
+        /// after the user hooks and before nothing else, and the table is deterministic.
         #[test]
-        fn generate_shim_js_hook_table_is_valid_json(
+        fn every_command_hook_reaches_the_table_in_order(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let js = generate_shim_js(&hooks, false).unwrap();
-            let marker = "const HOOK_TABLE = ";
-            let start = js.find(marker).unwrap() + marker.len();
-            let end = js[start..]
-                .find(";\n")
-                .map(|i| start + i)
-                .unwrap();
-            let table_json = &js[start..end];
-            let _: serde_json::Value = serde_json::from_str(table_json).unwrap();
-        }
-
-        /// `generate_shim_js` is deterministic: the same hook slice always
-        /// renders the same shim.
-        #[test]
-        fn generate_shim_js_is_deterministic(
-            hooks in proptest::collection::vec(arb_hook(), 0..5)
-        ) {
-            let a = generate_shim_js(&hooks, false).unwrap();
-            let b = generate_shim_js(&hooks, false).unwrap();
-            prop_assert_eq!(a, b);
+            let table = hook_bridge::hook_table(&hooks, &[], &[]);
+            prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, &[], &[]));
+            let entries = table["hooks"].as_array().unwrap();
+            let with_command: Vec<_> = hooks.iter().filter(|h| h.handler.command.is_some()).collect();
+            for (hook, entry) in with_command.iter().zip(entries) {
+                prop_assert_eq!(entry["event"].as_str(), Some(hook.event.as_str()));
+                prop_assert_eq!(entry["matcher"].as_str(), hook.matcher.as_deref());
+            }
+            // The three built-in hooks follow the user hooks.
+            prop_assert_eq!(entries.len(), with_command.len() + 3);
         }
 
         /// A bare native rule (no parens) wildcard-matches and lowercases the
@@ -4953,8 +3867,8 @@ mod tests {
         assert!(props.contains_key("mcp"), "schema must describe 'mcp'");
         assert!(props.contains_key("lsp"), "schema must describe 'lsp'");
         assert!(
-            props.contains_key("permission"),
-            "schema must describe 'permission'"
+            props.contains_key("permissions"),
+            "schema must describe 'permissions'"
         );
     }
 
@@ -5060,12 +3974,14 @@ mod tests {
         Ok(())
     }
 
-    fn arb_permission_value() -> impl Strategy<Value = PermissionValue> {
-        prop_oneof![
-            "[a-z]{1,8}".prop_map(PermissionValue::Simple),
-            proptest::collection::btree_map("[a-z*]{1,8}", "[a-z]{1,8}", 0..3)
-                .prop_map(PermissionValue::PatternMap),
-        ]
+    fn arb_permission_rule_json() -> impl Strategy<Value = permissions::Rule> {
+        ("[a-z*]{1,8}", "[a-z* ]{1,8}", "allow|ask|deny").prop_map(|(action, resource, effect)| {
+            permissions::Rule {
+                action,
+                resource,
+                effect,
+            }
+        })
     }
 
     /// Arbitrary shallow JSON value for `LspServerEntry::init_options`, which
@@ -5183,23 +4099,19 @@ mod tests {
             )),
             "[a-z0-9./-]{1,20}",
             proptest::option::of(proptest::collection::vec("[a-z/.]{1,10}", 0..3)),
-            proptest::option::of(proptest::collection::btree_map(
-                "[a-z][a-z0-9_-]{0,8}",
-                arb_permission_value(),
-                0..3,
-            )),
+            proptest::option::of(proptest::collection::vec(arb_permission_rule_json(), 0..3)),
             proptest::option::of("[a-z][a-z0-9_/-]{0,15}"),
             proptest::option::of("[a-z][a-z0-9_/-]{0,15}"),
         )
             .prop_map(
-                |(plugin, lsp, schema, instructions, permission, model, small_model)| {
+                |(plugin, lsp, schema, instructions, permissions, model, small_model)| {
                     OpencodeConfig {
                         plugin,
                         mcp: None,
                         lsp,
                         schema,
                         instructions,
-                        permission,
+                        permissions,
                         provider: None,
                         model,
                         small_model,
@@ -5217,12 +4129,9 @@ mod tests {
             assert_json_roundtrip(entry)?;
         }
 
-        /// Untagged enums are easy to get wrong (serde tries variants in
-        /// declaration order) — a roundtrip test is a stronger check than
-        /// most for that reason.
         #[test]
-        fn permission_value_roundtrips_through_json(value in arb_permission_value()) {
-            assert_json_roundtrip(value)?;
+        fn permission_rule_roundtrips_through_json(rule in arb_permission_rule_json()) {
+            assert_json_roundtrip(rule)?;
         }
 
         #[test]

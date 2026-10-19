@@ -7,6 +7,7 @@ use crate::task::{NewTask, ParentSpec, SessionChoice, add_task_with, done_task, 
 use proptest::prelude::*;
 use tempfile::TempDir;
 mod commit_deny;
+mod fail_open;
 mod nudges;
 mod parsing;
 mod same_command;

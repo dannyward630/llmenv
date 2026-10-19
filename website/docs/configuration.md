@@ -698,11 +698,12 @@ features:
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
 | `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
+| `global_topics` | no | Topics that the per-prompt recall reads from every project, default `[preferences, errors-resolved]` (added in v3.13.0) |
 | `always_load` | no | Claude Code `alwaysLoad` for the ICM server, `true` or `false`, default `true`: the ICM tools load with the prompt instead of behind tool search. Set `false` to defer them again (added in v3.12.0) |
 | `default_type` | no | Memory type, `episodic`, `semantic`, or `procedural`, that llmenv tags on the memories it stores (added in v3.0.0) |
 | `default_importance` | no | Importance, `low`, `medium`, `high`, or `critical`, that llmenv tags on the memories it stores (added in v3.0.0) |
 | `type_importance` | no | Map from memory type to importance, for a per-type default (added in v3.0.0) |
-| `auto_prune` | no | `true` runs `llmenv memory prune` during `llmenv materialize`; default `false` (added in v3.3.0; changed in v3.13.0: only an entry whose `when` tags are active counts) |
+| `auto_prune` | no | `true` runs `llmenv memory prune` during `llmenv materialize`; default `false` (added in v3.3.0; changed in v3.13.0: only the active entry counts, an entry that a bundle declares included, and the prune runs on that entry's server) |
 | `retention` | no | Per-type retention durations for `llmenv memory prune`. While set, prune refuses to run — see [`llmenv memory prune`](commands.md#memory) (changed in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 
@@ -722,6 +723,14 @@ A failed tool call injects memories about that error, and a new subagent gets me
 After a compaction or `/clear`, the state resets and the scope-tagged memories go out again.
 Set `adaptive_recall: false` to go back to the stateless recall, which sends the same scope-tagged memories on every prompt.
 
+`global_topics` (added in v3.13.0) sets which memories a prompt recall reads from other projects.
+The per-prompt recall reads the memories of the session's project, plus the memories in each topic of this list from every project.
+The keyword and related-topic recalls of a prompt also read the session's project only.
+It does not read other topics of other projects, so the facts of one project do not show up in another.
+A session with no project reads the global topics only, and with `global_topics: []` it reads no memories on a prompt.
+A failed tool call reads `errors-resolved` from every project only while this list names it.
+Set `global_topics: []` to read the session's project only.
+
 #### Post-session consolidation
 
 (added in v3.3.0; model default changed in v3.11.2; runs on Claude Code `SessionEnd` since v3.12.0)
@@ -731,13 +740,15 @@ semantic rules and store them back in ICM.
 (changed in v3.12.0) It reads only the memories of the current project, which it names the same way the session start does.
 It stores each rule under the topic `llmenv-consolidation-<project>`, so the rule comes back in that project's recall.
 Rules stored before v3.12.0 stay under the topic `llmenv-consolidation`.
-Before it stores a rule, it recalls the five closest rules in the project topic and in the old topic.
+(changed in v3.13.0) No recall reads that old topic, so a rule there comes back in no session.
+Before it stores a rule, it recalls the five closest rules in the project topic.
 It skips the new rule when one of them shares at least 80% of its words and has the same negation words, such as `not` or `never`. It is off by default and skips a session with fewer than
 three memories.
 
 (changed in v3.12.0) The trigger is the `session_end` hook (Claude Code's `SessionEnd`).
 Before v3.12.0 consolidation waited for a `post_session` event that no adapter sent, so it never ran.
 The settings come from the active `memory:` entry, which can be in `config.yaml` or in a firing bundle's `bundle.yaml`.
+(changed in v3.13.0) With two active `memory:` entries, no entry's settings apply and consolidation does not run.
 The `claude-cli` backend runs `claude -p` with `disableAllHooks`, the default output style, `--strict-mcp-config`, no tools, no skills, and `--no-session-persistence`.
 That child runs no hooks and no MCP servers. It still reads your Claude Code settings and login, so auth from `env`, `apiKeyHelper`, or a Bedrock or Vertex provider keeps working.
 llmenv also sets `LLMENV_CONSOLIDATION_CHILD=1` on the child, and `llmenv hook-run` starts no consolidation under that variable, so the child cannot start consolidation again.
@@ -1173,15 +1184,15 @@ features:
     enforce_commit: true           # default; set false to stop the commit deny-once
 ```
 
-| Field                     | Required | Notes                                                                                                                                                                                                                                                                                                                                                        |
-| ------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `enabled`                 | no       | Default `false`. When `true`, also redirects the engine's built-in task tools into this tracker via an auto-injected `PreToolUse` hook — Claude Code's `TaskCreate`/`TaskList`/`TaskUpdate`, and opencode's `todowrite` (added in v3.11.0). See [Commands](commands.md#task) for opencode's list-reconciliation rules.                                       |
-| `block_engine_task_tools` | no       | (added in v3.10.0) Default `true`. Set `false` to keep the tracker's CLAUDE.md fragment and reminders while still letting the engine's native task tools through — e.g. for genuine multi-agent teammate coordination that isn't solo step tracking. Gates opencode's `todowrite` redirect too (added in v3.11.0). Has no effect while `enabled` is `false`. |
-| `nudges`                  | no       | (added in v3.12.0) Default `true`. Turns off the reminders that fire while work happens: after a workflow skill starts, after several file edits with no task, when a file edit has queued tasks and none in progress, and when the agent asks the user a question while a task is in progress. See [Commands](commands.md#task-nudges-added-in-v3120).      |
-| `enforce_commit`          | no       | (added in v3.12.0) Default `true`. Turns off the one-time deny of the first `git commit` or `gh pr create` of a session that has no task in progress.                                                                                                                                                                                                        |
-| `workflow_skills`         | no       | (added in v3.12.0) Skills that trigger the one-time reminder. Default `dev-sprint`, `ship-issue`, `pre-pr-review`, `executing-plans`, `writing-plans`. A plugin prefix such as `nbl-dev:` is ignored when matching.                                                                                                                                          |
-| `nudge_after`             | no       | (added in v3.12.0) File edits or writes with no task before the first nudge. Default `8`. Must be 1 or more. Shell commands do not count.                                                                                                                                                                                                                    |
-| `nudge_every`             | no       | (added in v3.12.0) File edits or writes between later nudges. Default `20`. Must be 1 or more.                                                                                                                                                                                                                                                               |
+| Field                     | Required | Notes                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                 | no       | Default `false`. When `true`, also redirects the engine's built-in task tools into this tracker via an auto-injected `PreToolUse` hook — Claude Code's `TaskCreate`/`TaskList`/`TaskUpdate`. opencode 2.x has no todo tool, so nothing is redirected there (changed in v3.13.0).                                                                        |
+| `block_engine_task_tools` | no       | (added in v3.10.0) Default `true`. Set `false` to keep the tracker's CLAUDE.md fragment and reminders while still letting the engine's native task tools through — e.g. for genuine multi-agent teammate coordination that isn't solo step tracking. Has no effect while `enabled` is `false`.                                                          |
+| `nudges`                  | no       | (added in v3.12.0) Default `true`. Turns off the reminders that fire while work happens: after a workflow skill starts, after several file edits with no task, when a file edit has queued tasks and none in progress, and when the agent asks the user a question while a task is in progress. See [Commands](commands.md#task-nudges-added-in-v3120). |
+| `enforce_commit`          | no       | (added in v3.12.0) Default `true`. Turns off the one-time deny of the first `git commit` or `gh pr create` of a session that has no task in progress.                                                                                                                                                                                                   |
+| `workflow_skills`         | no       | (added in v3.12.0) Skills that trigger the one-time reminder. Default `dev-sprint`, `ship-issue`, `pre-pr-review`, `executing-plans`, `writing-plans`. A plugin prefix such as `nbl-dev:` is ignored when matching.                                                                                                                                     |
+| `nudge_after`             | no       | (added in v3.12.0) File edits or writes with no task before the first nudge. Default `8`. Must be 1 or more. Shell commands do not count.                                                                                                                                                                                                               |
+| `nudge_every`             | no       | (added in v3.12.0) File edits or writes between later nudges. Default `20`. Must be 1 or more.                                                                                                                                                                                                                                                          |
 
 (added in v3.12.0) While the tracker is on, SessionStart also injects a short statement of the core tracking rules.
 `nudges: false` removes that text too.
@@ -1663,6 +1674,13 @@ On macOS, a keychain lookup that fails for any reason other than "no matching
 item" (most commonly a locked keychain) surfaces as an explicit error rather
 than being treated as "no credential stored" (added in v3.8.0).
 
+Each keychain call has a deadline (added in v3.13.0).
+A read waits at most 120 s, because macOS can ask you to allow the access.
+At a terminal, llmenv prints a line before the read, so a waiting prompt is visible.
+A write of the credential also waits at most 120 s, for the same reason.
+The delete in `llmenv clean` waits at most 10 s, because it shows no prompt.
+A call past its deadline fails with an error that names the keychain item and says to unlock the keychain.
+
 #### Third-party MCP server logins
 
 (added in v3.8.0)
@@ -1862,6 +1880,11 @@ for discovery rules.
 (changed in v3.13.0) llmenv reads a marker only when it is a regular file of at most 64 KiB.
 A FIFO, a folder, a link to a missing file, or a larger file is not read: llmenv logs the error and uses the defaults from the folder basename.
 The project id of `llmenv task` also shows the error as a notice that names the file.
+
+(added in v3.13.0) A marker that is a link is followed only while its target stays inside the folder that holds the marker.
+A link out of that folder is refused with an error that names the marker and the target, and the defaults apply.
+So a repository cannot make llmenv read a file outside it, or reach a network path such as `/net/<host>/x`.
+A dotfile link such as `~/.llmenv.yaml -> dotfiles/llmenv.yaml` stays inside `$HOME`, so it still works.
 
 Disabling a bundle withdraws *everything* it contributes, not just its
 permissions and instruction files. That includes any `features.memory` or

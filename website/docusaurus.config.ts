@@ -34,6 +34,8 @@ const config: Config = {
       {
         hashed: true,
         language: ['en'],
+        // The site has no blog, so the default blog index warns on each build.
+        indexBlog: false,
       },
     ],
   ],

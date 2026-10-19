@@ -99,7 +99,7 @@ fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
     // tolerate-but-warn policy for corrupt store files, rather than lumping it
     // in with "absent".
     let max = crate::scope::marker_file::MAX_MARKER_FILE_BYTES;
-    let content = match llmenv_paths::read_text_bounded(&path, max) {
+    let content = match crate::scope::marker_file::read_marker(&path, max) {
         Ok(Some(c)) => c,
         Ok(None) => return None,
         Err(e) => {

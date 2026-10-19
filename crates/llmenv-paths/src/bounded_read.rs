@@ -14,7 +14,7 @@ use std::path::Path;
 /// # Errors
 /// The file cannot be opened or read, is not a regular file, or holds more than `max_bytes`
 /// bytes. The message gives the reason only, so the caller must add the path.
-fn read_file_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
+pub fn read_file_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
     match open_nonblocking(path) {
         Ok(file) => read_open_file(file, max_bytes).map(Some),
         Err(e) if e.kind() == io::ErrorKind::NotFound => match std::fs::symlink_metadata(path) {

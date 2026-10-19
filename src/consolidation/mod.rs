@@ -160,19 +160,15 @@ pub(crate) const CHILD_GUARD_ENV: &str = "LLMENV_CONSOLIDATION_CHILD";
 mod claude_cli;
 use claude_cli::claude_command;
 
-/// The consolidation settings of the active memory entry: the first entry in
-/// `memory` (top-level plus bundle-contributed) whose `when` has an active
-/// tag ([`crate::mcp::resolve::memory_is_tag_active`], the selection rule),
-/// when its consolidation is enabled. `resolve_mcps` rejects two active
-/// entries, so the first one is the only one.
+/// The consolidation settings of the active memory entry: the one entry in `memory` (top-level
+/// plus bundle-contributed) whose `when` has an active tag, when its consolidation is enabled.
+/// With two active entries the memory server does not resolve, so neither entry applies.
 #[must_use]
 pub(crate) fn active_consolidation<'a>(
     memory: &'a [crate::config::Memory],
     active_tags: &std::collections::BTreeSet<String>,
 ) -> Option<&'a crate::config::ConsolidationConfig> {
-    memory
-        .iter()
-        .find(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags))
+    crate::memory::auto_prune::single_active(memory, active_tags)
         .and_then(|m| m.consolidation.as_ref())
         .filter(|c| c.enabled)
 }
@@ -1190,8 +1186,8 @@ mod tests {
     }
 
     proptest! {
-        // Oracle check: the first tag-active entry decides, and only when its
-        // consolidation is enabled; a later enabled entry never wins.
+        // Oracle check: exactly one tag-active entry decides, and only when its
+        // consolidation is enabled; with two active entries none applies.
         #[test]
         fn active_consolidation_matches_oracle(
             entries in proptest::collection::vec(
@@ -1206,11 +1202,8 @@ mod tests {
                 .collect();
             let tags: std::collections::BTreeSet<String> =
                 active.iter().map(|t| format!("t{t}")).collect();
-            let expected = entries
-                .iter()
-                .find(|(tag, _)| active.contains(tag))
-                .and_then(|(_, enabled)| *enabled)
-                .unwrap_or(false);
+            let hits: Vec<_> = entries.iter().filter(|(tag, _)| active.contains(tag)).collect();
+            let expected = hits.len() == 1 && hits[0].1.unwrap_or(false);
             prop_assert_eq!(active_consolidation(&memory, &tags).is_some(), expected);
         }
     }

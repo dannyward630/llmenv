@@ -391,6 +391,10 @@ Inspect ICM memory state for the active scope.
   ICM's recall output has no record age or type, so llmenv cannot apply the per-type durations.
   Remove `retention` from that entry to use the importance-based prune.
   A `retention` on an entry that is not active does not block the prune.
+  (changed in v3.13.0) It keeps a memory whose importance it does not know, and a record with no importance or weight.
+  Its summary counts both.
+  The `auto_prune` pass prints no summary, because the shell evaluates the output of `llmenv export`.
+  It prints a warning when it keeps such records, or when two active entries stop it from running.
 
 ## `clean`
 
@@ -747,21 +751,8 @@ start/done/delete. The native tool is suppressed and the agent is told the
 agent is told the `llmenv task` id to use for follow-up; the redirect is off
 when the tracker is disabled. (#985)
 
-opencode's built-in todo list is redirected the same way (added in v3.11.0).
-Its one tool, `todowrite`, replaces the whole list on every call, so llmenv
-reconciles rather than applying a single operation: todos are matched to tracked
-tasks **by title** (opencode's todo ids are per-session and mean nothing to the
-tracker), a title that isn't tracked yet is added, `in_progress` starts a task,
-and `completed` finishes it. Resending an unchanged list is a no-op, which
-matters because opencode resends everything on every edit.
-
-A tracked task that disappears from the array is **left open**. opencode sends
-no tombstone, so "finished", "abandoned", and "the model rewrote the list and
-forgot one" are indistinguishable — closing on that signal would silently lose
-work. The reply says how many tasks were dropped so you can close them with
-`llmenv task done <id>` if they really are finished. opencode has no `todoread`
-tool (reading happens through session state and the UI, not a tool call), so
-there is nothing to intercept on the read side. (#1304)
+opencode 2.x has no todo tool, so there is nothing to redirect on opencode.
+(Changed in v3.13.0. From v3.11.0, llmenv redirected the opencode 1.x `todowrite` tool, #1304.)
 
 Set `features.task_tracker.block_engine_task_tools: false` (added in v3.10.0,
 default `true`) to keep the CLAUDE.md fragment and reminders while letting
@@ -836,6 +827,7 @@ Nothing turns off the third item.
   progress. The same command runs on the next try.
   The deny marker clears the next time a commit or pull request runs while a task is in progress, so a later gap with no
   task denies once more.
+
   A task that is only `open` or `waiting` does not count as in progress.
   (changed in v3.12.2) The gate reads the command the way the shell does.
   It sees a commit inside `bash -c`, `$( )`, a backtick substitution, or a process substitution (`<( )` and `>( )`).
@@ -853,6 +845,12 @@ Nothing turns off the third item.
   (changed in v3.13.0) When the nudge state file or the task store cannot be read, the gate denies the commit and
   names the file and the error. It does not allow the commit on a guess.
 
+When a reminder cannot do its work, the agent is told why (changed in v3.13.0).
+This covers a hook payload with no session id, a nudge state that cannot be saved, and a task store that cannot be read.
+The last one is named at the end of each turn, and a commit deny names its cause.
+A corrupt nudge state is reset on disk, and the agent is told one time.
+The commit gate denies a shell call whose `tool_input.command` is missing or not a string, and names the field.
+
 Two more reminders do not depend on `nudges`.
 A reminder for a parent task in progress shows how many of its sub-tasks are done, in progress, waiting, and not started.
 The Stop reminder names the next sub-task to start when a parent is in progress and its sub-tasks are all `open` or `done`.
@@ -860,7 +858,9 @@ The Stop reminder names the next sub-task to start when a parent is in progress 
 The tracker looks at the whole project: a task in progress in any open session of the project counts as tracked work.
 The deny is once for each session, not once for each commit, and a failed state write lets the command through.
 The hooks register on Claude Code. When session logging already routes every tool call to `hook-run`, the tracker adds no
-second entry. See [`features.task_tracker:`](configuration.md#featurestask_tracker) for the fields. (#2456)
+second entry.
+On opencode only the commit gate registers, for the shell tool (changed in v3.13.0).
+See [`features.task_tracker:`](configuration.md#featurestask_tracker) for the fields. (#2456)
 
 ### Resume context (added in v3.12.0)
 

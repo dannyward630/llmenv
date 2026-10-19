@@ -159,9 +159,11 @@ fn skill_rule_is_not_reported_as_unmappable() {
 /// exit non-zero and name it, not print a warning above a success message.
 #[test]
 fn regenerate_fails_and_names_the_adapter_that_failed() {
-    // A pattern-scoped rule on an action-only opencode key (#1328).
+    // Two overlapping rules whose last-sorting one is not the narrower (#1328): opencode would
+    // let the allow win where the deny was meant to apply.
     let (dir, path) = setup(
-        "permissions:\n  allow:\n    - { tool: WebFetch, pattern: \"https://example.com/*\" }\n",
+        "permissions:\n  allow:\n    - { tool: Bash, pattern: \"git *\" }\n  deny:\n    \
+         - { tool: Bash, pattern: \"* --force*\" }\n",
     );
     llmenv(&dir, &path, "regenerate")
         .assert()
@@ -181,7 +183,8 @@ fn regenerate_fails_and_names_the_adapter_that_failed() {
 #[test]
 fn export_still_succeeds_but_names_the_failed_adapter() {
     let (dir, path) = setup(
-        "permissions:\n  allow:\n    - { tool: WebFetch, pattern: \"https://example.com/*\" }\n",
+        "permissions:\n  allow:\n    - { tool: Bash, pattern: \"git *\" }\n  deny:\n    \
+         - { tool: Bash, pattern: \"* --force*\" }\n",
     );
     llmenv(&dir, &path, "export")
         .assert()

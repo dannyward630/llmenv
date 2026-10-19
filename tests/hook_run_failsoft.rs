@@ -1109,6 +1109,11 @@ fn session_start_on_the_icm_host(fake_proxy: &str) -> assert_cmd::assert::Assert
     let script = bin.path().join("mcp-proxy");
     fs::write(&script, fake_proxy).unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    // The proxy start gives mcp-proxy the absolute path of `icm` (#2948), so a host with no `icm`
+    // installed needs a stand-in too. The stand-in proxy never runs it.
+    let icm = bin.path().join("icm");
+    fs::write(&icm, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&icm, fs::Permissions::from_mode(0o755)).unwrap();
     let old_path = std::env::var("PATH").unwrap_or_default();
     hook_cmd(dir.path(), &config_path, "session_start")
         .env("PATH", format!("{}:{old_path}", bin.path().display()))
@@ -1295,12 +1300,13 @@ fn session_start_names_a_dead_backend_on_stdout_with_the_fix() {
 }
 
 // #2358 review: a config that stops the managed servers from resolving must not turn the
-// health check off in silence. Two active codebase-memory entries are ambiguous.
+// health check off in silence. Two different active codebase-memory entries are ambiguous. Two
+// equal entries are one entry, as export merges them.
 #[test]
 fn session_start_says_when_the_health_check_could_not_run() {
     let config = config_with_codebase_memory().replace(
         "  codebase_memory:\n    - when: [test]\n",
-        "  codebase_memory:\n    - when: [test]\n    - when: [test]\n",
+        "  codebase_memory:\n    - when: [test]\n    - when: [test]\n      mem_budget_mb: 512\n",
     );
     assert!(config.matches("when: [test]").count() >= 2, "{config}");
     let (dir, config_path) = setup_config(&config);

@@ -77,7 +77,7 @@ fn a_session_with_tasks_stops_the_nudges_and_resets_the_count() {
     for _ in 0..5 {
         assert_eq!(post("Edit"), "");
     }
-    let state = load(&state_path(dir.path(), "s1").unwrap()).unwrap();
+    let (state, _) = load(&state_path(dir.path(), "s1").unwrap()).unwrap();
     assert_eq!(state.calls, 0, "tracked work resets the count");
 }
 

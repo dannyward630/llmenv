@@ -15,9 +15,6 @@ const SIMILARITY_THRESHOLD: f64 = 0.8;
 /// Number of stored rules to compare a new rule against.
 const RECALL_LIMIT: u32 = 5;
 
-/// The topic that held every project's rules before v3.12.0.
-const LEGACY_TOPIC: &str = "llmenv-consolidation";
-
 /// Words that reverse the meaning of a rule. Two rules that differ in these
 /// words are opposite rules, however many other words they share.
 const NEGATIONS: &[&str] = &[
@@ -74,29 +71,24 @@ pub(super) async fn is_stored(
     project: &str,
     rule: &str,
 ) -> anyhow::Result<bool> {
-    // The legacy rules of every project share one topic, so that recall has no project filter.
-    for (topic, scope) in [
-        (rule_topic(project), project),
-        (LEGACY_TOPIC.to_string(), ""),
-    ] {
-        let args = serde_json::json!({
-            "query": rule,
-            "topic": topic,
-            "project": scope,
-            "limit": RECALL_LIMIT,
-        });
-        let output = client.call_tool("icm_memory_recall", args).await?;
-        let stored = super::parse_recall_output(&output);
-        let in_topic = stored.iter().filter(|r| {
-            r.topic
-                .as_deref()
-                .is_some_and(|t| t.eq_ignore_ascii_case(&topic))
-        });
-        if matches_any(rule, in_topic.map(|r| r.summary.as_str())) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    // The rules stored before v3.12.0 share the topic `llmenv-consolidation`, which names no
+    // project. No recall reads it since #2950, so a rule there must not stop this project from
+    // storing its own copy.
+    let topic = rule_topic(project);
+    let args = serde_json::json!({
+        "query": rule,
+        "topic": topic,
+        "project": project,
+        "limit": RECALL_LIMIT,
+    });
+    let output = client.call_tool("icm_memory_recall", args).await?;
+    let stored = super::parse_recall_output(&output);
+    let in_topic = stored.iter().filter(|r| {
+        r.topic
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case(&topic))
+    });
+    Ok(matches_any(rule, in_topic.map(|r| r.summary.as_str())))
 }
 
 #[cfg(test)]
@@ -209,7 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_legacy_topic_rule_is_a_duplicate() {
+    async fn a_legacy_topic_rule_of_any_project_is_not_a_duplicate() {
         let legacy = "--- r1 ---\n  topic: llmenv-consolidation\n  importance: high\n  \
                       weight: 1.0\n  summary: Always run cargo fmt before commit\n";
         let server = server(legacy).await;
@@ -217,6 +209,16 @@ mod tests {
         let got = is_stored(&client, "p", "Always run cargo fmt before commit")
             .await
             .unwrap();
-        assert!(got);
+        assert!(
+            !got,
+            "no recall reads the legacy topic, so the rule must be stored again"
+        );
+        let asked = server.received_requests().await.unwrap();
+        assert!(
+            asked
+                .iter()
+                .all(|r| !String::from_utf8_lossy(&r.body).contains("\"project\":\"\"")),
+            "no dedup recall reads every project"
+        );
     }
 }

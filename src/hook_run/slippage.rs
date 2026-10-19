@@ -116,7 +116,7 @@ pub(super) fn load_stats(state_dir: &std::path::Path, session_id: &str) -> Sessi
     // rewrites the log. The deny is deliberate: a corrupt log cannot prove a read.
     // A missing log is the normal first-use case and is not logged.
     let path = stats_path(state_dir, session_id);
-    let text = match std::fs::read_to_string(&path) {
+    let text = match crate::paths::bounded::state_text_io(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionStats::default(),
         Err(e) => {

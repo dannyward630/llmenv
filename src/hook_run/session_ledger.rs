@@ -264,7 +264,7 @@ impl LedgerStore {
     /// file that exists but cannot be read.
     fn read(&self, session_id: &str) -> Option<Ledger> {
         let path = self.file(session_id, "json");
-        match std::fs::read_to_string(&path) {
+        match crate::paths::bounded::state_text_io(&path) {
             Ok(text) => Some(serde_json::from_str(&text).unwrap_or_else(|e| {
                 tracing::error!(
                     "recall ledger {} is corrupt, starting a fresh epoch: {e}",

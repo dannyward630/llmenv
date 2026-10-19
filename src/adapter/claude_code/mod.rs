@@ -120,10 +120,9 @@ pub(crate) fn lifecycle_hook_registrations(
     let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
     // #2249: the adaptive recall hooks are the ones `adaptive_recall: false` turns
     // off; an ICM entry without resolved settings uses the default, which is on.
-    let adaptive_recall = manifest
-        .mcps
-        .iter()
-        .any(|m| m.name == MEMORY_MCP_NAME && m.memory_hook.is_none_or(|h| h.adaptive_recall));
+    let adaptive_recall = manifest.mcps.iter().any(|m| {
+        m.name == MEMORY_MCP_NAME && m.memory_hook.as_ref().is_none_or(|h| h.adaptive_recall)
+    });
     let session_log = manifest.session_log.any_sink_enabled();
     let task_tracker = manifest
         .capabilities
@@ -425,36 +424,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         })?;
         let mut vars = vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())];
 
-        // Temp dir: CLAUDE_CODE_TMPDIR + the standard POSIX temp vars, so
-        // subprocesses scratch inside llmenv's tree rather than the shared
-        // /tmp. Claude Code appends /claude-{uid}/ to the value on Unix.
-        //
-        // Lives in the durable state dir, not the per-hash cache folder (#1379).
-        // It used to be `cache_dir.join("tmp")`, which put it inside a directory
-        // that both `llmenv clean` and an ordinary config edit are allowed to
-        // delete — pruning a stale generation, or minting a new shape hash by
-        // editing config.yaml, left every already-running shell with TMPDIR
-        // pointing at nothing. The breakage was silent until something needed a
-        // temp file, and then surfaced as someone else's error: git, for one,
-        // fails an SSH-signed commit with "could not create temporary file:
-        // No such file or directory" / "failed to write commit object", which
-        // names neither llmenv nor TMPDIR. The state dir is never a prune
-        // candidate under any mode (#175), same as `plugins_dir` below, so the
-        // path stays valid for the life of the shell. Temp files have no reason
-        // to be shape-scoped: `mktemp` already keeps concurrent users apart by
-        // generating unique names.
-        let tmp_dir = state_dir.join("tmp");
-        std::fs::create_dir_all(&tmp_dir)?;
-        let tmp_str = tmp_dir.to_str().ok_or_else(|| {
-            anyhow::anyhow!(
-                "cache_dir tmp dir is not valid UTF-8: {}",
-                tmp_dir.display()
-            )
-        })?;
-        vars.push(("CLAUDE_CODE_TMPDIR".into(), tmp_str.to_owned()));
-        vars.push(("TMPDIR".into(), tmp_str.to_owned()));
-        vars.push(("TMP".into(), tmp_str.to_owned()));
-        vars.push(("TEMP".into(), tmp_str.to_owned()));
+        // Claude Code appends /claude-{uid}/ to CLAUDE_CODE_TMPDIR on Unix.
+        let (tmp, temp_vars) = crate::adapter::temp_dir::temp_dir_vars(state_dir)?;
+        vars.push(("CLAUDE_CODE_TMPDIR".into(), tmp));
+        vars.extend(temp_vars);
 
         // Durable plugin root in the state dir (#632): despite the misleading
         // "CACHE" in its name, CLAUDE_CODE_PLUGIN_CACHE_DIR controls the ENTIRE
@@ -524,12 +497,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            // A bundle file is user content, so a FIFO or a huge file must not hang the render.
             if is_hook_json(rel) {
-                let raw = std::fs::read_to_string(abs)?;
+                let raw = crate::paths::bounded::asset_text(abs)?;
                 let rendered = raw.replace("{{ICM_MCP}}", MEMORY_MCP_NAME);
                 crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
             } else {
-                let bytes = std::fs::read(abs)?;
+                let bytes = crate::paths::bounded::asset(abs)?;
                 crate::paths::write_owner_only(&dest, &bytes)?;
             }
             owned.push(rel.clone());
@@ -956,7 +930,7 @@ fn merge_mcp_into_claude_json(
 /// Returns an empty set when the file is absent or corrupt — a bad companion
 /// file must never prevent `.claude.json` from being written.
 fn read_owned_servers(path: &Path) -> std::collections::BTreeSet<String> {
-    let s = match std::fs::read_to_string(path) {
+    let s = match crate::paths::bounded::state_text_io(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return std::collections::BTreeSet::new();
@@ -3840,10 +3814,8 @@ mod tests {
                 disabled_tools: vec![],
                 mcp_permissions: None,
                 memory_hook: Some(crate::mcp::resolve::MemoryHookSettings {
-                    wakeup_max_tokens: None,
-                    adaptive_recall: false,
-                    default_type: None,
-                    default_importance: None,
+                    global_topics: vec![],
+                    ..crate::mcp::resolve::MemoryHookSettings::default()
                 }),
             }],
             ..Default::default()
@@ -4346,25 +4318,17 @@ mod tests {
             },
         )]);
         let memory = crate::config::Memory {
-            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
             mcp_permissions: Some(crate::config::McpPermissions {
                 read_only: None,
                 mutation: None,
                 destructive: Some(crate::config::McpPermissionAction::Deny),
             }),
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..crate::config::Memory::default()
         };
         let active_tags = std::collections::BTreeSet::from(["home".to_string()]);
         let resolved = crate::mcp::resolve::resolve_mcps(&[], &[memory], &host, &active_tags)

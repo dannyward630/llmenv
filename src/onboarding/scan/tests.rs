@@ -263,7 +263,10 @@ fn a_malformed_or_large_manifest_is_a_note_not_an_error() {
         found.notes
     );
     assert!(
-        found.notes.iter().any(|n| n.contains("MAX_MANIFEST_BYTES")),
+        found
+            .notes
+            .iter()
+            .any(|n| n.contains(&format!("more than {} bytes", super::MAX_MANIFEST_BYTES))),
         "{:?}",
         found.notes
     );

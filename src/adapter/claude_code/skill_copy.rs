@@ -8,7 +8,7 @@ use crate::adapter::skills::create_dir_owner_only;
 
 /// The largest file that a skill folder copies. The largest skill asset in common use is a few
 /// MiB, so a file this large is a mistake, and the copy holds the whole file in memory (#2942).
-const MAX_SKILL_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SKILL_FILE_BYTES: u64 = crate::paths::bounded::MAX_ASSET_BYTES;
 
 /// Copy files from a source directory into a destination recursively, writing
 /// each file owner-only (0o600). Non-UTF-8 paths are skipped (same policy as

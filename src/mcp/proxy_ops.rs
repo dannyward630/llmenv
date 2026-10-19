@@ -108,16 +108,20 @@ pub(crate) enum StopOutcome {
     StillRunning,
 }
 
-/// A command line that starts the memory proxy: `mcp-proxy … -- icm serve`. A script runs
-/// through its interpreter, and `uvx` runs the tool by name, so `mcp-proxy` is the first or the
-/// second word.
+/// A command line that starts the memory proxy: `mcp-proxy … -- <icm> serve`, where `<icm>` is
+/// `icm` or an absolute path to it (#2948). A script runs through its interpreter, and `uvx` runs
+/// the tool by name, so `mcp-proxy` is the first or the second word.
 fn is_proxy_command(command: &str) -> bool {
-    let mut words = command.split_whitespace();
-    let leading: Vec<&str> = words.by_ref().take(2).collect();
-    let names_proxy = leading
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let names_proxy = words
         .iter()
+        .take(2)
         .any(|w| w.rsplit('/').next() == Some("mcp-proxy"));
-    names_proxy && command.trim_end().ends_with("-- icm serve")
+    let serves_icm = matches!(
+        words.as_slice(),
+        [.., "--", icm, "serve"] if icm.rsplit('/').next() == Some("icm")
+    );
+    names_proxy && serves_icm
 }
 
 /// The command line of `pid`, or `None` when the process is gone. `-ww` stops `ps` from cutting
@@ -290,6 +294,12 @@ mod tests {
                 "/venv/bin/python3 /venv/bin/mcp-proxy --host 1 --port 2 -- icm serve",
                 true,
             ),
+            (
+                "mcp-proxy --host 1 --port 2 -- /opt/homebrew/bin/icm serve",
+                true,
+            ),
+            ("mcp-proxy --host 1 --port 2 -- /x/icm-fake serve", false),
+            ("mcp-proxy --host 1 --port 2 icm serve", false),
             ("sh -c echo mcp-proxy -- icm serve", false),
             ("/bin/other /x/mcp-proxy-fake --host 1 -- icm serve", false),
             ("mcp-proxy --host 1 --port 2 -- other serve", false),
@@ -364,7 +374,16 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut child = std::process::Command::new(&script)
-            .args(["--host", "127.0.0.1", "--port", "1", "--", "icm", "serve"])
+            // The proxy gets an absolute `icm` (#2948), so the stop must still know it.
+            .args([
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "1",
+                "--",
+                "/usr/local/bin/icm",
+                "serve",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
