@@ -462,7 +462,6 @@ mod tests {
     use super::*;
     use crate::config::{Features, Marketplace, Memory, PluginCollection};
     use proptest::prelude::*;
-    use std::collections::BTreeMap;
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
         ts.iter().map(|s| (*s).to_string()).collect()
@@ -682,21 +681,12 @@ mod tests {
     #[test]
     fn collect_mcps_degrades_to_error_count_on_ambiguous_memory() {
         let mem = |host: &str| Memory {
-            always_load: None,
             server_host: host.into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
             when: vec!["t".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..Memory::default()
         };
         let config = Config {
             features: Some(Features {

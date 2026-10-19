@@ -57,6 +57,7 @@ pub(crate) mod transcript;
 mod transcript_link;
 use respawn::respawn_job;
 use stop_reminder::resolve_stop_reminder;
+mod global_topics;
 mod web_fetch;
 
 #[cfg(test)]
@@ -431,7 +432,7 @@ fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
 /// without a project scope would return other projects' memories (#2688).
 fn wake_args(
     event: HookEvent,
-    settings: Option<MemoryHookSettings>,
+    settings: Option<&MemoryHookSettings>,
     payload: &serde_json::Value,
     cwd: &str,
     session_id: Option<&str>,
@@ -467,7 +468,7 @@ fn records_locally(event: HookEvent) -> bool {
 /// An unsafe `session_id` cannot key a ledger file, so it takes the stateless actions.
 fn uses_adaptive(
     event: HookEvent,
-    settings: Option<MemoryHookSettings>,
+    settings: Option<&MemoryHookSettings>,
     session_id: Option<&str>,
 ) -> bool {
     settings.is_some_and(|s| s.adaptive_recall)
@@ -486,7 +487,7 @@ fn uses_adaptive(
 struct MemoryCall<'a> {
     event: HookEvent,
     client: &'a McpHttpClient,
-    settings: Option<MemoryHookSettings>,
+    settings: Option<&'a MemoryHookSettings>,
     session_id: Option<&'a str>,
     state_dir: Option<std::path::PathBuf>,
     payload: &'a serde_json::Value,
@@ -523,6 +524,7 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<HookText> {
         store: &store,
         session_id,
         payload: call.payload,
+        global_topics: call.settings.map_or(&[], |s| &s.global_topics),
     };
     match call.event {
         HookEvent::SessionStart => {
@@ -1472,24 +1474,29 @@ fn run_inner(
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
-        let settings = resolved_client.as_ref().map(|r| r.settings);
+        let settings = resolved_client.as_ref().map(|r| r.settings.clone());
         // Default type/importance markers (R1, R3) from the resolved entry, which
         // can be top-level or bundle-declared, when the chunk has none of its own.
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
-        let (wake, memory_notice) =
-            match wake_args(event, settings, stdin_payload, &env.cwd, claude_session_id) {
-                Ok(args) => (args, None),
-                Err(e) => {
-                    tracing::error!("memory skipped for {event}: {e:#}");
-                    let args = WakeUpArgs {
-                        max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
-                        project: None,
-                    };
-                    (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
-                }
-            };
+        let (wake, memory_notice) = match wake_args(
+            event,
+            settings.as_ref(),
+            stdin_payload,
+            &env.cwd,
+            claude_session_id,
+        ) {
+            Ok(args) => (args, None),
+            Err(e) => {
+                tracing::error!("memory skipped for {event}: {e:#}");
+                let args = WakeUpArgs {
+                    max_tokens: settings.as_ref().and_then(|s| s.wakeup_max_tokens),
+                    project: None,
+                };
+                (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
+            }
+        };
         let memory_skipped = memory_notice.is_some();
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
@@ -1621,14 +1628,17 @@ fn run_inner(
                     && !memory_skipped
                 {
                     let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
-                    let actions =
-                        dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
+                    let actions = global_topics::turn_actions(
+                        dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call),
+                        &query,
+                        settings.as_ref().map_or(&[], |s| &s.global_topics),
+                    );
                     // Use minimal chunk for storage to avoid duplication. (#1792)
                     let store_content = store_content_for_event(event, &chunk, &storage_chunk);
                     memory = match run_event_memory(MemoryCall {
                         event,
                         client,
-                        settings,
+                        settings: settings.as_ref(),
                         session_id: claude_session_id,
                         state_dir: crate::paths::state_dir()
                             .inspect_err(|e| {
@@ -2205,9 +2215,9 @@ impl MemoryEndpoint {
 
     /// The active entry's hook settings (#1216, #2249). `None` for every
     /// non-[`MemoryEndpoint::Active`] variant.
-    fn settings(&self) -> Option<MemoryHookSettings> {
+    fn settings(&self) -> Option<&MemoryHookSettings> {
         match self {
-            Self::Active { settings, .. } => Some(*settings),
+            Self::Active { settings, .. } => Some(settings),
             _ => None,
         }
     }
@@ -2216,18 +2226,21 @@ impl MemoryEndpoint {
     /// `into_url` itself keeps its existing signature since it has several
     /// other callers that don't need the settings.
     fn into_url_and_settings(self) -> anyhow::Result<(String, MemoryHookSettings)> {
-        let settings = self.settings().unwrap_or(DEFAULT_MEMORY_HOOK);
+        let settings = self.settings().cloned().unwrap_or_else(default_memory_hook);
         Ok((self.into_url()?, settings))
     }
 }
 
 /// The settings of a `features.memory` entry that sets neither hook field.
-const DEFAULT_MEMORY_HOOK: MemoryHookSettings = MemoryHookSettings {
-    wakeup_max_tokens: None,
-    adaptive_recall: true,
-    default_type: None,
-    default_importance: None,
-};
+fn default_memory_hook() -> MemoryHookSettings {
+    MemoryHookSettings {
+        wakeup_max_tokens: None,
+        adaptive_recall: true,
+        default_type: None,
+        default_importance: None,
+        global_topics: crate::config::Memory::default().global_topics,
+    }
+}
 
 /// A resolved memory-backend client plus the active `features.memory`
 /// entry's hook settings (#1216, #2249) — the two travel together since both
@@ -2374,7 +2387,7 @@ pub(crate) fn memory_url(
     Ok(match matched {
         Some((url, settings)) => MemoryEndpoint::Active {
             url,
-            settings: settings.unwrap_or(DEFAULT_MEMORY_HOOK),
+            settings: settings.unwrap_or_else(default_memory_hook),
         },
         None => classify_missing_memory(
             config,
@@ -3633,16 +3646,13 @@ mod tests {
     #[test]
     fn adaptive_applies_only_to_its_events_with_a_valid_session() {
         let on = Some(MemoryHookSettings {
-            wakeup_max_tokens: None,
             adaptive_recall: true,
-            default_type: None,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         });
         let off = Some(MemoryHookSettings {
-            wakeup_max_tokens: None,
-            adaptive_recall: false,
-            default_type: None,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         });
         for event in [
             HookEvent::SessionStart,
@@ -3650,15 +3660,19 @@ mod tests {
             HookEvent::PostToolUseFailure,
             HookEvent::SubagentStart,
         ] {
-            assert!(uses_adaptive(event, on, Some("s1")), "{event}");
-            assert!(!uses_adaptive(event, off, Some("s1")), "{event}");
-            assert!(!uses_adaptive(event, on, None), "{event}");
+            assert!(uses_adaptive(event, on.as_ref(), Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, off.as_ref(), Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, on.as_ref(), None), "{event}");
             assert!(
-                !uses_adaptive(event, on, Some("../x")),
+                !uses_adaptive(event, on.as_ref(), Some("../x")),
                 "unsafe id: {event}"
             );
         }
-        assert!(!uses_adaptive(HookEvent::SessionEnd, on, Some("s1")));
+        assert!(!uses_adaptive(
+            HookEvent::SessionEnd,
+            on.as_ref(),
+            Some("s1")
+        ));
     }
 
     #[test]
@@ -4149,6 +4163,7 @@ mod tests {
             mcp_permissions: None,
             wakeup_max_tokens: None,
             adaptive_recall: true,
+            global_topics: crate::config::Memory::default().global_topics,
         }];
         let mut persisted_host = std::collections::BTreeMap::new();
         persisted_host.insert(
@@ -4170,7 +4185,7 @@ mod tests {
             url,
             MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                settings: DEFAULT_MEMORY_HOOK,
+                settings: default_memory_hook(),
             },
             "memory_url must read the persisted merge cache instead of falling \
                  back to a live merge of a bundle that declares no memory/host"
@@ -4240,7 +4255,7 @@ mod tests {
             url,
             MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                settings: DEFAULT_MEMORY_HOOK,
+                settings: default_memory_hook(),
             },
             "a key mismatch must fall back to a correct live merge, never the stale cache"
         );
@@ -4295,7 +4310,7 @@ mod tests {
             url,
             MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                settings: DEFAULT_MEMORY_HOOK,
+                settings: default_memory_hook(),
             }
         );
     }
@@ -4499,21 +4514,13 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
-                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
                     when: vec!["network-home".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
                     wakeup_max_tokens: Some(750),
-                    adaptive_recall: true,
+                    global_topics: vec![],
+                    ..crate::config::Memory::default()
                 }],
                 ..Default::default()
             }),
@@ -4550,21 +4557,12 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
-                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
                     when: vec!["network-home".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
+                    global_topics: vec![],
+                    ..crate::config::Memory::default()
                 }],
                 ..Default::default()
             }),
@@ -4819,21 +4817,12 @@ mod tests {
             }],
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
-                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
                     when: vec!["mytag".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
+                    global_topics: vec![],
+                    ..crate::config::Memory::default()
                 }],
                 ..Default::default()
             }),
@@ -6273,21 +6262,11 @@ mod tests {
     /// but the struct has no `Default` shorthand for the rest.
     fn memory_with_host(server_host: &str) -> crate::config::Memory {
         crate::config::Memory {
-            always_load: None,
             server_host: server_host.to_string(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
-            when: vec![],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..crate::config::Memory::default()
         }
     }
 
@@ -6450,10 +6429,10 @@ mod tests {
 
     fn memory_settings(default_type: Option<llmenv_config::MemoryType>) -> MemoryHookSettings {
         MemoryHookSettings {
-            wakeup_max_tokens: None,
             adaptive_recall: true,
             default_type,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         }
     }
 
@@ -7098,11 +7077,10 @@ mod adaptive_routing_tests {
         run_event_memory(MemoryCall {
             event,
             client: &client,
-            settings: Some(MemoryHookSettings {
-                wakeup_max_tokens: None,
+            settings: Some(&MemoryHookSettings {
                 adaptive_recall,
-                default_type: None,
-                default_importance: None,
+                global_topics: vec![],
+                ..MemoryHookSettings::default()
             }),
             session_id: Some("s1"),
             state_dir: Some(state_dir.path().to_path_buf()),
@@ -7176,26 +7154,37 @@ mod adaptive_routing_tests {
         let cwd = repo.path().to_str().unwrap();
         let payload = json!({"cwd": cwd});
         let adaptive = Some(MemoryHookSettings {
-            wakeup_max_tokens: None,
             adaptive_recall: true,
-            default_type: None,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         });
-        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/", Some("s1"))
-            .ok()
-            .and_then(|w| w.project);
+        let start = wake_args(
+            HookEvent::SessionStart,
+            adaptive.as_ref(),
+            &payload,
+            "/",
+            Some("s1"),
+        )
+        .ok()
+        .and_then(|w| w.project);
         assert_eq!(start.as_deref(), Some("wake-repo"));
         // #2253: the stateless TurnStart recall is scoped to the session project.
         let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/", Some("s1"))
             .ok()
             .and_then(|w| w.project);
         assert_eq!(stateless.as_deref(), Some("wake-repo"));
-        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/", Some("s1"))
-            .ok()
-            .and_then(|w| w.project);
+        let adaptive_turn = wake_args(
+            HookEvent::TurnStart,
+            adaptive.as_ref(),
+            &payload,
+            "/",
+            Some("s1"),
+        )
+        .ok()
+        .and_then(|w| w.project);
         assert_eq!(adaptive_turn, None, "the ledger holds the project");
         // Adaptive is on, but no session id means the stateless path runs. It must still scope.
-        let no_session = wake_args(HookEvent::TurnStart, adaptive, &payload, "/", None)
+        let no_session = wake_args(HookEvent::TurnStart, adaptive.as_ref(), &payload, "/", None)
             .ok()
             .and_then(|w| w.project);
         assert_eq!(

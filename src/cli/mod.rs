@@ -6287,21 +6287,12 @@ mod tests {
         Config {
             features: Some(Features {
                 memory: vec![Memory {
-                    always_load: None,
                     server_host: "srv".to_string(),
                     port,
                     listen_host: listen_host.to_string(),
                     when: vec!["mem".to_string()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
+                    global_topics: vec![],
+                    ..Memory::default()
                 }],
                 throttle: vec![],
                 context_mode: None,

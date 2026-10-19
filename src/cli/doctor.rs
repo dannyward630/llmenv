@@ -2111,21 +2111,12 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
-                always_load: None,
                 server_host: "still".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
                 when: vec!["mytag".into()],
-                default_topics: vec![],
-                default_type: None,
-                default_importance: None,
-                type_importance: BTreeMap::new(),
-                retention: None,
-                auto_prune: false,
-                consolidation: None,
-                mcp_permissions: None,
-                wakeup_max_tokens: None,
-                adaptive_recall: true,
+                global_topics: vec![],
+                ..Memory::default()
             }],
             ..Default::default()
         });
@@ -2150,21 +2141,12 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
-                always_load: None,
                 server_host: "elsewhere".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
                 when: vec!["othertag".into()],
-                default_topics: vec![],
-                default_type: None,
-                default_importance: None,
-                type_importance: BTreeMap::new(),
-                retention: None,
-                auto_prune: false,
-                consolidation: None,
-                mcp_permissions: None,
-                wakeup_max_tokens: None,
-                adaptive_recall: true,
+                global_topics: vec![],
+                ..Memory::default()
             }],
             ..Default::default()
         });

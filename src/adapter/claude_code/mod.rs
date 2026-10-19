@@ -120,10 +120,9 @@ pub(crate) fn lifecycle_hook_registrations(
     let icm_active = manifest.mcps.iter().any(|m| m.name == MEMORY_MCP_NAME);
     // #2249: the adaptive recall hooks are the ones `adaptive_recall: false` turns
     // off; an ICM entry without resolved settings uses the default, which is on.
-    let adaptive_recall = manifest
-        .mcps
-        .iter()
-        .any(|m| m.name == MEMORY_MCP_NAME && m.memory_hook.is_none_or(|h| h.adaptive_recall));
+    let adaptive_recall = manifest.mcps.iter().any(|m| {
+        m.name == MEMORY_MCP_NAME && m.memory_hook.as_ref().is_none_or(|h| h.adaptive_recall)
+    });
     let session_log = manifest.session_log.any_sink_enabled();
     let task_tracker = manifest
         .capabilities
@@ -3815,10 +3814,8 @@ mod tests {
                 disabled_tools: vec![],
                 mcp_permissions: None,
                 memory_hook: Some(crate::mcp::resolve::MemoryHookSettings {
-                    wakeup_max_tokens: None,
-                    adaptive_recall: false,
-                    default_type: None,
-                    default_importance: None,
+                    global_topics: vec![],
+                    ..crate::mcp::resolve::MemoryHookSettings::default()
                 }),
             }],
             ..Default::default()
@@ -4321,25 +4318,17 @@ mod tests {
             },
         )]);
         let memory = crate::config::Memory {
-            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
             mcp_permissions: Some(crate::config::McpPermissions {
                 read_only: None,
                 mutation: None,
                 destructive: Some(crate::config::McpPermissionAction::Deny),
             }),
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..crate::config::Memory::default()
         };
         let active_tags = std::collections::BTreeSet::from(["home".to_string()]);
         let resolved = crate::mcp::resolve::resolve_mcps(&[], &[memory], &host, &active_tags)

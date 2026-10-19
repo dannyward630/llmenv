@@ -2000,21 +2000,12 @@ mod tests {
             Capabilities {
                 features: Some(Features {
                     memory: vec![Memory {
-                        always_load: None,
                         server_host: server_host.into(),
                         port: 9092,
                         listen_host: "127.0.0.1".into(),
                         when: vec![tag.into()],
-                        default_topics: vec![],
-                        default_type: None,
-                        default_importance: None,
-                        type_importance: std::collections::BTreeMap::new(),
-                        retention: None,
-                        auto_prune: false,
-                        consolidation: None,
-                        mcp_permissions: None,
-                        wakeup_max_tokens: None,
-                        adaptive_recall: true,
+                        global_topics: vec![],
+                        ..Memory::default()
                     }],
                     throttle: vec![],
                     context_mode: None,
@@ -2070,21 +2061,12 @@ mod tests {
             Capabilities {
                 features: Some(Features {
                     memory: vec![Memory {
-                        always_load: None,
                         server_host: server_host.into(),
                         port: 9092,
                         listen_host: "127.0.0.1".into(),
                         when: vec!["home".into()],
-                        default_topics: vec![],
-                        default_type: None,
-                        default_importance: None,
-                        type_importance: std::collections::BTreeMap::new(),
-                        retention: None,
-                        auto_prune: false,
-                        consolidation: None,
-                        mcp_permissions: None,
-                        wakeup_max_tokens: None,
-                        adaptive_recall: true,
+                        global_topics: vec![],
+                        ..Memory::default()
                     }],
                     throttle: vec![],
                     context_mode: None,

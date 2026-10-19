@@ -21,6 +21,7 @@ use crate::hook_run::transcript;
 mod cut;
 mod failure;
 mod outcome;
+mod scope;
 mod session_reset;
 mod subagent;
 mod waves;
@@ -29,6 +30,9 @@ mod waves;
 use cut::cut_items_notice;
 use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
 use outcome::Outcome;
+use scope::run_scope;
+#[cfg(test)]
+use scope::{scope_cut_notice, unrun_notice};
 use session_reset::{FirstUpdate, first_update_notice, resets_ledger};
 use subagent::agent_key;
 pub(super) use subagent::subagent_start;
@@ -53,6 +57,8 @@ pub(super) struct AdaptiveCtx<'a> {
     pub(super) store: &'a LedgerStore,
     pub(super) session_id: &'a str,
     pub(super) payload: &'a Value,
+    /// The topics that the main recall reads across every project (#2950).
+    pub(super) global_topics: &'a [String],
 }
 
 /// A recall across all projects. ICM's default project filter is the ICM
@@ -131,60 +137,6 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> String {
 const RESET_UNDONE: &str = "llmenv: the recall ledger was not reset after a context reset (the \
      state file was locked or unreadable). Records seen before the reset may stay filtered from \
      recall. Fix: run `llmenv doctor` to check the state directory.";
-
-/// The notice for scope recalls that the output budget cut off, or `None` when none were cut
-/// (#2766). The recalls are unknown to the agent, not empty, so the notice says so.
-fn scope_cut_notice(skipped: usize) -> Option<String> {
-    (skipped > 0).then(|| {
-        format!(
-            "llmenv: {skipped} recall action(s) were skipped because the output budget was full. \
-             Those recalls are unknown, not empty. Fix: store shorter memories, so more recalls \
-             fit the budget."
-        )
-    })
-}
-
-/// Run the scope recalls into `budget`, one after another, until it is full.
-async fn run_scope(
-    ctx: &AdaptiveCtx<'_>,
-    scope: Vec<Action>,
-    budget: &mut RecallBudget,
-) -> (Outcome, Option<String>) {
-    let mut outcome = Outcome::default();
-    let mut actions = scope.into_iter();
-    // A refused or timed-out server would stall each remaining tag for one HOOK_TIMEOUT, so the
-    // first failure ends the fallback for this turn (#2897).
-    while !budget.is_full() && outcome.failed == 0 {
-        let Some(action) = actions.next() else {
-            break;
-        };
-        outcome.push(Some(action.run(ctx.client, "", "").await));
-        if let Some(text) = outcome.texts.last() {
-            budget.add_text(text);
-        }
-        outcome.texts.clear();
-    }
-    let notice = unrun_notice(actions.len(), outcome.failed > 0, budget.is_full());
-    (outcome, notice)
-}
-
-/// The notice for scope recalls that did not run, or `None` when none were skipped. A stop after
-/// a failure is not retried this epoch, so the agent must hear about it (#2897). A cut by the
-/// output budget has its own notice (#2766).
-fn unrun_notice(unrun: usize, failed: bool, budget_full: bool) -> Option<String> {
-    if unrun == 0 {
-        return None;
-    }
-    if budget_full {
-        return scope_cut_notice(unrun);
-    }
-    failed.then(|| {
-        format!(
-            "llmenv: {unrun} scope recall action(s) did not run after a memory recall failed. \
-             Fix: run `llmenv doctor` to check the memory server."
-        )
-    })
-}
 
 /// `SessionStart`: reset per `source`, then send the wake-up pack and the scope set.
 /// A continued session (resume, fork) gets no wake-up pack (#2142).
@@ -352,7 +304,7 @@ pub(super) async fn turn_start(
     let mut main_ok = false;
     if !repeated && !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        let (wave, ok) = waves(ctx.client, &text, &keywords, ledger.project.as_deref()).await;
+        let (wave, ok) = waves(ctx, &text, &keywords, ledger.project.as_deref()).await;
         wave.texts.iter().for_each(|t| budget.add_text(t));
         main_ok = ok;
         outcome.merge(wave);
@@ -573,6 +525,7 @@ mod tests {
         _dir: tempfile::TempDir,
         store: LedgerStore,
         client: McpHttpClient,
+        topics: Vec<String>,
     }
 
     fn fixture(server: &MockServer) -> Fixture {
@@ -583,6 +536,7 @@ mod tests {
             _dir: dir,
             store,
             client,
+            topics: vec!["preferences".to_string()],
         }
     }
 
@@ -592,6 +546,7 @@ mod tests {
             store: &f.store,
             session_id: "s1",
             payload,
+            global_topics: &f.topics,
         }
     }
 
@@ -877,7 +832,8 @@ mod tests {
     async fn waves_count_every_failed_call() {
         let server = failing_server().await;
         let f = fixture(&server);
-        let (outcome, main_ok) = waves(&f.client, "q", &["k".to_string()], None).await;
+        let payload = serde_json::json!({});
+        let (outcome, main_ok) = waves(&ctx(&f, &payload), "q", &["k".to_string()], None).await;
         assert!(!main_ok);
         assert!(outcome.all_failed(), "{outcome:?}");
         assert_eq!(outcome.calls, 2);

@@ -698,6 +698,7 @@ features:
 | `mcp_permissions` | no | Per-tier permission override for the ICM MCP's tools — see [`mcp_permissions`](#featuresmcp_permissions) below |
 | `wakeup_max_tokens` | no | Token budget for the `SessionStart` wake-up call, `20`-`4000` (added in v3.8.0) |
 | `adaptive_recall` | no | Per-session adaptive recall, `true` or `false`, default `true` (added in v3.12.0) |
+| `global_topics` | no | Topics that the per-prompt recall reads from every project, default `[preferences, errors-resolved]` (added in v3.13.0) |
 | `always_load` | no | Claude Code `alwaysLoad` for the ICM server, `true` or `false`, default `true`: the ICM tools load with the prompt instead of behind tool search. Set `false` to defer them again (added in v3.12.0) |
 | `default_type` | no | Memory type, `episodic`, `semantic`, or `procedural`, that llmenv tags on the memories it stores (added in v3.0.0) |
 | `default_importance` | no | Importance, `low`, `medium`, `high`, or `critical`, that llmenv tags on the memories it stores (added in v3.0.0) |
@@ -721,6 +722,12 @@ Each prompt then recalls memories that match the prompt, the files and commands 
 A failed tool call injects memories about that error, and a new subagent gets memories that match its task.
 After a compaction or `/clear`, the state resets and the scope-tagged memories go out again.
 Set `adaptive_recall: false` to go back to the stateless recall, which sends the same scope-tagged memories on every prompt.
+
+`global_topics` (added in v3.13.0) sets which memories a prompt recall reads from other projects.
+The per-prompt recall reads the memories of the session's project, plus the memories in each topic of this list from every project.
+It does not read other topics of other projects, so the facts of one project do not show up in another.
+A session with no project reads the global topics only.
+Set `global_topics: []` to read the session's project only.
 
 #### Post-session consolidation
 
