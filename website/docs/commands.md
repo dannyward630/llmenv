@@ -954,6 +954,8 @@ or to re-authenticate.
 
 ```text
 llmenv setup [PATH] [--repo URL] [--no-launch] [--rescan]
+llmenv setup --scan ROOT...
+llmenv setup --tools
 ```
 
 Interactive setup wizard for new llmenv users. Walks through auth setup (login
@@ -964,6 +966,42 @@ guide, then optionally hands off to the AI engine for further configuration.
 
 - `--no-launch` skips the AI engine handoff at the end.
 - `--rescan` re-scans existing configs without overwriting files.
+
+### `setup --scan`
+
+(added in v3.13.0)
+
+`--scan ROOT...` finds the repositories under each root and prints the evidence as JSON for the onboarding skill.
+It writes nothing, and it does not run the wizard.
+A repository is a folder with a `.git` folder or file.
+The walk does not enter a repository, a hidden folder, or `node_modules`, `target`, `vendor`, `dist`, and `build`.
+It does not follow a symlink.
+
+For each repository the JSON gives:
+
+- the top-level names (a folder name ends in `/`),
+- the file names under `.github/workflows/`,
+- the `[package]` name, edition, and `rust-version` of `Cargo.toml`, and whether it declares a workspace,
+- the script names of `package.json` (not the commands), and its `packageManager`,
+- the project name, `requires-python`, build backend, and `[tool.*]` table names of `pyproject.toml`,
+- notes for the facts that could not be read, such as a manifest that does not parse.
+
+The scan never reads a source file and never runs a script of a scanned repository.
+It refuses `/` and the home folder; pass a narrower folder, such as `~/git`.
+Named constants in `src/onboarding/scan.rs` bound the depth, the repository count, and the folders read.
+Others bound the names per listing and the manifest size.
+The `limits` object in the JSON gives their values.
+A scan that passes the repository bound or the folder bound stops with an error that names the constant.
+
+### `setup --tools`
+
+(added in v3.13.0)
+
+`--tools` prints the tools that onboarding can suggest, as JSON.
+Each tool has its purpose, the evidence that makes it relevant, and its install command per package manager.
+It also has `found`: the binary found on `PATH`, or `null`.
+ICM and codebase-memory-mcp come first as the recommended default, each with the `features` key that a yes turns on.
+The report reads only absolute `PATH` folders, makes no network call, and installs nothing.
 
 ## `config-context`
 
