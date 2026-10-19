@@ -220,6 +220,21 @@ fn web_fetch_store_args_handles_empty_response() {
 }
 
 #[test]
+fn a_preview_of_exactly_the_limit_has_no_truncation_mark() {
+    let preview = |len: usize| {
+        let payload = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.com"},
+            "tool_response": "x".repeat(len),
+        });
+        let args = web_fetch_store_args(&payload, None).expect("a web fetch");
+        args["content"].as_str().unwrap().to_string()
+    };
+    assert!(!preview(1000).ends_with("(truncated)"));
+    assert!(preview(1001).ends_with("... (truncated)"));
+}
+
+#[test]
 fn web_fetch_store_args_truncates_long_content() {
     let long = "x".repeat(2000);
     let payload = json!({

@@ -106,7 +106,7 @@ pub(super) fn decide_with_reads(
 
 /// `reason` with the failures to read the server's recorded roots, so a deny that came from a
 /// failed read does not look like a root the user forgot to add.
-pub(super) fn with_unreadable_note(reason: String, unreadable: &[String]) -> String {
+fn with_unreadable_note(reason: String, unreadable: &[String]) -> String {
     if unreadable.is_empty() {
         return reason;
     }
