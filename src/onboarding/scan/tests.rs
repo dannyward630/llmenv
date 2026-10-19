@@ -6,24 +6,24 @@ use std::path::{Path, PathBuf};
 use super::{Bounds, ScanReport, scan};
 use crate::onboarding::scan::MAX_NAMES;
 
-fn repo(root: &Path, rel: &str) -> PathBuf {
+pub(super) fn repo(root: &Path, rel: &str) -> PathBuf {
     let dir = root.join(rel);
     fs::create_dir_all(dir.join(".git")).unwrap();
     dir
 }
 
 /// Scan with a home folder that is not above any test root.
-fn scan_with(roots: &[PathBuf], bounds: Bounds) -> anyhow::Result<ScanReport> {
+pub(super) fn scan_with(roots: &[PathBuf], bounds: Bounds) -> anyhow::Result<ScanReport> {
     let home = tempfile::tempdir().unwrap();
     scan(roots, home.path(), bounds)
 }
 
-fn run(roots: &[&Path]) -> ScanReport {
+pub(super) fn run(roots: &[&Path]) -> ScanReport {
     let roots: Vec<PathBuf> = roots.iter().map(|r| r.to_path_buf()).collect();
     scan_with(&roots, Bounds::DEFAULT).unwrap()
 }
 
-fn paths(report: &ScanReport) -> Vec<PathBuf> {
+pub(super) fn paths(report: &ScanReport) -> Vec<PathBuf> {
     report.repositories.iter().map(|r| r.path.clone()).collect()
 }
 
@@ -132,83 +132,6 @@ fn a_repository_named_like_a_skipped_folder_is_still_reported() {
     assert_eq!(paths(&report), expected);
 }
 
-#[cfg(unix)]
-#[test]
-fn a_git_symlink_does_not_make_a_repository() {
-    let root = tempfile::tempdir().unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
-    let dir = root.path().join("fake");
-    fs::create_dir(&dir).unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), dir.join(".git")).unwrap();
-
-    let report = run(&[root.path()]);
-
-    assert!(report.repositories.is_empty(), "{:?}", paths(&report));
-}
-
-#[cfg(unix)]
-#[test]
-fn an_unreadable_root_is_an_error() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let locked = root.path().join("locked");
-    fs::create_dir(&locked).unwrap();
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-    // A root user reads any folder, so the check has nothing to show there.
-    if fs::read_dir(&locked).is_ok() {
-        return;
-    }
-
-    let error = scan_with(&[locked.clone()], Bounds::DEFAULT);
-
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-    let error = error.unwrap_err();
-    assert!(format!("{error:#}").contains("read access"), "{error:#}");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_fifo_manifest_is_a_note_and_does_not_block() {
-    let root = tempfile::tempdir().unwrap();
-    let dir = repo(root.path(), "app");
-    let made = std::process::Command::new("mkfifo")
-        .arg(dir.join("Cargo.toml"))
-        .status()
-        .unwrap();
-    assert!(made.success());
-
-    let report = run(&[root.path()]);
-
-    let found = &report.repositories[0];
-    assert!(found.cargo.is_none());
-    assert!(
-        found.notes.iter().any(|n| n.contains("not a regular file")),
-        "{:?}",
-        found.notes
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_linked_github_folder_is_not_listed() {
-    let root = tempfile::tempdir().unwrap();
-    let dir = repo(root.path(), "app");
-    let elsewhere = tempfile::tempdir().unwrap();
-    fs::create_dir_all(elsewhere.path().join("workflows")).unwrap();
-    fs::write(elsewhere.path().join("workflows/secret.yml"), "x").unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), dir.join(".github")).unwrap();
-
-    let report = run(&[root.path()]);
-
-    let found = &report.repositories[0];
-    assert!(found.workflows.is_empty(), "{:?}", found.workflows);
-    assert!(
-        found.notes.iter().any(|n| n.contains(".github")),
-        "{:?}",
-        found.notes
-    );
-}
-
 #[test]
 fn an_inherited_value_reads_as_workspace_and_a_wrong_type_is_a_note() {
     let root = tempfile::tempdir().unwrap();
@@ -260,39 +183,6 @@ fn a_long_script_list_is_cut_with_a_note() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn a_symlink_is_not_followed() {
-    let root = tempfile::tempdir().unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
-    repo(elsewhere.path(), "far");
-    std::os::unix::fs::symlink(elsewhere.path(), root.path().join("link")).unwrap();
-
-    let report = run(&[root.path()]);
-
-    assert!(report.repositories.is_empty(), "{:?}", paths(&report));
-}
-
-#[cfg(unix)]
-#[test]
-fn a_symlinked_manifest_is_not_read() {
-    let root = tempfile::tempdir().unwrap();
-    let dir = repo(root.path(), "app");
-    let secret = root.path().join("secret.toml");
-    fs::write(&secret, "[package]\nname = \"secret\"\n").unwrap();
-    std::os::unix::fs::symlink(&secret, dir.join("Cargo.toml")).unwrap();
-
-    let report = run(&[root.path()]);
-
-    let found = &report.repositories[0];
-    assert!(found.cargo.is_none());
-    assert!(
-        found.notes.iter().any(|n| n.contains("symlink")),
-        "{:?}",
-        found.notes
-    );
-}
-
 #[test]
 fn a_repository_below_the_depth_bound_is_counted_and_not_reported() {
     let root = tempfile::tempdir().unwrap();
@@ -311,33 +201,6 @@ fn a_root_that_is_a_repository_is_reported() {
     fs::create_dir(root.path().join(".git")).unwrap();
     let report = run(&[root.path()]);
     assert_eq!(paths(&report), vec![fs::canonicalize(root.path()).unwrap()]);
-}
-
-#[test]
-fn the_filesystem_root_home_and_folders_above_home_are_refused() {
-    let base = tempfile::tempdir().unwrap();
-    let home = base.path().join("users/me");
-    fs::create_dir_all(&home).unwrap();
-    for root in [PathBuf::from("/"), home.clone(), base.path().join("users")] {
-        let error = scan(&[root.clone()], &home, Bounds::DEFAULT).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("narrower"),
-            "{}: {error:#}",
-            root.display()
-        );
-    }
-    let inside = home.join("git");
-    fs::create_dir(&inside).unwrap();
-    assert!(scan(&[inside], &home, Bounds::DEFAULT).is_ok());
-}
-
-#[test]
-fn a_home_folder_that_cannot_be_resolved_fails_closed() {
-    let base = tempfile::tempdir().unwrap();
-    let root = base.path().join("git");
-    fs::create_dir(&root).unwrap();
-    let error = scan(&[root], &base.path().join("absent"), Bounds::DEFAULT).unwrap_err();
-    assert!(format!("{error:#}").contains("HOME"), "{error:#}");
 }
 
 #[test]

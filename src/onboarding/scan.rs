@@ -16,6 +16,8 @@ use crate::paths::dirfd;
 
 mod manifest;
 #[cfg(test)]
+mod safety_tests;
+#[cfg(test)]
 mod tests;
 
 /// The deepest folder level below a root that the walk enters. Repositories usually sit one or
