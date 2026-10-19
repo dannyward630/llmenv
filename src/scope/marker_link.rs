@@ -26,17 +26,22 @@ pub(crate) fn read_marker(path: &Path, max_bytes: u64) -> io::Result<Option<Stri
     };
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+        Err(e) => return Err(at(path, e)),
         Ok(meta) if !meta.file_type().is_symlink() => {}
         Ok(_) => {
-            let root = dir.canonicalize()?;
-            let name = path.file_name().map(OsString::from).unwrap_or_default();
-            let target = resolve_inside(&root, path, PathBuf::from(name))?;
-            return match llmenv_paths::read_text_bounded(&target, max_bytes)? {
+            let root = dir.canonicalize().map_err(|e| at(dir, e))?;
+            let name = PathBuf::from(path.file_name().unwrap_or_default());
+            let target = resolve_inside(&root, path, name)?;
+            return match llmenv_paths::read_text_bounded(&target, max_bytes)
+                .map_err(|e| at(&target, e))?
+            {
                 Some(text) => Ok(Some(text)),
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    "it is a link to a file that does not exist; correct or remove the link",
+                    format!(
+                        "it is a link to {}, which does not exist; correct or remove the link",
+                        target.display()
+                    ),
                 )),
             };
         }
@@ -68,7 +73,7 @@ fn resolve_inside(root: &Path, marker: &Path, rel: PathBuf) -> io::Result<PathBu
             Ok(meta) => meta.file_type().is_symlink(),
             // A missing step leaves the read to report it.
             Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-            Err(e) => return Err(e),
+            Err(e) => return Err(at(&next, e)),
         };
         if !is_link {
             resolved = next;
@@ -78,7 +83,7 @@ fn resolve_inside(root: &Path, marker: &Path, rel: PathBuf) -> io::Result<PathBu
         if links > MAX_LINKS {
             return Err(refused(marker, &next, "it follows too many links"));
         }
-        let target = std::fs::read_link(&next)?;
+        let target = std::fs::read_link(&next).map_err(|e| at(&next, e))?;
         if target.is_absolute() {
             let Ok(inside) = target.strip_prefix(root) else {
                 return Err(refused(marker, &target, "it leaves the folder"));
@@ -90,6 +95,11 @@ fn resolve_inside(root: &Path, marker: &Path, rel: PathBuf) -> io::Result<PathBu
         }
     }
     Ok(resolved)
+}
+
+/// `e` with the path of the step that failed, so the message names it.
+fn at(path: &Path, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{}: {e}", path.display()))
 }
 
 /// Put the components of `rel` in front of `pending`, in order.

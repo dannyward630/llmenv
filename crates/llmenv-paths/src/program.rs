@@ -28,12 +28,29 @@ pub fn resolve_program(name: &str) -> anyhow::Result<PathBuf> {
     if name.contains(std::path::is_separator) {
         return Ok(PathBuf::from(name));
     }
-    find_on_path(name, std::env::var_os("PATH").as_deref()).ok_or_else(|| {
+    let path_var = std::env::var_os("PATH");
+    find_on_path(name, path_var.as_deref()).ok_or_else(|| {
+        // A copy that exists but cannot run is a different fix from a program that is missing.
+        if let Some(found) = unrunnable_on_path(name, path_var.as_deref()) {
+            return anyhow::anyhow!(
+                "`{name}` was found at {}, but this user cannot run it. Fix: make it executable \
+                 (`chmod +x`), or put a working `{name}` earlier on PATH.",
+                found.display()
+            );
+        }
         anyhow::anyhow!(
             "`{name}` is not in any absolute PATH folder (relative folders such as `.` are \
              skipped). Fix: install `{name}`, or add its folder to PATH as an absolute path."
         )
     })
+}
+
+/// The first file named `name` in an absolute folder of `path_var` that this user cannot run.
+fn unrunnable_on_path(name: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(path_var?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file() && !can_run(candidate))
 }
 
 /// The relative folders of `path_var`, which the lookups skip. Doctor names them, so a program
@@ -126,19 +143,40 @@ mod tests {
     }
 
     proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+        /// A program planted in an absolute folder is found at any position of PATH, behind
+        /// folders that do not hold it, and a relative entry before it is skipped. A name with a
+        /// separator is never looked up.
         #[test]
-        fn a_found_program_sits_in_an_absolute_folder_of_the_list(
-            entries in proptest::collection::vec("(/usr/bin|/bin|\\.|bin|[a-z]{1,4}/[a-z]{1,4})", 0..6),
-            name in "(sh|env|ls|[a-z]{1,8})",
+        fn a_planted_program_is_found_at_its_place_in_path(
+            before in proptest::collection::vec("(\\.|bin|[a-z]{1,4}/[a-z]{1,4}|/no/such/[a-z]{1,6})", 0..4),
+            after in proptest::collection::vec("(/usr/bin|/bin|\\.)", 0..3),
+            name in "llmenvprop[a-z]{1,8}",
         ) {
+            let dir = tempfile::tempdir().unwrap();
+            let home = std::fs::canonicalize(dir.path()).unwrap();
+            let planted = tool(&home, &name, 0o755);
+            let mut entries: Vec<PathBuf> = before.iter().map(PathBuf::from).collect();
+            entries.push(home.clone());
+            entries.extend(after.iter().map(PathBuf::from));
             let path_var = std::env::join_paths(&entries).unwrap();
-            if let Some(found) = find_on_path(&name, Some(&path_var)) {
-                let parent = found.parent().unwrap();
-                proptest::prop_assert!(parent.is_absolute());
-                proptest::prop_assert!(entries.iter().any(|e| Path::new(e) == parent));
-            }
+            proptest::prop_assert_eq!(find_on_path(&name, Some(&path_var)), Some(planted));
             proptest::prop_assert_eq!(find_on_path(&format!("a/{name}"), Some(&path_var)), None);
+            let without: Vec<&PathBuf> = entries.iter().filter(|e| **e != home).collect();
+            let path_var = std::env::join_paths(without).unwrap();
+            proptest::prop_assert_eq!(find_on_path(&name, Some(&path_var)), None);
         }
+    }
+
+    #[test]
+    fn a_copy_that_cannot_run_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let data = tool(&home, "notrun", 0o644);
+        let path_var = std::env::join_paths([&home]).unwrap();
+        assert_eq!(find_on_path("notrun", Some(&path_var)), None);
+        assert_eq!(unrunnable_on_path("notrun", Some(&path_var)), Some(data));
+        assert_eq!(unrunnable_on_path("absent", Some(&path_var)), None);
     }
 
     #[test]

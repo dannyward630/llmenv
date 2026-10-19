@@ -90,4 +90,5 @@ fn a_link_loop_and_a_dangling_link_are_errors() {
     symlink("missing.yaml", &marker).unwrap();
     let err = read_marker(&marker, CAP).unwrap_err().to_string();
     assert!(err.contains("does not exist"), "{err}");
+    assert!(err.contains("missing.yaml"), "names the target: {err}");
 }

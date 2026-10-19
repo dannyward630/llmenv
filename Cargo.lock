@@ -1341,6 +1341,7 @@ dependencies = [
  "llmenv-paths",
  "proptest",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

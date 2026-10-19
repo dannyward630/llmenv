@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 llmenv-paths = { path = "../llmenv-paths", version = "3.12.2" }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

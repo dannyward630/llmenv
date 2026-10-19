@@ -33,8 +33,14 @@ pub const GIT_CONFIG_FLAGS: &[&str] = &[
 /// no `git` in an absolute folder, the spawn fails as not found.
 pub fn secure_git() -> Command {
     let path_var = std::env::var_os("PATH");
-    let git = llmenv_paths::program::find_on_path("git", path_var.as_deref())
-        .unwrap_or_else(|| std::path::PathBuf::from(GIT_NOT_FOUND));
+    let git = llmenv_paths::program::find_on_path("git", path_var.as_deref()).unwrap_or_else(|| {
+        // The spawn error names no program, so the cause and the fix are logged here.
+        tracing::error!(
+            "git is not in any absolute PATH folder (relative folders such as `.` are skipped). \
+             Fix: install git, or add its folder to PATH as an absolute path."
+        );
+        std::path::PathBuf::from(GIT_NOT_FOUND)
+    });
     let mut cmd = Command::new(git);
     cmd.args(GIT_CONFIG_FLAGS);
     cmd.stdin(Stdio::null());
