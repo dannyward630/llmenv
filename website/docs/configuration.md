@@ -545,6 +545,11 @@ directory lives at `<config_dir>/bundles/<name>/` and its files are merged
 into the agent config. A bundle's `bundle.yaml` inside its content directory
 may declare `env:` and other `capabilities:` fields.
 
+(changed in v3.13.0) A bundle's `AGENTS.md` and `bundle.yaml` must each be a regular file of at most 1 MiB of UTF-8 text.
+A link to such a file is followed.
+A FIFO, a folder, a link to a missing file, or a larger file fails the merge with an error that names the file.
+The same limit applies to each file under the bundle's `rules/`.
+
 ```yaml
 bundle:
   - name: base

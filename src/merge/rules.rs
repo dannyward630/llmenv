@@ -137,7 +137,10 @@ fn walk(
         if p.extension().is_none_or(|e| e != "md") {
             continue;
         }
-        let raw = std::fs::read_to_string(&p)?;
+        // Bounded like the bundle's AGENTS.md: the rule text goes into every session (#2933).
+        let raw = crate::merge::bundle_file::read_bundle_text(&p)
+            .map_err(|e| anyhow::anyhow!("reading rule file {}: {e}", p.display()))?
+            .unwrap_or_default();
         let (frontmatter, body) = split_frontmatter(&raw);
         let rel = p
             .strip_prefix(bundle_root)
