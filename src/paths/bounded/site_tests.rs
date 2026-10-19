@@ -98,3 +98,20 @@ fn a_session_log_count_streams_its_records() {
     std::fs::write(&log, "{}\n\n{}\n  \n{}\n").unwrap();
     assert_eq!(crate::session_log::count::count_records(&log), Some(3));
 }
+
+#[test]
+fn a_fifo_marketplace_manifest_is_refused_with_its_path() {
+    let market = tempfile::tempdir().unwrap();
+    let manifest = fifo(
+        &market
+            .path()
+            .join(".claude-plugin")
+            .join("marketplace.json"),
+    );
+    let err = crate::plugins::cache::read_marketplace_plugins(market.path()).unwrap_err();
+    assert_not_regular(&err);
+    assert!(
+        format!("{err:#}").contains(&manifest.display().to_string()),
+        "{err:#}"
+    );
+}
