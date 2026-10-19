@@ -79,6 +79,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - The redundant-`context-mode:context-mode`-declaration warning no longer logs on every `llmenv statusline` render. #1547 moved the `plugins` widget's resolver onto the render hot path, so a `warn!` meant for a one-time config nudge fired on every render instead; it now logs at `debug!` there, matching this file's other best-effort collectors, while `llmenv regenerate`'s own resolve — interactive and user-invoked — still logs it at `warn!`. See [Configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#statusline) (#1551)
 - A tilde-prefixed config path (`~/...`) is expanded before it's loaded, instead of only being rejected by a debug-only assertion that a release build silently skipped, leaving the path unexpanded and the load failing with a confusing "file not found" (#1577)
 - A project name (`.llmenv.yaml`'s `name:` field) containing control characters — an ANSI escape or an embedded newline — no longer reaches session-log search content unescaped, closing a gap where tags and bundles were already sanitized but the free-form project name was not (#1578)
+- A `PreToolUse` gate on opencode denies the tool call when its hook cannot run, instead of letting the call through. The session-log `PreToolUse` entry carries that fail-closed run and replaces the gate's own entry, so one hook runs per call (#1442). See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#hooks)
 
 ### Security
 
