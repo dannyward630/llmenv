@@ -284,6 +284,39 @@ mod tests {
     }
 
     proptest! {
+        // A command that ends with a substitution and nothing else never gets the advisory, and
+        // the text before it decides nothing (#2937).
+        #[test]
+        fn a_trailing_substitution_is_found_and_ends_the_check(
+            prefix in proptest::collection::vec("[a-z]{1,6}", 0..4),
+            inner in "[a-z]{1,6}( /[a-z]{1,6})?",
+            backtick in proptest::bool::ANY,
+        ) {
+            let tail = if backtick { format!("`{inner}`") } else { format!("$({inner})") };
+            let command = if prefix.is_empty() {
+                tail
+            } else {
+                format!("{} && {tail}", prefix.join(" && "))
+            };
+            prop_assert_eq!(
+                crate::hook_run::shell_split::ends_with_substitution(&command),
+                Ok(true)
+            );
+            prop_assert!(!command_ends_with_cd(&command), "{}", command);
+        }
+
+        #[test]
+        fn a_command_that_ends_in_plain_text_has_no_trailing_substitution(
+            command in "[a-z $()&;|]{0,30}[a-z]",
+        ) {
+            prop_assert_eq!(
+                crate::hook_run::shell_split::ends_with_substitution(&command),
+                Ok(false)
+            );
+        }
+    }
+
+    proptest! {
         // Arbitrary text never panics, regardless of shell-metacharacter content.
         #[test]
         fn command_ends_with_cd_never_panics(command in ".{0,200}") {

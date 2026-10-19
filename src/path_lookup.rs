@@ -129,6 +129,22 @@ mod tests {
         assert!(relative_entries(None).is_empty());
     }
 
+    proptest::proptest! {
+        #[test]
+        fn a_found_program_sits_in_an_absolute_folder_of_the_list(
+            entries in proptest::collection::vec("(/usr/bin|/bin|\\.|bin|[a-z]{1,4}/[a-z]{1,4})", 0..6),
+            name in "(sh|env|ls|[a-z]{1,8})",
+        ) {
+            let path_var = std::env::join_paths(&entries).unwrap();
+            if let Some(found) = find_on_path(&name, Some(&path_var)) {
+                let parent = found.parent().unwrap();
+                proptest::prop_assert!(parent.is_absolute());
+                proptest::prop_assert!(entries.iter().any(|e| Path::new(e) == parent));
+            }
+            proptest::prop_assert_eq!(find_on_path(&format!("a/{name}"), Some(&path_var)), None);
+        }
+    }
+
     #[test]
     fn a_relative_path_folder_is_skipped() {
         // A folder under the working directory, so its relative name finds the file.

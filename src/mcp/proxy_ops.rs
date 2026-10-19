@@ -218,6 +218,20 @@ mod tests {
         }
     }
 
+    proptest! {
+        #[test]
+        fn a_successful_ps_gives_its_trimmed_output(out in "\\PC{0,40}", err in "\\PC{0,20}") {
+            let read = ps_command(7, &ps_output(0, &out, &err)).unwrap();
+            let trimmed = out.trim();
+            prop_assert_eq!(read, (!trimmed.is_empty()).then(|| trimmed.to_string()));
+        }
+
+        #[test]
+        fn a_failed_ps_never_panics(code in 1i32..128, out in "\\PC{0,20}", err in "\\PC{0,20}") {
+            let _ = ps_command(7, &ps_output(code, &out, &err));
+        }
+    }
+
     #[test]
     fn a_ps_failure_is_an_error_and_not_a_gone_pid() {
         assert_eq!(

@@ -2783,31 +2783,17 @@ fn run_config_context() {
             eprintln!(
                 "llmenv config-context: failed to load config for task-tracker reminder: {e:#}"
             );
-            text.push_str(&config_load_notice(&e));
+            // The cause can quote a value from the config, such as a secret, so the agent gets
+            // the place and the fix, and the full chain goes to stderr only (#2923).
+            text.push_str(&format!(
+                "\n\nllmenv: the config at {} could not be loaded, so the task tracker reminders \
+                 are missing. Run `llmenv validate` to see why.",
+                config_path.display()
+            ));
         }
     }
 
     emit(&text);
-}
-
-/// The `SessionStart` line for a config that does not load. The engine drops the hook's stderr, so
-/// the full error chain goes into the context the agent reads (#2923).
-fn config_load_notice(error: &anyhow::Error) -> String {
-    format!(
-        "\n\nllmenv: the config could not be loaded, so the task tracker reminders are missing \
-         ({error:#}). Run `llmenv doctor`."
-    )
-}
-
-#[cfg(test)]
-#[test]
-fn a_config_that_does_not_load_names_the_whole_cause() {
-    let error = anyhow::anyhow!("line 3: bad key").context("parsing config.yaml");
-    let notice = config_load_notice(&error);
-    assert!(
-        notice.contains("parsing config.yaml: line 3: bad key"),
-        "{notice}"
-    );
 }
 
 /// Read `CLAUDE_CONFIG_DIR` for the config guard. Unset means the default cache

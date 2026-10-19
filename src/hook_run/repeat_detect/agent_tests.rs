@@ -113,3 +113,22 @@ proptest::proptest! {
         proptest::prop_assert!(crate::paths::is_valid_short_name(&k1));
     }
 }
+
+proptest::proptest! {
+    #[test]
+    fn the_main_agent_and_an_unsafe_session_keep_the_bare_session_id(
+        session in "[a-zA-Z0-9._/-]{1,12}",
+        agent in proptest::option::of("[a-z0-9]{1,6}"),
+        null_agent in proptest::bool::ANY,
+    ) {
+        use crate::hook_run::session_state::agent_state_key;
+        let main = if null_agent { json!({ "agent_id": null }) } else { json!({}) };
+        proptest::prop_assert_eq!(agent_state_key(&session, &main), session.clone());
+        if !crate::paths::is_valid_short_name(&session)
+            && let Some(agent) = agent
+        {
+            let sub = json!({ "agent_id": agent });
+            proptest::prop_assert_eq!(agent_state_key(&session, &sub), session);
+        }
+    }
+}

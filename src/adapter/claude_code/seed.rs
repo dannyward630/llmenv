@@ -120,8 +120,8 @@ fn the_claude_lookup_finds_the_program_in_an_absolute_folder_only() {
 ///
 /// Detects how `claude` was installed by inspecting its binary path, then
 /// writes the result as a foreign key so it survives every re-render.
-/// No-op if `settings.json` does not exist (materialize hasn't run yet) or if
-/// `installMethod` is already present.
+/// No-op if `settings.json` does not exist (materialize hasn't run yet), if
+/// `installMethod` is already present, or if `claude` is not on `PATH`.
 ///
 /// # Errors
 /// Returns an error if the file exists but cannot be read or written.
@@ -149,9 +149,13 @@ pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
         }
     }
 
-    let method = find_claude_binary()
-        .as_deref()
-        .map_or("native", classify_claude_path);
+    // Without the binary the method is unknown. The key is written only once, so a guess here
+    // would stay after `claude` is on PATH; the next run seeds it instead (#2923).
+    let Some(binary) = find_claude_binary() else {
+        tracing::debug!("installMethod not seeded: claude is not on PATH");
+        return Ok(());
+    };
+    let method = classify_claude_path(&binary);
     let mut seeded = serde_json::Map::new();
     seeded.insert("installMethod".to_string(), serde_json::Value::from(method));
     apply_seeded_settings(out, &seeded)
