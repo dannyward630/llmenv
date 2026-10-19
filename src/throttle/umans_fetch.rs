@@ -82,7 +82,8 @@ fn fetch_on_new_runtime(
             .header("Authorization", auth)
             .send()
             .await
-            .with_context(|| format!("GET {url}"))?;
+            .with_context(|| format!("GET {url}"))
+            .map_err(crate::proxy_note::with_proxy_note)?;
         let status = resp.status();
         if status.is_redirection() {
             anyhow::bail!(
