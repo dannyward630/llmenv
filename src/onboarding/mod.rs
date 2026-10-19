@@ -3,3 +3,4 @@
 //! docs/design/issue-2773-onboarding.md (Decision 2).
 
 pub(crate) mod scan;
+pub(crate) mod tools;

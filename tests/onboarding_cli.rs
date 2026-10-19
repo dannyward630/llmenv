@@ -1,5 +1,6 @@
 #![expect(clippy::expect_used, reason = "test scaffolding")]
-//! `llmenv setup --scan` prints the onboarding scan as JSON and writes nothing (#2785).
+//! `llmenv setup --scan` and `--tools` print onboarding facts as JSON and write nothing (#2785,
+//! #2791).
 
 mod support;
 
@@ -52,4 +53,27 @@ fn the_scan_does_not_combine_with_the_wizard_flags() {
         .output()
         .expect("run llmenv");
     assert!(!output.status.success());
+}
+
+#[test]
+fn the_tool_report_lists_the_strong_defaults_first_and_reads_path() {
+    let home = tempfile::TempDir::new().expect("home");
+    let output = isolated_llmenv_cmd(home.path())
+        .args(["setup", "--tools"])
+        .env("PATH", "")
+        .output()
+        .expect("run llmenv");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON stdout");
+    assert_eq!(report["tools"][0]["name"], "icm");
+    assert_eq!(report["tools"][0]["strong_default"], true);
+    assert!(
+        report["tools"][0]["found"].is_null(),
+        "an empty PATH found a binary"
+    );
 }

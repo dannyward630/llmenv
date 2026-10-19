@@ -3,7 +3,9 @@ use crate::paths;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+mod command;
 mod discover;
+pub(super) use command::{SetupArgs, run_setup_command};
 use discover::{
     count_project_entries, read_claude_md, read_claude_plugins, read_claude_settings,
     read_gemini_md, read_project_configs,
@@ -489,47 +491,6 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
     eprintln!("✅ Rescan complete! Config files were not modified.");
 
     Ok(())
-}
-
-/// The flags of `llmenv setup`.
-#[derive(Debug, clap::Args)]
-pub(super) struct SetupArgs {
-    /// Directory to set up (defaults to the standard config dir)
-    path: Option<PathBuf>,
-    /// Repository to store config in (optional)
-    #[arg(long)]
-    repo: Option<String>,
-    /// Skip the AI engine handoff at the end
-    #[arg(long)]
-    no_launch: bool,
-    /// Re-scan existing configs without overwriting config files
-    #[arg(long)]
-    rescan: bool,
-    /// Scan these folders for repositories and print the evidence as JSON, for onboarding.
-    /// Reads file names and manifest keys only, and writes nothing
-    #[arg(
-        long,
-        value_name = "ROOT",
-        num_args = 1..,
-        conflicts_with_all = ["path", "repo", "rescan", "no_launch"]
-    )]
-    scan: Vec<PathBuf>,
-}
-
-/// Run `llmenv setup`: a scan prints its JSON and stops; otherwise the wizard runs.
-///
-/// # Errors
-/// The scan or the wizard fails. See [`crate::onboarding::scan::scan_json`] and [`run_setup`].
-pub(super) fn run_setup_command(args: SetupArgs) -> Result<()> {
-    if !args.scan.is_empty() {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        println!(
-            "{}",
-            crate::onboarding::scan::scan_json(&args.scan, home.as_deref())?
-        );
-        return Ok(());
-    }
-    run_setup(args.path, args.repo, args.no_launch, args.rescan)
 }
 
 /// Run the interactive setup wizard.
