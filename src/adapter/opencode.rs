@@ -12,9 +12,11 @@ use crate::merge::MergedManifest;
 /// cache dir and exports `OPENCODE_CONFIG_DIR` so opencode discovers them.
 ///
 /// Skills use the claude-compatible `SKILL.md` format opencode reads natively.
-/// Hooks are bridged via a generated `plugin/llmenv.js` shim (§3).
+/// Hooks are bridged by the `plugin/llmenv.js` plugin and its `plugin/llmenv-hooks.json` table.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpencodeAdapter;
+
+mod hook_bridge;
 
 const OPENCODE_JSON_FILE: &str = "opencode.json";
 const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
@@ -205,123 +207,6 @@ const SUPPORTED_HOOK_EVENTS: &[&str] = &[
     "PostToolUse",
     "Stop",
 ];
-
-/// Template for `plugin/llmenv.js` — a self-contained ES module bridging
-/// opencode's JS plugin API to llmenv's hook-run subprocess calls.
-/// `${HOOK_TABLE}` is replaced at render time with a JSON array of
-/// `{ event, opencode, commands: [{command, timeout}] }` entries.
-const SHIM_TEMPLATE: &str = r#"// llmenv hook bridge for opencode — auto-generated, do not edit.
-const HOOK_TABLE = ${HOOK_TABLE};
-
-let sessionContext = null;
-
-export default {
-  id: "llmenv-hooks",
-  name: "llmenv",
-  dispose() {
-    runHooks("SessionEnd", null);
-  },
-  async event(input) {
-    const event = input.event;
-    if (event.event === "session.created") {
-      sessionContext = await runHooks("SessionStart", null);
-    } else if (event.event === "session.idle") {
-      runHooks("Stop", null);
-    } else if (event.event === "session.deleted") {
-      runHooks("SessionEnd", null);
-    }
-  },
-  async "chat.message"(input, output) {
-    const ctx = await runHooks("UserPromptSubmit", null);
-    if (ctx && output.message && output.message.content && Array.isArray(output.message.content)) {
-      output.message.content.push({ type: "text", text: ctx });
-    }
-    if (sessionContext && output.message && output.message.content && Array.isArray(output.message.content)) {
-      output.message.content.push({ type: "text", text: `Additional context: ${sessionContext}` });
-      sessionContext = null;
-    }
-  },
-  async "tool.execute.before"(input, output) {
-    const ctx = await runHooks("PreToolUse", {
-      tool_name: input.tool,
-      tool_input: output?.args || {},
-    });
-    if (ctx === "__LLMENV_BLOCK__") {
-      throw new Error("Blocked by llmenv hook");
-    }
-  },
-  async "tool.execute.after"(input, output) {
-    runHooks("PostToolUse", {
-      tool_name: input.tool,
-      tool_input: input.args || {},
-      tool_response: output?.output ?? null,
-    });
-  },
-};
-
-async function runHooks(event, extra) {
-  const entries = HOOK_TABLE.filter(e => e.event === event);
-  let collected = "";
-  for (const entry of entries) {
-    for (const hk of entry.commands) {
-      try {
-        const result = await spawnHook(event, hk.command, hk.timeout, extra);
-        if (result.blocked) {
-          if (event === "PreToolUse") return "__LLMENV_BLOCK__";
-          continue;
-        }
-        if (result.stderr) {
-          console.error(`llmenv hook ${event} ('${hk.command}') stderr:`, result.stderr);
-        }
-        if (result.stdout) {
-          try {
-            const parsed = JSON.parse(result.stdout);
-            if (parsed?.hookSpecificOutput?.additionalContext) {
-              collected += parsed.hookSpecificOutput.additionalContext + "\n";
-            } else {
-              collected += result.stdout + "\n";
-            }
-          } catch {
-            collected += result.stdout + "\n";
-          }
-        }
-      } catch (e) {
-        console.error(`llmenv hook ${event} failed:`, e);
-      }
-    }
-  }
-  return collected || null;
-}
-
-async function spawnHook(event, command, timeoutMs, extra) {
-  const payload = {
-    hook_event_name: event,
-    session_id: process.env.OPENCODE_SESSION_ID || "",
-    cwd: process.cwd(),
-    ...(extra || {}),
-  };
-  const { spawn } = await import("node:child_process");
-  return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", command], {
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: timeoutMs || 30000,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => { stdout += d.toString(); });
-    child.stderr.on("data", (d) => { stderr += d.toString(); });
-    child.on("close", (code) => {
-      resolve({
-        blocked: code === 2 && event === "PreToolUse",
-        stdout: stdout.trim() || null,
-        stderr: stderr.trim() || null,
-      });
-    });
-    child.stdin.write(JSON.stringify(payload));
-    child.stdin.end();
-  });
-}
-"#;
 
 // ── Plugin hooks manifest deserialization ──
 
@@ -614,27 +499,22 @@ impl AgentAdapter for OpencodeAdapter {
             std::collections::BTreeMap::new();
         let mut plugin_skill_paths: Vec<PathBuf> = Vec::new();
         let mut plugin_hooks: Vec<crate::config::Hook> = Vec::new();
-        // Names of plugins that provide native opencode support (e.g. a
-        // TypeScript plugin registered via "plugin" key in opencode.json).
-        // Known: context-mode ships a native opencode plugin, but any plugin
-        // can declare the same support — detection isn't limited to that name.
-        let mut native_opencode_plugins: Vec<String> = Vec::new();
-
         // Hoisted: command/ dir needed by plugin and bundle sections below.
         std::fs::create_dir_all(out.join("command"))?;
 
         for (plugin, payload, plugin_skills) in &plugin_payloads {
-            // Does this plugin provide native opencode support (e.g. a
-            // TypeScript plugin registered via "plugin" key in opencode.json)?
-            // Known: context-mode ships a native opencode plugin.
-            let is_native_opencode = plugin.plugin == "context-mode";
-
-            // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON). Skip for native
-            //     opencode plugins — they register their own tools internally
-            //     and including MCP entries would duplicate them.
-            if is_native_opencode {
-                native_opencode_plugins.push(plugin.plugin.clone());
-            } else {
+            // context-mode's native opencode plugin exports the 1.x shape, which opencode 2.0
+            // refuses to load (#2840), so it runs like any other plugin: its MCP server and its
+            // hooks go through the llmenv bridge.
+            if plugin.plugin == crate::config::CONTEXT_MODE_PLUGIN {
+                eprintln!(
+                    "warning: context-mode has no opencode 2.x plugin yet, so opencode gets its \
+                     MCP server and hooks only. Fix: none needed; this changes when context-mode \
+                     ships a 2.x build"
+                );
+            }
+            // 4a. Plugin-provided MCP (LLM_PROVIDER_MCP_JSON).
+            {
                 let mcp_json_path = payload.join("LLM_PROVIDER_MCP_JSON");
                 // #915: a missing file yields Ok(empty); only a real read/parse
                 // error warns, instead of an exists() guard masking permission
@@ -703,8 +583,7 @@ impl AgentAdapter for OpencodeAdapter {
             plugin_skill_paths.extend(paths);
 
             // 4e. Plugin hooks from hooks/ dir — translate to top-level hooks.
-            //     Skip for native opencode plugins — they handle hooks internally.
-            if !is_native_opencode {
+            {
                 let hooks_dir = payload.join("hooks");
                 for manifest_name in ["hooks.json", "claude-codex-hooks.json"] {
                     let hooks_path = hooks_dir.join(manifest_name);
@@ -764,15 +643,6 @@ impl AgentAdapter for OpencodeAdapter {
         crate::adapter::skills::validate_skills(out)?;
 
         // 6. Build opencode.json with what we have so far
-        // Register native opencode TypeScript plugins (e.g. context-mode) that
-        // ship their own hook/tool implementations independent of the llmenv JS
-        // shim. These are resolved by opencode's plugin system at startup.
-        let config_plugin = if native_opencode_plugins.is_empty() {
-            None
-        } else {
-            Some(native_opencode_plugins)
-        };
-
         // 7. MCP servers
         let config_mcp = {
             if !manifest.mcps.is_empty()
@@ -1090,7 +960,7 @@ impl AgentAdapter for OpencodeAdapter {
             super::reject_modeled_native_keys(native, OPENCODE_MODELED_KEYS, "opencode")?;
         }
         let config = OpencodeConfig {
-            plugin: config_plugin,
+            plugin: None,
             mcp: config_mcp,
             lsp: config_lsp,
             schema: format!("./{OPENCODE_SCHEMA_FILE}"),
@@ -1169,11 +1039,13 @@ impl AgentAdapter for OpencodeAdapter {
             .as_ref()
             .and_then(|f| f.task_tracker.as_ref())
             .is_some_and(|t| t.enabled && t.block_engine_task_tools);
-        let shim_js = generate_shim_js(&all_hooks, guards_index_repository || redirects_todowrite)?;
-        let plugin_dir = out.join("plugin");
-        std::fs::create_dir_all(&plugin_dir)?;
-        crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), shim_js.as_bytes())?;
-        owned.push(PathBuf::from("plugin/llmenv.js"));
+        let mcp_servers: Vec<&str> = manifest.mcps.iter().map(|m| m.name.as_str()).collect();
+        owned.extend(hook_bridge::write(
+            out,
+            &all_hooks,
+            guards_index_repository || redirects_todowrite,
+            &mcp_servers,
+        )?);
 
         // 12. Bundle-level commands/agents from manifest.files
         for (rel, abs) in &manifest.files {
@@ -1222,8 +1094,8 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn emit_hook_context(&self, hook_event_name: &str, memory: &str, notes: &str) -> String {
-        // The generated shim adds SessionStart context to the first message
-        // (`session.created` in SHIM_TEMPLATE).
+        // The plugin adds SessionStart context to every model request of the session, as a
+        // system part (`session.hook("context")` in `opencode/plugin.js`).
         super::emit_hook_context(
             hook_event_name,
             memory,
@@ -1521,103 +1393,6 @@ fn glob_matches(pattern: &str, input: &[char]) -> bool {
         }
     }
     pat.iter().skip(p).all(|c| *c == '*')
-}
-
-/// Build the JS source for `plugin/llmenv.js` — the hook bridge shim.
-///
-/// Each user-defined hook is mapped to its opencode event and bundled with
-/// the three auto-hooks (`check-stale`, `config-context`, `config-guard`)
-/// that always run on `SessionStart` / `PreToolUse`.
-///
-/// `needs_pre_tool_hook` adds a fourth: `hook-run pre_tool_use`, which serves
-/// two consumers that both need to see tool calls by name —
-///
-/// - the `index_repository` name guard (#1331), since opencode gets the same
-///   `manifest.mcps` Claude Code does and the clobber is reachable here too;
-/// - the `todowrite` redirect (#1304), which mirrors opencode's built-in todo
-///   list into `llmenv task`.
-///
-/// One registration covers both: opencode's plugin API has no per-tool matcher,
-/// so unlike Claude Code's anchored matchers this hook runs on every tool call
-/// and `hook-run` dispatches on `tool_name` itself. That per-call cost is why
-/// it isn't registered unconditionally.
-fn generate_shim_js(
-    hooks: &[crate::config::Hook],
-    needs_pre_tool_hook: bool,
-) -> anyhow::Result<String> {
-    let mut by_event: std::collections::BTreeMap<&str, Vec<serde_json::Value>> =
-        std::collections::BTreeMap::new();
-    for hook in hooks {
-        let resolved_command = hook
-            .handler
-            .command
-            .as_deref()
-            .map(|cmd| match &hook.bundle_origin {
-                Some(bundle_dir) => super::resolve_bundle_relative_paths(cmd, bundle_dir)
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            command = %cmd,
-                            bundle_dir = %bundle_dir.display(),
-                            "could not resolve bundle-relative hook command path \
-                             in generate_shim_js — falling back to raw command; \
-                             path may be stale or the bundle restructured"
-                        );
-                        cmd.to_string()
-                    }),
-                None => cmd.to_string(),
-            })
-            .unwrap_or_default();
-        let timeout = 30_000u64;
-        by_event
-            .entry(hook.event.as_str())
-            .or_default()
-            .push(serde_json::json!({ "command": resolved_command, "timeout": timeout }));
-    }
-
-    // Auto-hooks — always present
-    by_event
-        .entry("SessionStart")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv check-stale --engine opencode",
-            "timeout": 5000,
-        }));
-    by_event
-        .entry("SessionStart")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv config-context --engine opencode",
-            "timeout": 5000,
-        }));
-    by_event
-        .entry("PreToolUse")
-        .or_default()
-        .push(serde_json::json!({
-            "command": "llmenv config-guard --engine opencode",
-            "timeout": 5000,
-        }));
-    if needs_pre_tool_hook {
-        by_event
-            .entry("PreToolUse")
-            .or_default()
-            .push(serde_json::json!({
-                "command": "llmenv hook-run pre_tool_use --engine opencode",
-                "timeout": 5000,
-            }));
-    }
-
-    let table: Vec<serde_json::Value> = by_event
-        .into_iter()
-        .map(|(event, commands)| {
-            serde_json::json!({
-                "event": event,
-                "commands": commands,
-            })
-        })
-        .collect();
-
-    let table_json = serde_json::to_string(&table)?;
-    Ok(SHIM_TEMPLATE.replace("${HOOK_TABLE}", &table_json))
 }
 
 /// Split markdown source into optional frontmatter and body.
@@ -3572,7 +3347,8 @@ mod tests {
             bundle_origin: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
+        let shim_src =
+            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
         assert!(!shim_src.contains("\"event\":\"Notification\""));
     }
 
@@ -3582,7 +3358,8 @@ mod tests {
         OpencodeAdapter
             .materialize(&MergedManifest::default(), tmp.path())
             .unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
+        let shim_src =
+            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
         assert!(shim_src.contains("check-stale --engine opencode"));
         assert!(shim_src.contains("config-context --engine opencode"));
         assert!(shim_src.contains("config-guard --engine opencode"));
@@ -3603,7 +3380,8 @@ mod tests {
             bundle_origin: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
+        let shim_src =
+            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
         assert!(shim_src.contains("echo hi"));
         assert!(shim_src.contains("check-stale --engine opencode"));
     }
@@ -4004,7 +3782,8 @@ mod tests {
             ..Default::default()
         };
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
-        let shim_src = std::fs::read_to_string(out.path().join("plugin/llmenv.js")).unwrap();
+        let shim_src =
+            std::fs::read_to_string(out.path().join("plugin/llmenv-hooks.json")).unwrap();
         assert!(shim_src.contains("echo ok"));
         assert!(!shim_src.contains("echo n"), "Notification is unsupported");
     }
@@ -4069,7 +3848,8 @@ mod tests {
             bundle_origin: None,
         });
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv.js")).unwrap();
+        let shim_src =
+            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
         assert!(!shim_src.contains("some_tool"));
     }
 
@@ -4239,7 +4019,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_native_opencode_plugin_registers_config_plugin() {
+    fn context_mode_is_not_registered_as_an_opencode_plugin() {
         let out = tempfile::tempdir().unwrap();
         let plugin_dir = tempfile::tempdir().unwrap();
         let manifest = MergedManifest {
@@ -4261,7 +4041,8 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
         let raw = std::fs::read_to_string(out.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["plugin"], serde_json::json!(["context-mode"]));
+        // Its 1.x plugin cannot load on opencode 2.0 (#2840).
+        assert!(doc.get("plugin").is_none(), "{doc}");
     }
 
     #[test]
@@ -4350,7 +4131,7 @@ mod tests {
         let registered = |m: &crate::merge::MergedManifest| {
             let tmp = tempfile::tempdir().unwrap();
             OpencodeAdapter.materialize(m, tmp.path()).unwrap();
-            std::fs::read_to_string(tmp.path().join("plugin/llmenv.js"))
+            std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json"))
                 .unwrap()
                 .contains("hook-run pre_tool_use")
         };
@@ -4364,8 +4145,8 @@ mod tests {
 
     #[test]
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
-        let with = generate_shim_js(&[], true).unwrap();
-        let without = generate_shim_js(&[], false).unwrap();
+        let with = hook_bridge::hook_table(&[], true, &[]).to_string();
+        let without = hook_bridge::hook_table(&[], false, &[]).to_string();
         assert!(
             with.contains("llmenv hook-run pre_tool_use --engine opencode"),
             "guard hook missing when codebase-memory-mcp is wired"
@@ -4377,49 +4158,33 @@ mod tests {
         );
     }
 
-    // opencode passes a tool call's arguments in the *second* parameter of
-    // `tool.execute.before` and the *first* of `tool.execute.after` (verified
-    // against opencode's `packages/plugin/src/index.ts`). Reading
-    // `input.output.args` yielded `{}` on every PreToolUse call, which would
-    // silently defeat any guard that inspects arguments.
     #[test]
-    fn shim_reads_tool_arguments_from_the_parameter_that_carries_them() {
-        let js = generate_shim_js(&[], true).unwrap();
-        assert!(
-            !js.contains("input.output?.args"),
-            "before-hook args come from the second parameter, not input.output"
-        );
-        assert!(
-            js.contains("tool_input: output?.args || {}"),
-            "before-hook must read output.args"
-        );
-        assert!(
-            js.contains("tool_input: input.args || {}"),
-            "after-hook must read input.args"
-        );
-    }
-
-    #[test]
-    fn generate_shim_js_hook_with_no_command_defaults_empty() {
+    fn a_hook_with_no_command_is_left_out() {
         let hooks = vec![crate::config::Hook {
-            event: "PreToolUse".into(),
+            event: "PostToolUse".into(),
             matcher: None,
             handler: crate::config::HookHandler {
-                kind: crate::config::HookHandlerKind::Command,
+                kind: crate::config::HookHandlerKind::McpTool,
                 command: None,
-                tool: None,
+                tool: Some("x".into()),
             },
             bundle_origin: None,
         }];
-        let js = generate_shim_js(&hooks, false).unwrap();
-        assert!(js.contains("\"command\":\"\""));
+        let table = hook_bridge::hook_table(&hooks, false, &[]);
+        let events: Vec<_> = table["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["event"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!events.contains(&"PostToolUse".to_string()), "{events:?}");
     }
 
     #[test]
-    fn generate_shim_js_falls_back_when_bundle_relative_resolution_fails() {
+    fn a_hook_keeps_its_matcher_and_falls_back_to_the_raw_command() {
         let hooks = vec![crate::config::Hook {
             event: "PreToolUse".into(),
-            matcher: None,
+            matcher: Some("Bash".into()),
             handler: crate::config::HookHandler {
                 kind: crate::config::HookHandlerKind::Command,
                 command: Some("echo hello".into()),
@@ -4428,9 +4193,15 @@ mod tests {
             bundle_origin: Some(PathBuf::from("/bundles/foo")),
         }];
         // "echo hello" has no '/' token, so resolve_bundle_relative_paths
-        // returns None and generate_shim_js must fall back to the raw command.
-        let js = generate_shim_js(&hooks, false).unwrap();
-        assert!(js.contains("echo hello"));
+        // returns None and the raw command is used.
+        let table = hook_bridge::hook_table(&hooks, false, &["codebase-memory-mcp"]);
+        assert_eq!(table["hooks"][0]["command"], "echo hello");
+        assert_eq!(table["hooks"][0]["matcher"], "Bash");
+        assert_eq!(
+            table["mcpServers"]["codebase-memory-mcp"],
+            "codebase-memory-mcp"
+        );
+        assert_eq!(table["tools"]["shell"]["name"], "Bash");
     }
 
     // -- split_frontmatter --
@@ -4800,32 +4571,22 @@ mod tests {
             prop_assert_eq!(command_once, command_twice);
         }
 
-        /// The hook shim's embedded `HOOK_TABLE` is always valid JSON, for any
-        /// hook set (including zero hooks — the auto-hooks alone must parse).
+        /// Every hook with a command reaches the table with its event, matcher, and command,
+        /// after the user hooks and before nothing else, and the table is deterministic.
         #[test]
-        fn generate_shim_js_hook_table_is_valid_json(
+        fn every_command_hook_reaches_the_table_in_order(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let js = generate_shim_js(&hooks, false).unwrap();
-            let marker = "const HOOK_TABLE = ";
-            let start = js.find(marker).unwrap() + marker.len();
-            let end = js[start..]
-                .find(";\n")
-                .map(|i| start + i)
-                .unwrap();
-            let table_json = &js[start..end];
-            let _: serde_json::Value = serde_json::from_str(table_json).unwrap();
-        }
-
-        /// `generate_shim_js` is deterministic: the same hook slice always
-        /// renders the same shim.
-        #[test]
-        fn generate_shim_js_is_deterministic(
-            hooks in proptest::collection::vec(arb_hook(), 0..5)
-        ) {
-            let a = generate_shim_js(&hooks, false).unwrap();
-            let b = generate_shim_js(&hooks, false).unwrap();
-            prop_assert_eq!(a, b);
+            let table = hook_bridge::hook_table(&hooks, false, &[]);
+            prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, false, &[]));
+            let entries = table["hooks"].as_array().unwrap();
+            let with_command: Vec<_> = hooks.iter().filter(|h| h.handler.command.is_some()).collect();
+            for (hook, entry) in with_command.iter().zip(entries) {
+                prop_assert_eq!(entry["event"].as_str(), Some(hook.event.as_str()));
+                prop_assert_eq!(entry["matcher"].as_str(), hook.matcher.as_deref());
+            }
+            // The three built-in hooks follow the user hooks.
+            prop_assert_eq!(entries.len(), with_command.len() + 3);
         }
 
         /// A bare native rule (no parens) wildcard-matches and lowercases the

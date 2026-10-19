@@ -720,9 +720,9 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
                 if blocks_by_exit_code(adapter.name()) {
-                    // opencode's shim reads nothing but the exit code, so the
-                    // envelope above is inert there and the reason has to go
-                    // to stderr to reach anyone. Claude Code is left on exit 0
+                    // The opencode plugin blocks on exit 2 and shows stderr as the
+                    // reason; it also reads the envelope, but exit 2 is the one signal
+                    // that every hook bridge agrees on. Claude Code is left on exit 0
                     // deliberately: it already blocks on the envelope alone,
                     // and exiting 2 there would change a working path for no
                     // gain.

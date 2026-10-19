@@ -21,6 +21,8 @@
 //! state it (`website/docs/engines.md`).
 
 /// How one engine expresses a neutral tool in its permission config.
+pub(crate) mod opencode_hooks;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolMapping {
     /// The engine's own identifier for the same tool.

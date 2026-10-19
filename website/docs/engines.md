@@ -357,23 +357,35 @@ Unlike Crush, opencode is a full-featured target: it supports plugins, LSP,
 custom agents/commands, and six hook events, so it reaches near-parity with the
 Claude Code adapter.
 
+(changed in v3.13.0) llmenv supports opencode 2.x only.
+The llmenv plugin uses the opencode 2.0 plugin API, which opencode 1.x cannot load.
+`llmenv doctor` reports an installed opencode older than 2.0 as unsupported, with `opencode upgrade` as the fix.
+context-mode has no opencode 2.x plugin yet, so opencode gets its MCP server and its hooks, and not its native plugin.
+
+The plugin gives every hook the payload that Claude Code sends: a Claude Code tool name (`shell` arrives as `Bash`, `read` as `Read`), Claude Code argument keys (`path` arrives as `file_path`), the session id of the call, and the project folder as `cwd`.
+An MCP tool arrives as `mcp__<server>__<tool>`.
+A hook runs only for the tools that its `matcher` names.
+A hook blocks a tool call by exit code 2, with stderr as the reason, or by `permissionDecision: "deny"` on stdout.
+The `additionalContext` of a hook reaches the model as system text, and so does the error of a hook that cannot run.
+
 ### Env vars
 
-| Variable              | Points to                                         | Notes                                                                         |
-|-----------------------|---------------------------------------------------|-------------------------------------------------------------------------------|
-| `OPENCODE_CONFIG_DIR` | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` shim from here |
+| Variable              | Points to                                         | Notes                                                                           |
+|-----------------------|---------------------------------------------------|---------------------------------------------------------------------------------|
+| `OPENCODE_CONFIG_DIR` | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` folder from here |
 
 ### What the opencode adapter emits
 
 | Output | Contents |
 | ------ | -------- |
-| `opencode.json` | `$schema` (points at the `opencode.schema.json` sidecar below), `instructions`, `mcp`, `lsp`, `permission`, `plugin` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
+| `opencode.json` | `$schema` (points at the `opencode.schema.json` sidecar below), `instructions`, `mcp`, `lsp`, `permission` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
 | `opencode.schema.json` | JSON Schema (draft 2020-12) generated from the same typed structs that render `opencode.json`, so it always matches what llmenv actually writes. Root allows `additionalProperties`, so passthrough/native-overlay keys never fail IDE validation. |
 | `AGENTS.md` | the merged rules document opencode loads as project instructions — omitted entirely when that resolves to nothing (added in v3.10.0; earlier versions wrote a 0-byte file) |
 | `rules/*.md` | rule files copied verbatim and listed in `instructions` |
 | skills (`SKILL.md`) | first-class and plugin-projected skills, in opencode's claude-compatible format |
 | `command/*.md`, `agent/*.md` | plugin commands and agents translated (agents gain `mode: subagent`) |
-| `plugin/llmenv.js` | a generated ES-module shim bridging opencode's JS plugin API to llmenv's `hook-run` subprocess |
+| `plugin/llmenv.js` | the llmenv plugin for the opencode 2.x plugin API: it runs the hooks of `plugin/llmenv-hooks.json` (changed in v3.13.0) |
+| `plugin/llmenv-hooks.json` | the hook table: each hook's event, matcher, command, and timeout, the opencode-to-Claude tool name map, and the MCP server namespaces (added in v3.13.0) |
 
 ### Capability map
 

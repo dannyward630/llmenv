@@ -18,7 +18,7 @@ mod task_text;
 mod tool_availability;
 use tool_availability::run_doctor_tool_availability;
 mod version;
-use version::{cbm_floor_warning, parse_semver_triple};
+use version::{cbm_floor_warning, opencode_floor_warning, parse_semver_triple};
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -378,12 +378,13 @@ const DEPENDENT_TOOLS: &[(&str, UpdatePath)] = &[
         "codebase-memory-mcp",
         UpdatePath::Reports("codebase-memory-mcp update"),
     ),
+    ("opencode", UpdatePath::SelfApply("opencode upgrade")),
 ];
 
 /// The version a tool reports through `--version`, as the last
 /// whitespace-separated token of its first output line.
 ///
-/// Both tools answer `<name> <semver>` (`icm 0.10.61`), so one shared parse
+/// Each tool answers `<name> <semver>` (`icm 0.10.61`, `opencode v2.0.30`), so one shared parse
 /// covers them rather than a per-tool format string — the fragile thing the
 /// issue was worried about. A tool whose output doesn't fit is reported as
 /// "version unknown" rather than guessed at.
@@ -659,9 +660,11 @@ fn run_doctor_dependent_tools(use_color: bool) {
             UpdatePath::SelfApply(_) => "update with",
             UpdatePath::Reports(_) => "check for updates with",
         };
-        let floor_warning = (*bin == "codebase-memory-mcp")
-            .then(|| cbm_floor_warning(&version))
-            .flatten();
+        let floor_warning = match *bin {
+            "codebase-memory-mcp" => cbm_floor_warning(&version),
+            "opencode" => opencode_floor_warning(&version),
+            _ => None,
+        };
         let marker = if version == "version unknown" {
             &info
         } else if floor_warning.is_some() {
@@ -3102,75 +3105,6 @@ mod tests {
                 "{bin}'s update command should invoke it, got {}",
                 update.command()
             );
-        }
-    }
-
-    #[test]
-    fn parse_semver_triple_accepts_the_expected_shapes() {
-        assert_eq!(parse_semver_triple("0.11.0"), Some((0, 11, 0)));
-        assert_eq!(parse_semver_triple("v0.10.8"), Some((0, 10, 8)));
-        assert_eq!(parse_semver_triple("0.11.0-rc.1"), Some((0, 11, 0)));
-        assert_eq!(parse_semver_triple("1.2.3+build"), Some((1, 2, 3)));
-    }
-
-    #[test]
-    fn parse_semver_triple_rejects_other_shapes() {
-        for bad in [
-            "0.11",
-            "0.11.0.1",
-            "0.x.0",
-            "\u{ff10}.11.0",
-            "",
-            "1234567890.0.0",
-        ] {
-            assert_eq!(parse_semver_triple(bad), None, "{bad:?}");
-        }
-    }
-
-    proptest! {
-        /// Any triple that fits nine digits round-trips through the text form, with or without
-        /// a `v` prefix and a suffix.
-        #[test]
-        fn parse_semver_triple_round_trips(
-            a in 0u64..1_000_000_000,
-            b in 0u64..1_000_000_000,
-            c in 0u64..1_000_000_000,
-            prefix in prop::sample::select(vec!["", "v"]),
-            suffix in prop::sample::select(vec!["", "-rc.1", "+build.5"]),
-        ) {
-            let text = format!("{prefix}{a}.{b}.{c}{suffix}");
-            prop_assert_eq!(parse_semver_triple(&text), Some((a, b, c)));
-        }
-
-        /// The parser never panics, and only accepts text that starts with a digit or `v`.
-        #[test]
-        fn parse_semver_triple_never_panics(text in "\\PC{0,24}") {
-            if parse_semver_triple(&text).is_some() {
-                prop_assert!(text.starts_with(|c: char| c.is_ascii_digit() || c == 'v'));
-            }
-        }
-    }
-
-    #[test]
-    fn cbm_floor_warning_fires_only_below_the_floor() {
-        let warning = cbm_floor_warning("0.10.8").expect("0.10.8 is below the floor");
-        assert!(warning.contains("0.10.8 is older than 0.12.0"), "{warning}");
-        assert!(
-            cbm_floor_warning("0.11.0").is_some(),
-            "0.11.0 is below the 0.12.0 floor"
-        );
-        for ok in ["0.12.0", "0.12.1", "1.0.0"] {
-            assert_eq!(cbm_floor_warning(ok), None, "{ok:?}");
-        }
-    }
-
-    #[test]
-    fn cbm_floor_warning_fires_for_an_unparseable_version() {
-        for unknown in ["version unknown", "garbage", ""] {
-            let warning = cbm_floor_warning(unknown)
-                .unwrap_or_else(|| panic!("{unknown:?} must warn, not pass silently"));
-            assert!(warning.contains("could not be checked"), "{warning}");
-            assert!(warning.contains(unknown), "{warning}");
         }
     }
 
