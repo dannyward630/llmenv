@@ -1,11 +1,9 @@
-//! Warn-only `PreToolUse` advisory for Bash `cd` (#976).
+//! Warn-only `PreToolUse` advisory for a Bash command that ends with `cd` (#976, #2900).
 //!
-//! The archived-transcript corpus shows 77 occurrences of "Shell cwd was
-//! reset to <path>" — the harness resets the working directory after every
-//! Bash call that `cd`s, so any *following* command that assumed the new cwd
-//! runs in the wrong place. The base bundle's own prose guidance ("prefer
-//! absolute paths over `cd`") wasn't stopping this on its own; mechanizing
-//! the reminder into a non-blocking advisory is the fix.
+//! In the main agent, the Bash tool keeps its working directory between calls, so a command
+//! that ends with `cd` changes where the next call runs. In a subagent the directory can differ.
+//! A `cd` followed by more commands in the same call (`cd /x && cargo test`) changes nothing
+//! after the call, so it gets no advisory.
 //!
 //! Stateless, unlike `read_once`/`repeat_detect`: it only inspects the
 //! current call's `tool_input.command`, no per-session tracking needed.
@@ -13,9 +11,9 @@
 use crate::config::CdGuard;
 use crate::hook_run::shell_split::{NestingTooDeep, program_words, shell_segments};
 
-const ADVISORY: &str = "note: this command changes the working directory with `cd` — \
-Claude Code resets the cwd after every Bash call, so a following command that assumes \
-the new directory will run in the wrong place. Prefer an absolute path instead.";
+const ADVISORY: &str = "note: this command ends with `cd`, so the next Bash call starts in \
+that directory in the main agent, and a subagent can start elsewhere. Run the commands that need \
+the directory in the same call (`cd /x && cmd`), or use absolute paths.";
 
 /// Handle a `PreToolUse` event for the cd-guard feature. Returns the
 /// advisory text, or an empty string when the guard doesn't apply (disabled,
@@ -41,26 +39,24 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
         tracing::error!("tool_input.command missing or not a string for Bash PreToolUse payload");
         return String::new();
     };
-    if command_uses_cd(command) {
+    if command_ends_with_cd(command) {
         ADVISORY.to_string()
     } else {
         String::new()
     }
 }
 
-/// Whether `command` runs `cd` in any of its parts, including a substitution,
-/// a subshell, or a brace group. Those parts are the shape that triggers the
-/// cwd-reset behavior this guard warns about.
+/// Whether the last command of `command` is `cd`, so the change of directory outlives the call.
 ///
-/// The parts come from the shared splitter that the commit gate uses, so a
-/// `cd` inside `$( )` or `( )` is seen (#2619). A command nested too deeply
-/// to split gets no advisory. The advisory would claim a `cd` that the parser
-/// never checked, so the parse failure is logged instead.
-fn command_uses_cd(command: &str) -> bool {
+/// The parts come from the shared splitter that the commit gate uses (#2619). It puts each
+/// substitution ahead of the command that runs it, so the last part is the last command at the
+/// top level. A command nested too deeply to split gets no advisory, and the parse failure is
+/// logged instead.
+fn command_ends_with_cd(command: &str) -> bool {
     match shell_segments(command) {
         Ok(segments) => segments
-            .iter()
-            .any(|words| program_words(words).first() == Some(&"cd")),
+            .last()
+            .is_some_and(|words| program_words(words).first() == Some(&"cd")),
         Err(NestingTooDeep) => {
             tracing::error!("cd guard: command nests too deep to check for cd; no advisory");
             false
@@ -83,75 +79,84 @@ mod tests {
 
     #[test]
     fn detects_bare_cd() {
-        assert!(command_uses_cd("cd /tmp"));
+        assert!(command_ends_with_cd("cd /tmp"));
     }
 
     #[test]
-    fn detects_leading_cd_in_compound_and() {
-        assert!(command_uses_cd("cd /tmp && ls"));
+    fn a_cd_followed_by_more_commands_gets_no_advisory() {
+        assert!(!command_ends_with_cd("cd /tmp && ls"));
+        assert!(!command_ends_with_cd("cd /tmp; cargo test"));
     }
 
     #[test]
     fn detects_trailing_cd_in_compound_and() {
-        assert!(command_uses_cd("ls && cd /tmp"));
+        assert!(command_ends_with_cd("ls && cd /tmp"));
     }
 
     #[test]
     fn detects_cd_after_semicolon() {
-        assert!(command_uses_cd("ls; cd /tmp"));
+        assert!(command_ends_with_cd("ls; cd /tmp"));
     }
 
     #[test]
     fn detects_cd_after_or() {
-        assert!(command_uses_cd("false || cd /tmp"));
+        assert!(command_ends_with_cd("false || cd /tmp"));
     }
 
     #[test]
     fn detects_cd_across_newlines() {
-        assert!(command_uses_cd("ls\ncd /tmp"));
+        assert!(command_ends_with_cd("ls\ncd /tmp"));
     }
 
     #[test]
-    fn detects_cd_inside_a_command_substitution() {
-        assert!(command_uses_cd("echo $(cd /tmp && ls)"));
+    fn a_cd_inside_a_command_substitution_gets_no_advisory() {
+        assert!(!command_ends_with_cd("echo $(cd /tmp && ls)"));
     }
 
     #[test]
-    fn detects_cd_inside_a_subshell_group() {
-        assert!(command_uses_cd("(cd /tmp && ls)"));
+    fn a_cd_inside_a_subshell_group_gets_no_advisory() {
+        assert!(!command_ends_with_cd("(cd /tmp && ls)"));
     }
 
     #[test]
-    fn detects_cd_inside_a_brace_group() {
-        assert!(command_uses_cd("{ cd /tmp; ls; }"));
+    fn a_cd_inside_a_brace_group_followed_by_a_command_gets_no_advisory() {
+        assert!(!command_ends_with_cd("{ cd /tmp; ls; }"));
     }
 
     #[test]
     fn a_command_too_deep_to_split_gets_no_cd_advisory() {
         let nested = format!("{}cd /tmp{}", "$(".repeat(40), ")".repeat(40));
-        assert!(!command_uses_cd(&nested));
+        assert!(!command_ends_with_cd(&nested));
     }
 
     #[test]
     fn ignores_command_without_cd() {
-        assert!(!command_uses_cd("ls -la /tmp"));
+        assert!(!command_ends_with_cd("ls -la /tmp"));
     }
 
     #[test]
     fn ignores_cd_as_a_substring_of_another_word() {
-        assert!(!command_uses_cd("mkdir abcd && ls"));
+        assert!(!command_ends_with_cd("mkdir abcd && ls"));
     }
 
     #[test]
     fn ignores_cdpath_env_assignment() {
-        assert!(!command_uses_cd("CDPATH=/tmp ls"));
+        assert!(!command_ends_with_cd("CDPATH=/tmp ls"));
     }
 
     #[test]
-    fn handle_pre_tool_use_returns_advisory_for_cd_command() {
-        let text = handle_pre_tool_use(&bash_payload("cd /tmp && ls"), &CdGuard { enabled: true });
-        assert!(!text.is_empty());
-        assert!(text.contains("cd"));
+    fn handle_pre_tool_use_returns_advisory_for_a_trailing_cd() {
+        let text = handle_pre_tool_use(&bash_payload("ls && cd /tmp"), &CdGuard { enabled: true });
+        assert_eq!(text, ADVISORY);
+        assert!(
+            !text.contains("resets"),
+            "Claude Code keeps the directory: {text}"
+        );
+        let none = handle_pre_tool_use(
+            &bash_payload("cd /x && cargo test"),
+            &CdGuard { enabled: true },
+        );
+        assert!(none.is_empty());
     }
 
     #[test]
@@ -200,8 +205,8 @@ mod tests {
     proptest! {
         // Arbitrary text never panics, regardless of shell-metacharacter content.
         #[test]
-        fn command_uses_cd_never_panics(command in ".{0,200}") {
-            let _ = command_uses_cd(&command);
+        fn command_ends_with_cd_never_panics(command in ".{0,200}") {
+            let _ = command_ends_with_cd(&command);
         }
     }
 
@@ -223,7 +228,7 @@ mod tests {
         /// Builds a compound command from 1-5 segments, each
         /// `<preceding separator> <leading> <arg>` (the first segment's
         /// separator is generated but unused) — plus the expected
-        /// `command_uses_cd` result for it.
+        /// `command_ends_with_cd` result for it.
         fn arb_command_and_expected() -> impl Strategy<Value = (String, bool)> {
             let segment = (
                 proptest::bool::ANY,
@@ -232,7 +237,9 @@ mod tests {
                 arb_separator(),
             );
             proptest::collection::vec(segment, 1..6).prop_map(|segments| {
-                let expected = segments.iter().any(|&(leads_with_cd, ..)| leads_with_cd);
+                let expected = segments
+                    .last()
+                    .is_some_and(|&(leads_with_cd, ..)| leads_with_cd);
                 let mut command = String::new();
                 for (i, (leads_with_cd, token, arg, sep)) in segments.iter().enumerate() {
                     if i > 0 {
@@ -258,17 +265,17 @@ mod tests {
 
         proptest! {
             #[test]
-            fn command_uses_cd_matches_leading_cd_segments((command, expected) in arb_command_and_expected()) {
-                prop_assert_eq!(command_uses_cd(&command), expected, "command: {:?}", command);
+            fn command_ends_with_cd_matches_leading_cd_segments((command, expected) in arb_command_and_expected()) {
+                prop_assert_eq!(command_ends_with_cd(&command), expected, "command: {:?}", command);
             }
 
             #[test]
-            fn command_uses_cd_ignores_non_leading_cd_occurrences(
+            fn command_ends_with_cd_ignores_non_leading_cd_occurrences(
                 leading in arb_cd_like_but_not_exact_token(),
                 trailing in proptest::sample::select(vec!["cd", "cd/", "xcd", "cdx"]),
             ) {
                 let command = format!("{leading} {trailing}");
-                prop_assert!(!command_uses_cd(&command), "command: {:?}", command);
+                prop_assert!(!command_ends_with_cd(&command), "command: {:?}", command);
             }
         }
     }

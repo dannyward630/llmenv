@@ -5431,7 +5431,7 @@ mod tests {
         let config = crate::config::Config::default();
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
         assert!(
@@ -5452,7 +5452,7 @@ mod tests {
         };
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
         assert!(
@@ -5476,7 +5476,7 @@ mod tests {
         };
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s2"), &config, false, state_dir.path())
             .expect("test");
