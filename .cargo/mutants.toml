@@ -23,6 +23,9 @@ examine_globs = [
 exclude_re = [
   "replace < with <= in waves",
   "replace > with >= in prune_orphan_locks",
+  # With no failure and budget left, the loop ends only when the actions run out, so the unrun count
+  # is zero and the failure flag does not change the notice.
+  "replace > with >= in run_scope",
   # A detached spawn with no in-process effect. Its command
   # (consolidation_run_command) and the decision to call it
   # (maybe_start_consolidation) are tested.
