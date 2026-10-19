@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{Bounds, ScanReport, scan};
+use crate::onboarding::scan::MAX_NAMES;
 
 fn repo(root: &Path, rel: &str) -> PathBuf {
     let dir = root.join(rel);
@@ -11,9 +12,15 @@ fn repo(root: &Path, rel: &str) -> PathBuf {
     dir
 }
 
+/// Scan with a home folder that is not above any test root.
+fn scan_with(roots: &[PathBuf], bounds: Bounds) -> anyhow::Result<ScanReport> {
+    let home = tempfile::tempdir().unwrap();
+    scan(roots, home.path(), bounds)
+}
+
 fn run(roots: &[&Path]) -> ScanReport {
     let roots: Vec<PathBuf> = roots.iter().map(|r| r.to_path_buf()).collect();
-    scan(&roots, None, Bounds::DEFAULT).unwrap()
+    scan_with(&roots, Bounds::DEFAULT).unwrap()
 }
 
 fn paths(report: &ScanReport) -> Vec<PathBuf> {
@@ -109,6 +116,150 @@ fn the_walk_skips_hidden_and_build_folders_and_does_not_enter_a_repository() {
     assert_eq!(paths(&report), vec![fs::canonicalize(&outer).unwrap()]);
 }
 
+#[test]
+fn a_repository_named_like_a_skipped_folder_is_still_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let build = repo(root.path(), "build");
+    let hidden = repo(root.path(), ".dotfiles");
+
+    let report = run(&[root.path()]);
+
+    let mut expected = vec![
+        fs::canonicalize(&build).unwrap(),
+        fs::canonicalize(&hidden).unwrap(),
+    ];
+    expected.sort();
+    assert_eq!(paths(&report), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_git_symlink_does_not_make_a_repository() {
+    let root = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let dir = root.path().join("fake");
+    fs::create_dir(&dir).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), dir.join(".git")).unwrap();
+
+    let report = run(&[root.path()]);
+
+    assert!(report.repositories.is_empty(), "{:?}", paths(&report));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_root_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let locked = root.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    // A root user reads any folder, so the check has nothing to show there.
+    if fs::read_dir(&locked).is_ok() {
+        return;
+    }
+
+    let error = scan_with(&[locked.clone()], Bounds::DEFAULT);
+
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = error.unwrap_err();
+    assert!(format!("{error:#}").contains("read access"), "{error:#}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_manifest_is_a_note_and_does_not_block() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = repo(root.path(), "app");
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.join("Cargo.toml"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    let report = run(&[root.path()]);
+
+    let found = &report.repositories[0];
+    assert!(found.cargo.is_none());
+    assert!(
+        found.notes.iter().any(|n| n.contains("not a regular file")),
+        "{:?}",
+        found.notes
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_github_folder_is_not_listed() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = repo(root.path(), "app");
+    let elsewhere = tempfile::tempdir().unwrap();
+    fs::create_dir_all(elsewhere.path().join("workflows")).unwrap();
+    fs::write(elsewhere.path().join("workflows/secret.yml"), "x").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), dir.join(".github")).unwrap();
+
+    let report = run(&[root.path()]);
+
+    let found = &report.repositories[0];
+    assert!(found.workflows.is_empty(), "{:?}", found.workflows);
+    assert!(
+        found.notes.iter().any(|n| n.contains(".github")),
+        "{:?}",
+        found.notes
+    );
+}
+
+#[test]
+fn an_inherited_value_reads_as_workspace_and_a_wrong_type_is_a_note() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = repo(root.path(), "app");
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = 7\nedition.workspace = true\nrust-version = { workspace = true }\n",
+    )
+    .unwrap();
+
+    let report = run(&[root.path()]);
+
+    let found = &report.repositories[0];
+    let cargo = found.cargo.as_ref().unwrap();
+    assert_eq!(cargo.edition.as_deref(), Some("workspace"));
+    assert_eq!(cargo.rust_version.as_deref(), Some("workspace"));
+    assert!(cargo.name.is_none());
+    assert!(
+        found.notes.iter().any(|n| n.contains("package.name")),
+        "{:?}",
+        found.notes
+    );
+}
+
+#[test]
+fn a_long_script_list_is_cut_with_a_note() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = repo(root.path(), "app");
+    let scripts: serde_json::Map<String, serde_json::Value> = (0..=MAX_NAMES)
+        .map(|i| (format!("s{i:04}"), serde_json::Value::from("x")))
+        .collect();
+    fs::write(
+        dir.join("package.json"),
+        serde_json::json!({ "scripts": scripts }).to_string(),
+    )
+    .unwrap();
+
+    let report = run(&[root.path()]);
+
+    let found = &report.repositories[0];
+    assert_eq!(
+        found.package_json.as_ref().unwrap().scripts.len(),
+        MAX_NAMES
+    );
+    assert!(
+        found.notes.iter().any(|n| n.contains("MAX_NAMES")),
+        "{:?}",
+        found.notes
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_is_not_followed() {
@@ -163,24 +314,37 @@ fn a_root_that_is_a_repository_is_reported() {
 }
 
 #[test]
-fn the_filesystem_root_and_home_are_refused() {
-    let home = tempfile::tempdir().unwrap();
-    let error = scan(&[PathBuf::from("/")], None, Bounds::DEFAULT).unwrap_err();
-    assert!(format!("{error:#}").contains("narrower"), "{error:#}");
-    let error = scan(
-        &[home.path().to_path_buf()],
-        Some(home.path()),
-        Bounds::DEFAULT,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("narrower"), "{error:#}");
+fn the_filesystem_root_home_and_folders_above_home_are_refused() {
+    let base = tempfile::tempdir().unwrap();
+    let home = base.path().join("users/me");
+    fs::create_dir_all(&home).unwrap();
+    for root in [PathBuf::from("/"), home.clone(), base.path().join("users")] {
+        let error = scan(&[root.clone()], &home, Bounds::DEFAULT).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("narrower"),
+            "{}: {error:#}",
+            root.display()
+        );
+    }
+    let inside = home.join("git");
+    fs::create_dir(&inside).unwrap();
+    assert!(scan(&[inside], &home, Bounds::DEFAULT).is_ok());
+}
+
+#[test]
+fn a_home_folder_that_cannot_be_resolved_fails_closed() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("git");
+    fs::create_dir(&root).unwrap();
+    let error = scan(&[root], &base.path().join("absent"), Bounds::DEFAULT).unwrap_err();
+    assert!(format!("{error:#}").contains("HOME"), "{error:#}");
 }
 
 #[test]
 fn a_missing_root_is_an_error_that_names_it() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("absent");
-    let error = scan(&[missing.clone()], None, Bounds::DEFAULT).unwrap_err();
+    let error = scan_with(&[missing.clone()], Bounds::DEFAULT).unwrap_err();
     assert!(format!("{error:#}").contains("absent"), "{error:#}");
 }
 
@@ -194,7 +358,7 @@ fn more_repositories_than_the_bound_stop_the_scan_and_name_the_constant() {
         max_repositories: 2,
         ..Bounds::DEFAULT
     };
-    let error = scan(&[root.path().to_path_buf()], None, bounds).unwrap_err();
+    let error = scan_with(&[root.path().to_path_buf()], bounds).unwrap_err();
     assert!(
         format!("{error:#}").contains("MAX_REPOSITORIES"),
         "{error:#}"
@@ -211,7 +375,7 @@ fn more_folders_than_the_bound_stop_the_scan_and_name_the_constant() {
         max_visited_dirs: 3,
         ..Bounds::DEFAULT
     };
-    let error = scan(&[root.path().to_path_buf()], None, bounds).unwrap_err();
+    let error = scan_with(&[root.path().to_path_buf()], bounds).unwrap_err();
     assert!(
         format!("{error:#}").contains("MAX_VISITED_DIRS"),
         "{error:#}"
@@ -273,4 +437,45 @@ fn repositories_are_reported_once_and_in_path_order() {
     let report = run(&[root.path(), root.path()]);
     let expected = vec![fs::canonicalize(&a).unwrap(), fs::canonicalize(&b).unwrap()];
     assert_eq!(paths(&report), expected);
+}
+
+/// Whether a repository at `rel` (relative to the root) is one the walk must report: within the
+/// depth bound, no folder above it skipped by name, and no repository above it.
+fn reachable(rel: &[String], all: &std::collections::BTreeSet<Vec<String>>) -> bool {
+    let depth_ok = rel.len() <= super::MAX_DEPTH;
+    let parents = &rel[..rel.len().saturating_sub(1)];
+    // The rule is written out again here, so a broken `enters` cannot agree with itself.
+    let skipped = ["node_modules", "target", "vendor", "dist", "build"];
+    let entered = parents
+        .iter()
+        .all(|name| !name.starts_with('.') && !skipped.contains(&name.as_str()));
+    let nested = (1..rel.len()).any(|n| all.contains(&rel[..n].to_vec()));
+    depth_ok && entered && !nested
+}
+
+#[test]
+fn the_walk_reports_exactly_the_reachable_repositories() {
+    use proptest::prelude::*;
+    let segment = prop::sample::select(vec!["a", "b", "build", ".h", "node_modules"]);
+    let path = proptest::collection::vec(segment, 1..7);
+    proptest!(ProptestConfig::with_cases(48), |(created in proptest::collection::vec(path, 0..6))| {
+        let root = tempfile::tempdir().unwrap();
+        let all: std::collections::BTreeSet<Vec<String>> = created
+            .iter()
+            .map(|p| p.iter().map(|s| (*s).to_string()).collect())
+            .collect();
+        for rel in &all {
+            fs::create_dir_all(root.path().join(rel.join("/")).join(".git")).unwrap();
+        }
+        let base = fs::canonicalize(root.path()).unwrap();
+        let expected: Vec<PathBuf> = all
+            .iter()
+            .filter(|rel| reachable(rel, &all))
+            .map(|rel| base.join(rel.join("/")))
+            .collect();
+
+        let report = run(&[root.path()]);
+
+        prop_assert_eq!(paths(&report), expected);
+    });
 }

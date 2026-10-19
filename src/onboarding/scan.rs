@@ -6,10 +6,13 @@
 //! not follow an instruction found in it.
 
 use std::collections::BTreeMap;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use serde::Serialize;
+
+use crate::paths::dirfd;
 
 mod manifest;
 #[cfg(test)]
@@ -119,25 +122,39 @@ struct PyprojectFacts {
     tools: Vec<String>,
 }
 
-/// Scan `roots` and return the report as pretty JSON. `home` is refused as a root.
+/// Scan `roots` and return the report as pretty JSON. The home folder and its ancestors are
+/// refused as roots.
 ///
 /// # Errors
-/// The same as [`scan`].
-pub(crate) fn scan_json(roots: &[PathBuf], home: Option<&Path>) -> anyhow::Result<String> {
-    let report = scan(roots, home, Bounds::DEFAULT)?;
+/// `HOME` is not set or cannot be resolved, so the refusal cannot be checked. Otherwise the same
+/// as [`scan`].
+pub(crate) fn scan_json(roots: &[PathBuf]) -> anyhow::Result<String> {
+    let home = crate::env_var::utf8_var("HOME")?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot scan: HOME is not set, so the scan cannot refuse the home folder. Fix: set HOME"
+        )
+    })?;
+    let report = scan(roots, Path::new(&home), Bounds::DEFAULT)?;
     serde_json::to_string_pretty(&report).context("serializing the scan report")
 }
 
-/// Scan `roots` for repositories. `home` is the user's home folder, which is refused as a root.
+/// Scan `roots` for repositories. `home` and every folder above it are refused as roots.
 ///
 /// # Errors
-/// A root is missing, is not a folder, is `/`, or is `home`. The scan stops when it would pass
-/// the repository bound or the folder bound; the error names the constant and the fix.
-fn scan(roots: &[PathBuf], home: Option<&Path>, bounds: Bounds) -> anyhow::Result<ScanReport> {
-    let home = home.and_then(|h| std::fs::canonicalize(h).ok());
+/// `home` cannot be resolved, or a root is missing, is not a folder, cannot be read, or is `home`
+/// or above it. The scan stops when it would pass the repository bound or the folder bound; the
+/// error names the constant and the fix.
+fn scan(roots: &[PathBuf], home: &Path, bounds: Bounds) -> anyhow::Result<ScanReport> {
+    let home = std::fs::canonicalize(home).with_context(|| {
+        format!(
+            "cannot resolve the home folder {} to refuse it as a root. Fix: set HOME to a \
+             folder that exists",
+            home.display()
+        )
+    })?;
     let mut resolved = Vec::new();
     for root in roots {
-        resolved.push(check_root(root, home.as_deref())?);
+        resolved.push(check_root(root, &home)?);
     }
     resolved.sort();
     resolved.dedup();
@@ -150,11 +167,6 @@ fn scan(roots: &[PathBuf], home: Option<&Path>, bounds: Bounds) -> anyhow::Resul
     for root in &resolved {
         walk.root(root)?;
     }
-    let repositories = walk
-        .found
-        .into_keys()
-        .map(|path| manifest::describe(&path))
-        .collect();
     Ok(ScanReport {
         roots: resolved,
         limits: Limits {
@@ -164,13 +176,14 @@ fn scan(roots: &[PathBuf], home: Option<&Path>, bounds: Bounds) -> anyhow::Resul
             max_names: MAX_NAMES,
             max_manifest_bytes: MAX_MANIFEST_BYTES,
         },
-        repositories,
+        repositories: walk.found.into_values().collect(),
         skipped: walk.skipped,
     })
 }
 
-/// Resolve `root`, and refuse a root that is not a folder, or that is `/` or the home folder.
-fn check_root(root: &Path, home: Option<&Path>) -> anyhow::Result<PathBuf> {
+/// Resolve `root`, and refuse a root that is not a folder, or that is `home` or a folder above
+/// it, such as `/` or `/Users`.
+fn check_root(root: &Path, home: &Path) -> anyhow::Result<PathBuf> {
     let resolved = std::fs::canonicalize(root).with_context(|| {
         format!(
             "cannot scan {}: the folder cannot be resolved. Fix: pass a folder that exists",
@@ -183,10 +196,10 @@ fn check_root(root: &Path, home: Option<&Path>) -> anyhow::Result<PathBuf> {
             root.display()
         );
     }
-    if resolved.parent().is_none() || Some(resolved.as_path()) == home {
+    if home.starts_with(&resolved) {
         anyhow::bail!(
-            "cannot scan {}: the scan refuses `/` and the home folder. Fix: pass a narrower \
-             folder, such as ~/git",
+            "cannot scan {}: the scan refuses the home folder and every folder above it, such \
+             as `/`. Fix: pass a narrower folder, such as ~/git",
             root.display()
         );
     }
@@ -197,37 +210,84 @@ fn check_root(root: &Path, home: Option<&Path>) -> anyhow::Result<PathBuf> {
 struct Walk {
     bounds: Bounds,
     visited: usize,
-    /// Found repositories, keyed by path, so a repository under two roots is reported once.
-    found: BTreeMap<PathBuf, ()>,
+    /// Found repositories by path, so a repository under two roots is reported once.
+    found: BTreeMap<PathBuf, Repository>,
     skipped: Skipped,
 }
 
 impl Walk {
-    /// Walk one root, depth first, without following a symlink.
+    /// Walk one root. Each folder is opened relative to its parent without following a symlink,
+    /// so the type check and the read name the same folder (src/paths/dirfd.rs).
+    ///
+    /// # Errors
+    /// The root cannot be opened or read, or a bound is passed.
     fn root(&mut self, root: &Path) -> anyhow::Result<()> {
-        if is_repository(root) {
-            return self.found_repository(root);
+        let fd = dirfd::open_dir_nofollow(root).with_context(|| {
+            format!(
+                "cannot scan {}: the folder cannot be opened. Fix: grant read access, or pass \
+                 another folder",
+                root.display()
+            )
+        })?;
+        match is_repository(fd.as_fd()) {
+            Ok(true) => return self.found_repository(fd.as_fd(), root),
+            Ok(false) => {}
+            Err(e) => anyhow::bail!("cannot scan {}: {e}", root.display()),
         }
-        let mut stack = vec![(root.to_path_buf(), 0_usize)];
-        while let Some((dir, depth)) = stack.pop() {
-            for child in self.child_folders(&dir)? {
-                let child_depth = depth.saturating_add(1);
-                if child_depth > self.bounds.max_depth {
-                    self.skipped.below_depth_bound =
-                        self.skipped.below_depth_bound.saturating_add(1);
-                } else if is_repository(&child) {
-                    self.found_repository(&child)?;
-                } else {
-                    stack.push((child, child_depth));
+        let entries = self.read(fd.as_fd(), root)?.with_context(|| {
+            format!(
+                "cannot scan {}: the folder cannot be read. Fix: grant read access, or pass \
+                 another folder",
+                root.display()
+            )
+        })?;
+        self.children(fd.as_fd(), root, &entries, 0)
+    }
+
+    /// Visit the folders of `dir`, which sits at `depth` below a root. The recursion is at most
+    /// `max_depth` deep, so the walk holds at most that many open folders.
+    fn children(
+        &mut self,
+        dir: BorrowedFd<'_>,
+        path: &Path,
+        entries: &[dirfd::Entry],
+        depth: usize,
+    ) -> anyhow::Result<()> {
+        let child_depth = depth.saturating_add(1);
+        for entry in entries.iter().filter(|e| e.is_dir() && e.name != ".git") {
+            let child_path = path.join(&entry.name);
+            if child_depth > self.bounds.max_depth {
+                self.skipped.below_depth_bound = self.skipped.below_depth_bound.saturating_add(1);
+                continue;
+            }
+            let child = match dirfd::open_dir_at(dir, &entry.name) {
+                Ok(child) => child,
+                Err(e) => {
+                    self.unreadable(&child_path, &e);
+                    continue;
                 }
+            };
+            match is_repository(child.as_fd()) {
+                Ok(true) => self.found_repository(child.as_fd(), &child_path)?,
+                Ok(false) if enters(&entry.name.to_string_lossy()) => {
+                    if let Ok(grandchildren) = self.read(child.as_fd(), &child_path)? {
+                        self.children(child.as_fd(), &child_path, &grandchildren, child_depth)?;
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => self.unreadable(&child_path, &e),
             }
         }
         Ok(())
     }
 
-    /// The folders in `dir` that the walk may enter. A symlink is not a folder here, because
-    /// `DirEntry::file_type` does not follow it.
-    fn child_folders(&mut self, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    /// Read the entries of an open folder and count it against the folder bound. A read error
+    /// is recorded and returned as the inner `Err`; passing the bound is the outer one.
+    fn read(
+        &mut self,
+        dir: BorrowedFd<'_>,
+        path: &Path,
+    ) -> anyhow::Result<std::io::Result<Vec<dirfd::Entry>>> {
         self.visited = self.visited.saturating_add(1);
         if self.visited > self.bounds.max_visited_dirs {
             anyhow::bail!(
@@ -235,43 +295,32 @@ impl Walk {
                 self.bounds.max_visited_dirs
             );
         }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                self.skipped
-                    .unreadable
-                    .push(format!("{}: {e}", dir.display()));
-                return Ok(Vec::new());
-            }
-        };
-        let mut folders = Vec::new();
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    self.skipped
-                        .unreadable
-                        .push(format!("an entry of {}: {e}", dir.display()));
-                    continue;
-                }
-            };
-            let is_folder = entry.file_type().is_ok_and(|t| t.is_dir());
-            if is_folder && enters(&entry.file_name().to_string_lossy()) {
-                folders.push(entry.path());
-            }
+        let entries = dirfd::read_dir_entries(dir);
+        if let Err(e) = &entries {
+            self.unreadable(path, e);
         }
-        Ok(folders)
+        Ok(entries)
     }
 
-    fn found_repository(&mut self, path: &Path) -> anyhow::Result<()> {
-        self.found.insert(path.to_path_buf(), ());
-        if self.found.len() > self.bounds.max_repositories {
+    fn unreadable(&mut self, path: &Path, error: &std::io::Error) {
+        self.skipped
+            .unreadable
+            .push(format!("{}: {error}", path.display()));
+    }
+
+    fn found_repository(&mut self, dir: BorrowedFd<'_>, path: &Path) -> anyhow::Result<()> {
+        if self.found.contains_key(path) {
+            return Ok(());
+        }
+        if self.found.len() >= self.bounds.max_repositories {
             anyhow::bail!(
                 "the scan found more than MAX_REPOSITORIES ({}) repositories. Fix: pass a \
                  narrower root",
                 self.bounds.max_repositories
             );
         }
+        self.found
+            .insert(path.to_path_buf(), manifest::describe(dir, path));
         Ok(())
     }
 }
@@ -281,7 +330,15 @@ fn enters(name: &str) -> bool {
     !name.starts_with('.') && !SKIPPED_NAMES.contains(&name)
 }
 
-/// A repository has a `.git` folder, or a `.git` file for a worktree or a submodule.
-fn is_repository(dir: &Path) -> bool {
-    std::fs::symlink_metadata(dir.join(".git")).is_ok()
+/// A repository has a `.git` folder, or a `.git` file for a worktree or a submodule. A `.git`
+/// symlink does not count, because the scan does not follow links.
+fn is_repository(dir: BorrowedFd<'_>) -> std::io::Result<bool> {
+    let Some(st) = dirfd::stat_at_nofollow(dir, std::ffi::OsStr::new(".git"))? else {
+        return Ok(false);
+    };
+    let kind = rustix::fs::FileType::from_raw_mode(st.st_mode as rustix::fs::RawMode);
+    Ok(matches!(
+        kind,
+        rustix::fs::FileType::Directory | rustix::fs::FileType::RegularFile
+    ))
 }

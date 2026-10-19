@@ -47,11 +47,7 @@ pub(in crate::cli) fn run_setup_command(args: SetupArgs) -> Result<()> {
         return Ok(());
     }
     if !args.scan.is_empty() {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        println!(
-            "{}",
-            crate::onboarding::scan::scan_json(&args.scan, home.as_deref())?
-        );
+        println!("{}", crate::onboarding::scan::scan_json(&args.scan)?);
         return Ok(());
     }
     run_setup(args.path, args.repo, args.no_launch, args.rescan)
