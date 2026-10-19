@@ -5,7 +5,7 @@ pub use llmenv_git::{
 
 /// How long a local git query may run, such as `rev-parse` or `symbolic-ref`. A local git answers
 /// in milliseconds, so a longer wait means a stuck mount, and a hook must not wait on it (#2923).
-pub(crate) const LOCAL_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const LOCAL_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Run the local git query `args` in `dir`, with the English messages that callers match on, for
 /// at most [`LOCAL_QUERY_TIMEOUT`].
