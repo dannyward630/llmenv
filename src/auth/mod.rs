@@ -124,7 +124,7 @@ pub(crate) fn extract_auth_entry(doc: &serde_json::Value) -> Option<AuthEntry> {
 /// Returns an error when the file exists but cannot be read or is not valid JSON.
 pub(crate) fn read_auth_from_dir(config_dir: &Path) -> anyhow::Result<Option<AuthEntry>> {
     let path = config_dir.join(CLAUDE_JSON_FILE);
-    let bytes = match read_zeroizing(&path) {
+    let bytes = match crate::paths::bounded::large_bytes_io(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
@@ -265,7 +265,7 @@ pub(crate) fn inject_auth_into_claude_json(
 
 /// Read `.claude.json`, returning `{}` when absent. Corrupt = hard error.
 fn read_claude_json_for_inject(path: &Path) -> anyhow::Result<serde_json::Value> {
-    match read_zeroizing(path) {
+    match crate::paths::bounded::large_bytes_io(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
             format!(
                 "existing {} is not valid JSON; refusing to overwrite (would destroy Claude \

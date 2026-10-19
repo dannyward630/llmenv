@@ -48,4 +48,7 @@ exclude_re = [
   "replace == with != in read_dir_logged",
   # The NotFound guard in read_dedup_snapshot only chooses between a silent None and a logged None.
   "replace != with == in read_dedup_snapshot",
+  # A one-line wrapper that passes the PATH lookup of codebase-memory-mcp to trigger_index_with,
+  # which the tests run with a fixed program. Its result depends on the host's PATH.
+  "replace trigger_codebase_memory_index -> Option<String> with",
 ]

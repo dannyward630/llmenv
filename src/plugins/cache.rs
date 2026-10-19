@@ -370,10 +370,10 @@ pub(crate) fn read_marketplace_plugins(
         .join("marketplace.json");
     // #893: a single read that distinguishes NotFound (→ empty) from other I/O
     // errors (→ propagate), rather than an exists() stat that masked every stat
-    // failure (e.g. EACCES) as "no manifest".
-    let content = match std::fs::read_to_string(&manifest_path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        r => r.with_context(|| format!("reading {}", manifest_path.display()))?,
+    // failure (e.g. EACCES) as "no manifest". The marketplace is a cloned repository, so the
+    // read is capped and refuses a FIFO (#2945).
+    let Some(content) = crate::paths::bounded::asset_text_optional(&manifest_path)? else {
+        return Ok(Vec::new());
     };
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("parsing {}", manifest_path.display()))?;

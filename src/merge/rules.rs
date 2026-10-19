@@ -139,7 +139,10 @@ fn walk(
         if p.extension().is_none_or(|e| e != "md") {
             continue;
         }
-        let raw = std::fs::read_to_string(&p)?;
+        // Bounded like the bundle's AGENTS.md: the rule text goes into every session (#2933).
+        let raw = crate::merge::bundle_file::read_bundle_text(&p)
+            .map_err(|e| anyhow::anyhow!("reading rule file {}: {e}", p.display()))?
+            .unwrap_or_default();
         let (frontmatter, body) = split_frontmatter(&raw);
         let rel = p
             .strip_prefix(bundle_root)
@@ -163,6 +166,13 @@ fn split_frontmatter(raw: &str) -> (Option<String>, String) {
     let Some(rest) = raw.strip_prefix("---\n") else {
         return (None, raw.to_owned());
     };
+    // An empty block puts the closer right after the opener.
+    if let Some(body) = rest.strip_prefix("---\n") {
+        return (Some(String::new()), body.to_owned());
+    }
+    if rest == "---" {
+        return (Some(String::new()), String::new());
+    }
     // Look for a `---` line. Accept either `\n---\n` (closer with content
     // following) or trailing `\n---` at EOF (closer with nothing after).
     if let Some(end) = rest.find("\n---\n") {
@@ -181,6 +191,30 @@ fn split_frontmatter(raw: &str) -> (Option<String>, String) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        #[test]
+        fn a_closed_block_splits_into_its_frontmatter_and_body(
+            fm in "([a-z: ]{0,8}\n){0,3}[a-z: ]{0,8}",
+            body in "[a-z#\n ]{0,20}",
+        ) {
+            let (got_fm, got_body) = split_frontmatter(&format!("---\n{fm}\n---\n{body}"));
+            proptest::prop_assert_eq!(got_fm.as_deref(), Some(fm.as_str()));
+            proptest::prop_assert_eq!(got_body, body);
+        }
+    }
+
+    #[test]
+    fn an_empty_block_is_empty_frontmatter() {
+        assert_eq!(
+            split_frontmatter("---\n---\nbody"),
+            (Some(String::new()), "body".to_string())
+        );
+        assert_eq!(
+            split_frontmatter("---\n---"),
+            (Some(String::new()), String::new())
+        );
+    }
 
     #[test]
     fn no_frontmatter_passes_through() {

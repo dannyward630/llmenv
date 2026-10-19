@@ -87,7 +87,7 @@ impl SeenStore {
     /// cannot be read.
     fn read(&self, key: &str) -> Option<VecDeque<String>> {
         let path = self.path(key);
-        match std::fs::read_to_string(&path) {
+        match crate::paths::bounded::state_text_io(&path) {
             Ok(text) => Some(serde_json::from_str(&text).unwrap_or_else(|e| {
                 tracing::error!("{LABEL} {} is corrupt, starting empty: {e}", path.display());
                 VecDeque::new()

@@ -49,6 +49,74 @@ pub(crate) fn display_safe(s: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// Lexically normalize a path: resolve `..` and `.` components without touching
+/// the filesystem. This prevents `..`-based traversal bypasses when checking
+/// path prefixes on paths that may not exist yet.
+pub(crate) fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Truncate `s` to at most `max_len` **characters** (not bytes), appending
+/// `…` (U+2026, itself counted within `max_len`) when truncation occurs.
+/// UTF-8-boundary-safe: always truncates on a `char` boundary since it
+/// iterates `chars()` rather than slicing bytes.
+#[must_use]
+pub(crate) fn truncate_ellipsis(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    if max_len == 0 {
+        return String::new();
+    }
+    let keep = max_len.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Whether `expanded_path` lies within `cache_root`. Components are compared, not text, so
+/// `/cache2` is not within `/cache`. `..` components are normalized lexically, so
+/// `/cache/llmenv/../../../etc/passwd` cannot pass. Links are resolved in the part of each path
+/// that exists, so a link outside the root that points into it counts as within, and a new file
+/// under a link that leaves the root does not.
+#[must_use]
+pub(crate) fn is_within(cache_root: &std::path::Path, expanded_path: &str) -> bool {
+    let path = std::path::Path::new(expanded_path);
+    resolve_existing(path).starts_with(resolve_existing(cache_root))
+}
+
+/// `path` normalized, with links resolved in its longest prefix that exists. The rest is joined
+/// on as it is, because it does not exist yet.
+fn resolve_existing(path: &std::path::Path) -> std::path::PathBuf {
+    let normalized = normalize_path(path);
+    let mut prefix = normalized.as_path();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(mut resolved) = std::fs::canonicalize(prefix) {
+            resolved.extend(rest.iter().rev());
+            return resolved;
+        }
+        match (prefix.file_name(), prefix.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                prefix = parent;
+            }
+            _ => return normalized,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +178,70 @@ mod tests {
         fn display_safe_output_never_contains_a_raw_control_char(s in ".{0,100}") {
             let out = display_safe(&s);
             proptest::prop_assert!(!out.chars().any(char::is_control));
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+#[test]
+#[expect(clippy::unwrap_used, reason = "test code")]
+fn a_link_into_the_root_counts_as_within() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("cache");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("settings.json"), "{}").unwrap();
+    let link = dir.path().join("outside-link.json");
+    std::os::unix::fs::symlink(root.join("settings.json"), &link).unwrap();
+    assert!(is_within(&root, &link.display().to_string()));
+    assert!(!is_within(
+        &root,
+        &dir.path().join("other").display().to_string()
+    ));
+}
+
+#[cfg(all(test, unix))]
+#[test]
+#[expect(clippy::unwrap_used, reason = "test code")]
+fn a_new_file_under_a_link_out_of_the_root_is_not_within() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("cache");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+    let new_file = root.join("escape").join("new.json");
+    assert!(!is_within(&root, &new_file.display().to_string()));
+    let new_inside = root.join("sub").join("new.json");
+    assert!(is_within(&root, &new_inside.display().to_string()));
+    let missing_root = dir.path().join("not-yet");
+    assert!(is_within(
+        &missing_root,
+        &missing_root.join("a").display().to_string()
+    ));
+}
+
+#[cfg(test)]
+mod normalize_props {
+    use proptest::prelude::*;
+    use std::path::{Component, PathBuf};
+
+    use super::normalize_path;
+
+    proptest! {
+        #[test]
+        fn a_normalized_path_has_no_dot_parts_and_is_stable(
+            parts in proptest::collection::vec("(\\.\\.|\\.|[a-z]{1,4})", 0..8),
+        ) {
+            let path: PathBuf = std::iter::once("/".to_string()).chain(parts).collect();
+            let once = normalize_path(&path);
+            prop_assert!(
+                once.components()
+                    .all(|c| !matches!(c, Component::ParentDir | Component::CurDir)),
+                "{}",
+                once.display()
+            );
+            prop_assert_eq!(normalize_path(&once), once);
         }
     }
 }

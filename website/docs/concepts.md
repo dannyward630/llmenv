@@ -111,7 +111,7 @@ Where `shape` is a 12-hex SHA-256 over the active tags ∪ enabled bundles.
   shared across scopes; the resolved git HEAD is mixed into the content hash so a
   marketplace update re-renders.
 - Partial writes (strict mode) stage as `*.tmp` directories and are cleaned by
-  `prune` / `doctor --gc`.
+  `llmenv clean` (added in v3.13.0; before, `prune` / `doctor --gc`).
 - `<cache_dir>/merge-cache.json` persists the bundle-merge result's
   memory/host slice from the last `regenerate`/`export`, so hook lifecycle
   events (`SessionStart`, `TurnStart`, `SessionEnd`) can resolve the ICM

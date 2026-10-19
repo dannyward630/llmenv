@@ -11,6 +11,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+mod launcher;
+mod log_tail;
+use launcher::mcp_proxy_command;
+#[cfg(test)]
+use launcher::mcp_proxy_command_in;
+use log_tail::proxy_log_hint;
+#[cfg(test)]
+use log_tail::{LogTail, tail_bounded_log};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureOutcome {
     /// Something was already serving the bind address; nothing was started.
@@ -868,147 +877,6 @@ pub fn open_bounded_log(
     Ok(file)
 }
 
-/// What [`tail_bounded_log`] found.
-///
-/// "Nothing to show" and "couldn't look" have to stay distinguishable: reporting
-/// an unreadable log as though the proxy printed nothing tells the user the
-/// opposite of the truth, and sends them to read a file they can't read.
-enum LogTail {
-    Lines(String),
-    Empty,
-    Unreadable(std::io::Error),
-}
-
-/// Builds the trailing fragment of a startup-failure message: the last few lines
-/// of the proxy log, or why they aren't available.
-///
-/// Replaces the previous message's guesses ("check that the port is free and
-/// mcp-proxy is correctly installed"), which named two causes that were both
-/// wrong in the incident that prompted #1086 — the real cause was an
-/// `ImportError` visible only in the discarded stderr.
-fn proxy_log_hint(pid_path: &Path) -> String {
-    let log_path = log_path_for(pid_path);
-    match tail_bounded_log(&log_path, LOG_TAIL_LINES, LOG_TAIL_BYTES) {
-        LogTail::Lines(tail) => format!("; last lines of {}:\n  {tail}", log_path.display()),
-        LogTail::Empty => format!("; no output in {} either", log_path.display()),
-        LogTail::Unreadable(e) => format!("; cannot read {} ({e})", log_path.display()),
-    }
-}
-
-/// Reads up to `max_lines` trailing lines from `path`, scanning at most
-/// `max_bytes` from the end.
-///
-/// Never fails — a diagnostic aid must not itself become the error — but does
-/// report *why* it has nothing, so the caller can tell "the child was silent"
-/// from "I couldn't open the log".
-///
-/// Decoded lossily: the child's stderr is arbitrary bytes, not guaranteed
-/// UTF-8. Control characters are stripped, because these lines are
-/// third-party output printed straight to the user's terminal and escape
-/// sequences in them would be interpreted rather than shown.
-fn tail_bounded_log(path: &Path, max_lines: usize, max_bytes: u64) -> LogTail {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    let mut f = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LogTail::Empty,
-        Err(e) => return LogTail::Unreadable(e),
-    };
-    // A stat failure must not be treated as len 0: that would seek to the start
-    // and quote the *first* bytes of the log under a "last lines" label.
-    let len = match f.metadata() {
-        Ok(m) => m.len(),
-        Err(e) => return LogTail::Unreadable(e),
-    };
-    if let Err(e) = f.seek(SeekFrom::Start(len.saturating_sub(max_bytes))) {
-        return LogTail::Unreadable(e);
-    }
-    let mut buf = Vec::new();
-    // The bound matters beyond the seek: this is the child's live stderr, so
-    // it can grow between the stat and the read.
-    if let Err(e) = f.take(max_bytes).read_to_end(&mut buf) {
-        return LogTail::Unreadable(e);
-    }
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines: Vec<String> = text
-        .lines()
-        .rev()
-        .map(sanitize_log_line)
-        .filter(|l| !l.trim().is_empty())
-        .take(max_lines)
-        .collect();
-    if lines.is_empty() {
-        return LogTail::Empty;
-    }
-    lines.reverse();
-    LogTail::Lines(lines.join("\n  "))
-}
-
-/// Strips control characters from a log line before it is printed to a terminal.
-///
-/// The line is `mcp-proxy`'s stderr — third-party output that can echo request
-/// data — and the caller writes it straight to the user's terminal, where escape
-/// sequences would be acted on instead of displayed.
-fn sanitize_log_line(line: &str) -> String {
-    line.chars()
-        .map(|c| {
-            if c == '\t' || !c.is_control() {
-                c
-            } else {
-                '\u{fffd}'
-            }
-        })
-        .collect()
-}
-
-/// Builds the `mcp-proxy` invocation, preferring a `mcp-proxy` already on
-/// `PATH` and falling back to `uvx mcp-proxy` when it isn't installed. Returns
-/// the program's **resolved absolute path** plus its leading args; the caller
-/// appends `--port`/target.
-///
-/// The path, not the bare name, because `execvp` would otherwise redo the `PATH`
-/// search with its own rules — and POSIX `execvp` honours an empty `PATH` entry
-/// as the working directory, which this lookup deliberately does not (#1390). A
-/// bare name would hand back the hijack the lookup just refused.
-///
-/// # Errors
-/// Returns an error when neither `mcp-proxy` nor `uvx` is on `PATH` — the
-/// memory backend can't be exposed on the network without one of them.
-fn mcp_proxy_command() -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
-    // An unset PATH resolves nothing, which is the same conclusion the lookup
-    // reaches for a PATH with no match — but they mean different things (a
-    // stripped environment vs. nothing installed) and the error below can't tell
-    // them apart, so leave the distinction in the log the way the shared
-    // resolver's `resolve_on_path` does.
-    let path_var = std::env::var_os("PATH").unwrap_or_else(|| {
-        tracing::debug!("PATH is unset; cannot resolve `mcp-proxy` or `uvx`");
-        std::ffi::OsString::new()
-    });
-    mcp_proxy_command_in(&path_var)
-}
-
-/// [`mcp_proxy_command`] against an explicit `PATH` value, so the preference
-/// order is testable without mutating the process environment.
-///
-/// Uses [`llmenv_paths::resolve_in_path_list`] rather than a local resolver:
-/// until #1390 this module carried its own copy, which never picked up the
-/// empty-`PATH`-entry guard #1382 added, so `doctor`'s "is mcp-proxy available"
-/// and this function's answer could disagree — and a `mcp-proxy` or `uvx` in
-/// whatever directory llmenv was run from could be executed.
-fn mcp_proxy_command_in(
-    path_var: &std::ffi::OsStr,
-) -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
-    if let Some(proxy) = llmenv_paths::resolve_in_path_list("mcp-proxy", path_var) {
-        Ok((proxy, vec![]))
-    } else if let Some(uvx) = llmenv_paths::resolve_in_path_list("uvx", path_var) {
-        Ok((uvx, vec!["mcp-proxy"]))
-    } else {
-        Err(anyhow::anyhow!(
-            "neither `mcp-proxy` nor `uvx` found on PATH; install one to run the \
-             memory server, or disable the `memory` config block"
-        ))
-    }
-}
-
 /// Parses a `host:port` bind string into a socket address.
 ///
 /// Delegates to `SocketAddr`'s own parser instead of splitting on the last colon,
@@ -1055,6 +923,8 @@ fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
 pub fn spawn_mcp_proxy(bind: &str, pid_path: &Path, source: SpawnSource) -> anyhow::Result<Child> {
     let addr = parse_bind(bind)?;
     let (program, leading) = mcp_proxy_command()?;
+    // mcp-proxy runs `icm` by its own PATH search, which reads relative folders too (#2948).
+    let icm = llmenv_paths::program::resolve_program("icm")?;
     let mut cmd = Command::new(&program);
     cmd.args(leading)
         // `--host` takes a bare address; `ip()` drops the brackets an IPv6
@@ -1064,7 +934,7 @@ pub fn spawn_mcp_proxy(bind: &str, pid_path: &Path, source: SpawnSource) -> anyh
         .arg("--port")
         .arg(addr.port().to_string())
         .arg("--")
-        .arg("icm")
+        .arg(icm)
         .arg("serve");
     pin_icm_serve_dir(&mut cmd, Path::new(ICM_SERVE_DIR))?;
     // Point stderr at the log so a startup failure is diagnosable (#1086). If the
@@ -1290,7 +1160,7 @@ mod tests {
         stub_binary(dir.path(), "mcp-proxy");
         stub_binary(dir.path(), "uvx");
 
-        let (program, args) = mcp_proxy_command_in(dir.path().as_os_str()).expect("resolves");
+        let (program, args) = mcp_proxy_command_in(Some(dir.path().as_os_str())).expect("resolves");
         assert_eq!(
             program,
             dir.path().join("mcp-proxy"),
@@ -1304,7 +1174,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         stub_binary(dir.path(), "uvx");
 
-        let (program, args) = mcp_proxy_command_in(dir.path().as_os_str()).expect("resolves");
+        let (program, args) = mcp_proxy_command_in(Some(dir.path().as_os_str())).expect("resolves");
         assert_eq!(program, dir.path().join("uvx"));
         assert_eq!(args, vec!["mcp-proxy"]);
     }
@@ -1317,11 +1187,27 @@ mod tests {
         std::fs::write(&plain, b"x").expect("write");
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
-        let err = mcp_proxy_command_in(dir.path().as_os_str()).expect_err("must not resolve");
+        let err = mcp_proxy_command_in(Some(dir.path().as_os_str())).expect_err("must not resolve");
         assert!(
             err.to_string().contains("neither `mcp-proxy` nor `uvx`"),
             "error must name both candidates, got: {err}"
         );
+    }
+
+    #[test]
+    fn the_proxy_program_is_the_absolute_path_and_never_a_relative_folder() {
+        let dir = tempfile::tempdir_in(".").expect("tempdir");
+        let exe = dir.path().join("uvx");
+        std::fs::write(&exe, b"#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let relative = Path::new(".").join(dir.path().file_name().expect("name"));
+        let path_var = std::env::join_paths([&relative]).expect("join");
+        assert!(mcp_proxy_command_in(Some(&path_var)).is_err());
+        let absolute = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let path_var = std::env::join_paths([absolute.clone()]).expect("join");
+        let (program, leading) = mcp_proxy_command_in(Some(&path_var)).expect("found");
+        assert_eq!(program, absolute.join("uvx"));
+        assert_eq!(leading, ["mcp-proxy"]);
     }
 
     /// #1390: this lookup used to carry its own resolver that honoured an empty
@@ -1337,7 +1223,7 @@ mod tests {
             "refusing to clobber an existing ./mcp-proxy"
         );
         stub_binary(&cwd, "mcp-proxy");
-        let result = mcp_proxy_command_in(std::ffi::OsStr::new("::"));
+        let result = mcp_proxy_command_in(Some(std::ffi::OsStr::new("::")));
         std::fs::remove_file(cwd.join("mcp-proxy")).expect("cleanup");
         assert!(
             result.is_err(),

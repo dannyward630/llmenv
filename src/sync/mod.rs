@@ -98,7 +98,7 @@ pub fn read_state(state_dir: &Path) -> Result<Option<SystemTime>> {
     // #893: a single read that distinguishes NotFound (→ absent) from other I/O
     // errors (→ propagate), rather than an exists() stat that masked every stat
     // failure (e.g. EACCES) as "file absent".
-    let s = match std::fs::read_to_string(&p) {
+    let s = match crate::paths::bounded::state_text_io(&p) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         r => r.with_context(|| format!("reading {}", p.display()))?,
     };

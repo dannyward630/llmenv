@@ -1,7 +1,6 @@
 use super::network::NetworkNeeds;
 use llmenv_config::{ContentScope, HostScope, UserScope};
-use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -33,27 +32,6 @@ pub struct ResolvedProject {
     pub(crate) disable_bundles: Vec<String>,
     /// Keys from the marker file not matching any declared field.
     pub(crate) unknown_fields: Vec<String>,
-}
-
-/// Schema for the body of `.llmenv.yaml` (project marker file).
-/// All fields optional; an empty file is valid.
-#[derive(Debug, Default, Deserialize)]
-struct ProjectFile {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    enable_bundles: Vec<String>,
-    #[serde(default)]
-    disable_bundles: Vec<String>,
-    /// Capture unknown fields for warning emission.
-    #[serde(flatten)]
-    extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -479,129 +457,14 @@ pub(crate) fn matches_content_all<'a>(
     matched
 }
 
-/// Discover project by walking cwd upward looking for `.llmenv.yaml`.
-/// When found, parse and return a `ResolvedProject` with all fields resolved
-/// (defaults applied, unknown fields collected). If YAML is malformed, log a
-/// warning and return a minimal `ResolvedProject` with id/name from the
-/// folder basename.
-///
-/// The walk is bounded at `$HOME`: a marker at `~/.llmenv.yaml` activates,
-/// but the walk does not ascend above home. This prevents a hostile marker
-/// dropped in e.g. `/tmp` (on a shared host) or `/Volumes/...` from being
-/// picked up. When `$HOME` is unknown, only the cwd itself is checked.
-#[must_use]
-pub fn discover_project(env: &Env) -> Option<ResolvedProject> {
-    let mut cur = std::path::PathBuf::from(&env.cwd);
-    loop {
-        let marker_path = cur.join(".llmenv.yaml");
-        if marker_path.exists() {
-            let pf = read_project_file(&marker_path);
-            let basename = cur
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("llmenv")
-                .to_string();
-            let id = pf.id.unwrap_or_else(|| basename.clone());
-            let name = pf.name.unwrap_or_else(|| basename.clone());
-            let unknown_fields: Vec<String> = pf
-                .extra
-                .keys()
-                .filter(|k| {
-                    !matches!(
-                        k.as_str(),
-                        "id" | "name"
-                            | "description"
-                            | "tags"
-                            | "enable_bundles"
-                            | "disable_bundles"
-                    )
-                })
-                .cloned()
-                .collect();
-            return Some(ResolvedProject {
-                root: cur,
-                id,
-                name,
-                description: pf.description,
-                tags: sanitize_tags(pf.tags, ".llmenv.yaml"),
-                enable_bundles: sanitize_tags(pf.enable_bundles, ".llmenv.yaml enable_bundles"),
-                disable_bundles: sanitize_tags(pf.disable_bundles, ".llmenv.yaml disable_bundles"),
-                unknown_fields,
-            });
-        }
-        // Stop the walk once we've checked $HOME (or if home is unknown,
-        // after checking only cwd). This blocks markers above home from
-        // activating.
-        match &env.home {
-            Some(h) if cur == *h => break,
-            None => break,
-            _ => {}
-        }
-        if !cur.pop() {
-            break;
-        }
-    }
-    None
-}
-
-/// Maximum length (in bytes) for the project description. Anything longer
-/// is truncated and a warning is logged. The description is surfaced into
-/// LLM context chunks; a hard cap prevents a malformed or hostile marker
-/// from bloating every prompt.
-const MAX_DESCRIPTION_BYTES: usize = 1024;
-
-/// Parse `.llmenv.yaml` file into a `ProjectFile`. Empty file → all defaults.
-/// Malformed YAML → log warning and return defaults. The `description`
-/// field is truncated to `MAX_DESCRIPTION_BYTES` if oversized.
-fn read_project_file(path: &std::path::Path) -> ProjectFile {
-    let Ok(body) = std::fs::read_to_string(path).inspect_err(|e| {
-        tracing::error!(
-            path = %path.display(),
-            error = %e,
-            "failed to read project marker file; using defaults"
-        )
-    }) else {
-        return ProjectFile::default();
-    };
-    if body.trim().is_empty() {
-        return ProjectFile::default();
-    }
-    match serde_yaml::from_str::<ProjectFile>(&body) {
-        Ok(mut pf) => {
-            if let Some(desc) = pf.description.as_mut()
-                && desc.len() > MAX_DESCRIPTION_BYTES
-            {
-                tracing::warn!(
-                    "project marker file {} has description >{} bytes; truncating",
-                    path.display(),
-                    MAX_DESCRIPTION_BYTES
-                );
-                // Truncate at a char boundary so the result remains valid UTF-8.
-                let mut cut = MAX_DESCRIPTION_BYTES;
-                while cut > 0 && !desc.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                desc.truncate(cut);
-            }
-            pf
-        }
-        Err(e) => {
-            tracing::error!(
-                "project marker file {} is not valid YAML: {e}; using defaults",
-                path.display()
-            );
-            ProjectFile::default()
-        }
-    }
-}
+pub use crate::marker_file::discover_project;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
         ContentScope, Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, discover_project, glob_matches,
-        is_valid_tag_charset, matches_content_all, parse_extra_tags, read_project_file,
-        sanitize_tags,
+        is_valid_tag_charset, matches_content_all, parse_extra_tags, sanitize_tags,
     };
     use proptest::prelude::*;
     use std::collections::BTreeSet;
@@ -932,14 +795,14 @@ mod tests {
     #[test]
     fn long_description_is_truncated() {
         let temp_dir = tempfile::TempDir::new().expect("tempdir");
-        let huge = "a".repeat(super::MAX_DESCRIPTION_BYTES + 500);
+        let huge = "a".repeat(super::super::marker_file::MAX_DESCRIPTION_BYTES + 500);
         write_project_file(temp_dir.path(), &format!("description: \"{huge}\"\n"));
 
         let env = env_in(temp_dir.path(), temp_dir.path());
         let project = discover_project(&env).expect("discover");
         let desc = project.description.expect("description");
         assert!(
-            desc.len() <= super::MAX_DESCRIPTION_BYTES,
+            desc.len() <= super::super::marker_file::MAX_DESCRIPTION_BYTES,
             "description must be capped"
         );
     }
@@ -1299,48 +1162,6 @@ mod tests {
                 ));
             }
         }
-    }
-
-    /// Run `f` under a scoped `tracing` subscriber and return what it logged. The main crate
-    /// has the same helper in `test_log_capture`, which this crate cannot reach.
-    fn capture_logs(f: impl FnOnce()) -> String {
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
-        use tracing_subscriber::fmt::writer::MutexGuardWriter;
-
-        #[derive(Clone, Default)]
-        struct Captured(Arc<Mutex<Vec<u8>>>);
-
-        impl<'a> MakeWriter<'a> for Captured {
-            type Writer = MutexGuardWriter<'a, Vec<u8>>;
-
-            fn make_writer(&'a self) -> Self::Writer {
-                self.0.make_writer()
-            }
-        }
-
-        let captured = Captured::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(captured.clone())
-            .with_max_level(tracing::Level::TRACE)
-            .without_time()
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        let buf = captured.0.lock().expect("test log buffer mutex poisoned");
-        String::from_utf8_lossy(&buf).into_owned()
-    }
-
-    #[test]
-    fn malformed_project_file_is_logged_at_error_level() {
-        // #2666: the default log filter is ERROR, so a warn here never reaches the user.
-        let temp_dir = tempfile::TempDir::new().expect("tempdir");
-        let marker = temp_dir.path().join(".llmenv.yaml");
-        std::fs::write(&marker, "description: [unclosed\n").expect("write marker");
-        let logs = capture_logs(|| {
-            assert_eq!(read_project_file(&marker).description, None);
-        });
-        assert!(logs.contains("ERROR"), "expected an ERROR line: {logs}");
-        assert!(logs.contains("not valid YAML"), "{logs}");
     }
 
     #[test]

@@ -1465,21 +1465,15 @@ mod tests {
                     wakeup_max_tokens,
                 )| {
                     Memory {
-                        always_load: None,
                         server_host,
                         port,
                         listen_host,
                         when,
                         default_topics,
-                        default_type: None,
-                        default_importance: None,
-                        type_importance: std::collections::BTreeMap::new(),
-                        retention: None,
-                        auto_prune: false,
-                        consolidation: None,
                         mcp_permissions,
                         wakeup_max_tokens,
-                        adaptive_recall: true,
+                        global_topics: vec![],
+                        ..Memory::default()
                     }
                 },
             )
@@ -2097,21 +2091,12 @@ mod tests {
 
     fn arb_memory_entry(server_host: &str, when: Vec<String>) -> crate::Memory {
         crate::Memory {
-            always_load: None,
             server_host: server_host.to_string(),
             port: 9092,
             listen_host: "127.0.0.1".to_string(),
             when,
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            consolidation: None,
-            retention: None,
-            auto_prune: false,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..crate::Memory::default()
         }
     }
 

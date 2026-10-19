@@ -1413,8 +1413,11 @@ dependencies = [
 name = "llmenv-git"
 version = "4.0.0-alpha.1"
 dependencies = [
+ "llmenv-paths",
+ "llmenv-util",
  "proptest",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -1456,6 +1459,8 @@ dependencies = [
  "if-addrs",
  "ipnet",
  "llmenv-config",
+ "llmenv-paths",
+ "llmenv-util",
  "proptest",
  "rustix",
  "serde",
@@ -1495,6 +1500,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "tracing",
 ]
 
 [[package]]

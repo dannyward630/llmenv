@@ -10,11 +10,25 @@ use crate::config::Bundle;
 use crate::merge::BundleRef;
 use crate::scope::ActiveScopes;
 
-/// Resolve `firing` bundles to their on-disk content directories, ranked by
-/// the scope tier that selected them (network > host > user > content >
-/// project, highest tier wins on precedence). A bundle with no content
-/// directory is skipped with a warning (tag-only bundle, or a deleted
-/// directory).
+/// Resolve firing bundles to on-disk `BundleRef`s in scope precedence order
+/// (network → host → user → content → project), then unscoped tags in
+/// declaration order. Bundles with no content directory under
+/// `<config_dir>/bundles/<name>/` are dropped silently — tag-only bundles (no
+/// content directory) are valid.
+///
+/// `content` sits between `user` and `project` (#845): it's an environment
+/// signal like network/host/user (file patterns incidentally present under
+/// the cwd, not authored intent — see [`ActiveScopes::non_project_tags`]'s
+/// own network/host/user/content grouping), but more specific than a bare
+/// user-level match since it's derived from the actual project's file layout.
+/// An explicit `.llmenv.yaml` (`project`) still outranks it — deliberately
+/// authored project config beats an incidental glob match.
+///
+/// `pub(crate)`: also called by `hook_run::memory_url`, which needs the same
+/// scope-kind precedence assignment as `regenerate`/`export` — a bundle firing
+/// via a `host`/`user`/`network`/`content` scope must get the same rank in
+/// both places, or a persisted merge-cache entry keyed on that precedence
+/// (`merge_signature`) would never match hook-run's own recomputation (#920).
 pub(crate) fn build_bundle_refs(
     config_dir: &Path,
     active: &ActiveScopes,

@@ -58,7 +58,7 @@ pub(super) fn session_start_notices(
 fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<String> {
     let day = utc_day(now);
     let marker = state_dir.join(HINT_MARKER);
-    match std::fs::read_to_string(&marker) {
+    match crate::paths::bounded::state_text_io(&marker) {
         Ok(text) if text.trim() == day.to_string() => return None,
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -106,7 +106,7 @@ fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<Strin
 fn stale_tmp_text(summary: &StaleSummary, hours: u64) -> String {
     format!(
         "llmenv: {} state/tmp entries ({}) have not changed in {hours} hours. \
-         Fix: run `llmenv doctor --gc` to remove them.",
+         Fix: run `llmenv clean` to remove them.",
         summary.count,
         human_bytes(summary.bytes)
     )
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(
             text,
             "llmenv: 4 state/tmp entries (2 MiB) have not changed in 168 hours. \
-             Fix: run `llmenv doctor --gc` to remove them."
+             Fix: run `llmenv clean` to remove them."
         );
     }
 

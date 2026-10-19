@@ -1,122 +1,16 @@
 use crate::config::Config;
 use crate::paths;
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Read ~/.claude/settings.json if it exists.
-fn read_claude_settings(home: &Path) -> Option<serde_json::Value> {
-    read_json_if_present(&home.join(".claude").join("settings.json"))
-}
-
-/// Read ~/.claude/plugins.json if it exists.
-fn read_claude_plugins(home: &Path) -> Option<serde_json::Value> {
-    read_json_if_present(&home.join(".claude").join("plugins.json"))
-}
-
-/// The JSON in the regular file at `path`, or `None`. A missing file is quiet. A file that
-/// cannot be checked, read, or parsed is reported, because `is_file` reads a permission error
-/// as "absent".
-fn read_json_if_present(path: &Path) -> Option<serde_json::Value> {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return None,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            eprintln!("llmenv: cannot check {}: {e:#}", path.display());
-            return None;
-        }
-    }
-    let bytes = std::fs::read(path)
-        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
-        .ok()?;
-    serde_json::from_slice(&bytes)
-        .inspect_err(|e| eprintln!("llmenv: failed to parse {}: {e:#}", path.display()))
-        .ok()
-}
-
-/// Read ~/.claude/claude.md if it exists.
-fn read_claude_md(home: &Path) -> Option<String> {
-    let path = home.join(".claude").join("CLAUDE.md");
-    if !path.is_file() {
-        return None;
-    }
-    std::fs::read_to_string(&path)
-        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
-        .ok()
-}
-
-/// Read ~/.claude/gemini.md if it exists.
-fn read_gemini_md(home: &Path) -> Option<String> {
-    let path = home.join(".claude").join("GEMINI.md");
-    if !path.is_file() {
-        return None;
-    }
-    std::fs::read_to_string(&path)
-        .inspect_err(|e| eprintln!("llmenv: failed to read {}: {e:#}", path.display()))
-        .ok()
-}
-
-/// Read per-project settings from ~/.claude/projects/*/settings.json.
-fn read_project_configs(home: &Path) -> BTreeMap<String, serde_json::Value> {
-    let mut projects = BTreeMap::new();
-    let projects_dir = home.join(".claude").join("projects");
-    let entries = match std::fs::read_dir(&projects_dir) {
-        Ok(e) => e,
-        // NotFound is the ordinary "Claude Code never ran here" case, not
-        // worth a log line (#1180) — anything else (e.g. EACCES) is.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return projects,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                dir = %projects_dir.display(),
-                "failed to read project configs"
-            );
-            return projects;
-        }
-    };
-    for entry in entries.filter_map(|entry| {
-        crate::paths::readable_entry(&projects_dir, "project config discovery", entry)
-    }) {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let settings_path = entry.path().join("settings.json");
-        let Ok(bytes) = std::fs::read(&settings_path).inspect_err(|e| {
-            eprintln!(
-                "llmenv: failed to read project settings {}: {e:#}",
-                settings_path.display()
-            )
-        }) else {
-            continue;
-        };
-        let Ok(val) = serde_json::from_slice(&bytes).inspect_err(|e| {
-            eprintln!(
-                "llmenv: failed to parse project settings {}: {e:#}",
-                settings_path.display()
-            )
-        }) else {
-            continue;
-        };
-        projects.insert(name, val);
-    }
-    projects
-}
-
-/// Counts the readable entries of the project config directory. A read failure is logged and
-/// counts as zero, so an unreadable directory is not silent (#1180, #2718).
-fn count_project_entries(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .inspect_err(|e| {
-            tracing::error!(error = %e, dir = %dir.display(), "failed to read project configs");
-        })
-        .map(|entries| {
-            entries
-                .filter_map(|entry| {
-                    crate::paths::readable_entry(dir, "project config counts", entry)
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
+mod command;
+mod discover;
+mod launch;
+pub(super) use command::{SetupArgs, run_setup_command};
+use discover::{
+    count_project_entries, read_claude_md, read_claude_plugins, read_claude_settings,
+    read_gemini_md, read_project_configs,
+};
 
 /// The user name written into the enumeration. A missing `USER` falls back to
 /// `unknown`, and the warning names the variable and that effect (#2560).
@@ -259,41 +153,7 @@ fn engine_handoff_prompt(
     eprintln!("(The AI will guide you through the rest of the setup.)");
     eprintln!();
 
-    // Both arms go through `run_supervised` (#1385): this hands the terminal to
-    // an interactive agent session that can run for minutes, and an unsupervised
-    // wait let a Ctrl-C kill `llmenv setup` while the agent kept running — the
-    // user's setup then continued with nothing left to report its outcome.
-    match engine_id.as_str() {
-        "claude_code" => {
-            let mut cmd = crate::cli::command_for_binary("claude")?;
-            cmd.arg("-p")
-                .arg(&skill_content)
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
-            let status =
-                crate::cli::run_supervised(cmd, "claude", None).context("launching claude")?;
-            if !status.success() {
-                anyhow::bail!("claude exited with status {status}");
-            }
-        }
-        "crush" => {
-            let mut cmd = crate::cli::command_for_binary("crush")?;
-            cmd.arg("run")
-                .arg("--quiet")
-                .arg("Execute the setup-llmenv skill")
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
-            // crush takes the skill text on stdin; `run_supervised` pipes it,
-            // writes it, and closes the pipe so crush sees EOF.
-            let status = crate::cli::run_supervised(cmd, "crush", Some(skill_content.as_bytes()))
-                .context("launching crush")?;
-            if !status.success() {
-                anyhow::bail!("crush exited with status {status}");
-            }
-        }
-        other => anyhow::bail!("unsupported engine: {other}"),
-    }
+    launch::launch_engine(engine_id, &skill_content)?;
 
     eprintln!("✓ Setup complete!");
     Ok(())
@@ -792,24 +652,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn read_json_if_present_reads_a_file_and_skips_the_rest() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("settings.json");
-        assert_eq!(read_json_if_present(&file), None, "missing");
-        fs::write(&file, r#"{"a":1}"#).unwrap();
-        assert_eq!(
-            read_json_if_present(&file),
-            Some(serde_json::json!({"a": 1}))
-        );
-        // A path under a regular file fails the check with ENOTDIR, which is reported.
-        assert_eq!(read_json_if_present(&file.join("child.json")), None);
-        assert_eq!(
-            read_json_if_present(dir.path()),
-            None,
-            "a folder is not a file"
-        );
-    }
     #[test]
     fn user_uses_the_variable_when_set() {
         assert_eq!(

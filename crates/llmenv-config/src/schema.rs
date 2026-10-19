@@ -1,5 +1,11 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+mod memory_defaults;
+mod throttle;
+
+use memory_defaults::{default_adaptive_recall, default_global_topics};
+pub use throttle::Throttle;
+
 /// Settings pre-seeded during `llmenv init` for newly-materialized folders.
 ///
 /// Keys are written into `settings.json` as foreign (non-llmenv-owned) keys
@@ -1574,42 +1580,16 @@ pub struct Memory {
     /// restores the stateless per-turn recall.
     #[serde(default = "default_adaptive_recall")]
     pub adaptive_recall: bool,
+    /// The topics that the per-turn recall reads across every project (#2950). The rest of the
+    /// recall reads the session's own project only, so a record of another project does not
+    /// reach this one. Unset means `preferences` and `errors-resolved`.
+    #[serde(default = "default_global_topics")]
+    pub global_topics: Vec<String>,
     /// Claude Code `alwaysLoad` for the ICM server (#2356). Unset means `true`: the ICM tools are
     /// used on most prompts, so they stay in the prompt instead of behind tool search. Set `false`
     /// to restore deferral.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_load: Option<bool>,
-}
-
-fn default_adaptive_recall() -> bool {
-    true
-}
-
-/// Manual, not derived (#1044): `listen_host`'s real default is
-/// `default_listen_host()` (`"127.0.0.1"`), not `String::default()`
-/// (`""`) — a bare `#[derive(Default)]` would silently diverge from the
-/// `#[serde(default = "default_listen_host")]` value every other
-/// construction path (deserialization) actually uses.
-impl Default for Memory {
-    fn default() -> Self {
-        Self {
-            server_host: String::new(),
-            port: 0,
-            listen_host: default_listen_host(),
-            when: Vec::new(),
-            default_topics: Vec::new(),
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            consolidation: None,
-            retention: None,
-            auto_prune: false,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: default_adaptive_recall(),
-            always_load: None,
-        }
-    }
 }
 
 /// Valid range for [`Memory::wakeup_max_tokens`] — the range icm's own MCP
@@ -1673,40 +1653,6 @@ impl CodebaseMemory {
         self.index_path = Some(expanded);
         Ok(())
     }
-}
-
-fn default_throttle_cache_ttl() -> u64 {
-    30
-}
-fn default_throttle_max_wait() -> u64 {
-    300
-}
-fn default_throttle_soft_threshold() -> u64 {
-    20
-}
-
-/// Usage throttling configuration. A tag-scoped entry that injects PreToolUse
-/// and UserPromptSubmit hooks which poll the named backend and sleep a capped
-/// adaptive delay to avoid hitting rate limits.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Throttle {
-    /// Backend name that supplies usage data. Currently `"umans"` is the only
-    /// supported value. An unknown backend is a no-op (with a stderr warning).
-    pub backend: String,
-    /// Tags that activate this throttle entry, intersected with active scope
-    /// tags (same selection model as bundles, MCP servers, and memory).
-    #[serde(default)]
-    pub when: Vec<String>,
-    /// How long (seconds) a fetched usage snapshot is cached on disk before
-    /// the backend is polled again.
-    #[serde(default = "default_throttle_cache_ttl")]
-    pub cache_ttl: u64,
-    /// Hard cap (seconds) on any single per-hook sleep.
-    #[serde(default = "default_throttle_max_wait")]
-    pub max_wait: u64,
-    /// Remaining-request level at which adaptive delays begin.
-    #[serde(default = "default_throttle_soft_threshold")]
-    pub soft_threshold: u64,
 }
 
 /// An MCP server definition. Selected onto a scope when any of its `tags`

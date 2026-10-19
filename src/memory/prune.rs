@@ -30,42 +30,17 @@ use llmenv_mcp::mcp_client::McpHttpClient;
 /// CLI timeout — longer than hook timeout since users are waiting.
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A parsed memory record from the non-compact `icm_memory_recall` output.
-#[derive(Debug, Clone)]
-struct MemoryRecord {
-    id: String,
-    importance: Importance,
-}
-
-/// Parsed importance levels from the MCP output.
-#[derive(Debug, Clone, PartialEq)]
-enum Importance {
-    Critical,
-    High,
-    Medium,
-    Low,
-}
-
-impl Importance {
-    fn from_str(s: &str) -> Self {
-        match s.trim() {
-            "critical" => Self::Critical,
-            "high" => Self::High,
-            "medium" => Self::Medium,
-            _ => Self::Low,
-        }
-    }
-
-    fn should_prune(&self) -> bool {
-        matches!(self, Self::Medium | Self::Low)
-    }
-}
+mod importance;
+mod records;
+mod report;
+use importance::Importance;
+use records::{MemoryRecord, count_headers, parse_recall_output};
 
 /// Result of a single prune run.
 #[derive(Debug, Default, PartialEq)]
 pub struct PruneResult {
     /// Total records found.
-    total: usize,
+    pub(crate) total: usize,
     /// Critical-importance records (always kept).
     critical: usize,
     /// High-importance records (always kept).
@@ -74,6 +49,12 @@ pub struct PruneResult {
     medium: usize,
     /// Low-importance records (prune candidates).
     low: usize,
+    /// Records with an importance that prune does not know (always kept).
+    unknown: usize,
+    /// Record headers with no importance or weight, which prune cannot read (kept).
+    unread: usize,
+    /// Records that the pass forgets, or would forget in a dry run.
+    candidates: usize,
     /// Number of records actually forgotten (non-dry-run only).
     pub(crate) forgotten: usize,
     /// Whether this was a dry run (no forget calls made).
@@ -93,9 +74,7 @@ fn ensure_retention_unset(
     memory: &[crate::config::Memory],
     active_tags: &std::collections::BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    let configured = memory
-        .iter()
-        .find(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags))
+    let configured = super::auto_prune::single_active(memory, active_tags)
         .is_some_and(|m| m.retention.is_some());
     if configured {
         anyhow::bail!(
@@ -109,15 +88,11 @@ fn ensure_retention_unset(
 }
 
 fn connect(
-    config_path: &std::path::Path,
     config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
 ) -> anyhow::Result<McpHttpClient> {
-    let config_dir = config_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
-    let env = crate::scope::matcher::Env::detect_for_config(config)?;
-    let active = crate::scope::evaluate(config, &env);
-    let url = crate::memory::memory_url(config, config_dir, &active)?.into_url()?;
+    let url = crate::memory::memory_url(config, config_dir, active)?.into_url()?;
     McpHttpClient::new(url, CLI_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
 }
@@ -136,71 +111,6 @@ fn call_tool_blocking(
             .join()
             .map_err(|_| anyhow::anyhow!("call_tool_blocking thread panicked"))?
     })
-}
-
-/// Parse the non-compact `icm_memory_recall` output into structured records.
-///
-/// The format (per ICM's `format_memory_output` with compact=false):
-///
-/// ```text
-/// --- <id> ---
-///   topic: ...
-///   importance: ...
-///   weight: ...
-///   summary: ...
-///   keywords: ...
-///   raw: ...
-///   score: ...
-/// ```
-fn parse_recall_output(text: &str) -> Vec<MemoryRecord> {
-    let mut records = Vec::new();
-    let mut current_id: Option<String> = None;
-    let mut current_importance: Option<Importance> = None;
-    // `has_weight` guards against partial records: we only finalize a record
-    // once both importance and weight have been seen.
-    let mut has_weight = false;
-    let mut weight_seen = false;
-
-    // A record header starts at column 0, and the fields of a record are indented. Memory
-    // content is free text, so a line inside it must not forge a header: only an unindented
-    // header counts. The first `importance` and `weight` of a record win, so a later line in
-    // the summary cannot change them.
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = line.strip_prefix("--- ") {
-            // new record start: "--- <id> ---"
-            if let Some(id) = rest.strip_suffix(" ---") {
-                // Finalize previous record
-                if let (Some(id), Some(importance)) = (current_id.take(), current_importance.take())
-                    && has_weight
-                {
-                    records.push(MemoryRecord { id, importance });
-                }
-                has_weight = false;
-                weight_seen = false;
-                current_id = Some(id.to_string());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("importance:") {
-            if current_importance.is_none() {
-                current_importance = Some(Importance::from_str(rest));
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("weight:")
-            && !weight_seen
-        {
-            weight_seen = true;
-            // `f64::from_str` also accepts `nan` and `inf`, which are not weights.
-            has_weight = rest.trim().parse::<f64>().is_ok_and(f64::is_finite);
-        }
-    }
-
-    // Finalize the last record
-    if let (Some(id), Some(importance)) = (current_id, current_importance)
-        && has_weight
-    {
-        records.push(MemoryRecord { id, importance });
-    }
-
-    records
 }
 
 /// The recall arguments for the records to prune: the project's own, at most [`RECALL_LIMIT`].
@@ -222,6 +132,23 @@ fn recall_args(project: Option<&str>) -> anyhow::Result<serde_json::Value> {
 /// The most records one prune pass reads.
 const RECALL_LIMIT: u32 = 100;
 
+/// Forget each candidate, and give the count that ICM forgot. A failed forget is printed to
+/// stderr and the rest still run.
+fn forget_all(client: &McpHttpClient, candidates: &[&MemoryRecord]) -> usize {
+    let mut forgotten = 0;
+    for candidate in candidates {
+        match call_tool_blocking(
+            client.clone(),
+            "icm_memory_forget",
+            serde_json::json!({ "id": candidate.id }),
+        ) {
+            Ok(_) => forgotten += 1,
+            Err(e) => eprintln!("  Failed to forget {}: {e}", candidate.id),
+        }
+    }
+    forgotten
+}
+
 /// Run the prune pass: query ICM, evaluate candidates, forget if not dry-run.
 ///
 /// `dry_run` when true prints what would be pruned without making forget
@@ -236,8 +163,26 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
         &crate::scope::matcher::Env::detect_for_config(&config)?,
     );
     let merged = crate::memory::merged_memory(&config, config_dir, &active)?;
-    ensure_retention_unset(&merged.memory, &active.tags)?;
-    let client = connect(&config_path, &config)?;
+    let result = run_with(&config, config_dir, &active, &merged.memory, dry_run)?;
+    report::print(&result);
+    Ok(result)
+}
+
+/// [`run`] for scopes and memory entries that the caller already resolved, so the caller's
+/// `auto_prune` check and the pruned backend come from the same entry (#2947). It prints
+/// nothing to stdout: `llmenv export` runs it, and the shell evaluates that stdout.
+///
+/// # Errors
+/// The active entry sets `retention`, the memory server cannot be reached, or a call fails.
+pub(super) fn run_with(
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+    memory: &[crate::config::Memory],
+    dry_run: bool,
+) -> anyhow::Result<PruneResult> {
+    ensure_retention_unset(memory, &active.tags)?;
+    let client = connect(config, config_dir, active)?;
     let cwd = std::env::current_dir().map_err(|e| {
         anyhow::anyhow!("cannot read the working directory to name the project: {e}")
     })?;
@@ -251,120 +196,28 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     let records = parse_recall_output(&output);
     let mut result = PruneResult {
         total: records.len(),
+        unread: count_headers(&output).saturating_sub(records.len()),
         dry_run,
         ..Default::default()
     };
-
     for rec in &records {
         match rec.importance {
             Importance::Critical => result.critical += 1,
             Importance::High => result.high += 1,
             Importance::Medium => result.medium += 1,
             Importance::Low => result.low += 1,
+            Importance::Unknown => result.unknown += 1,
         }
     }
-
-    // Identify prune candidates
     let candidates: Vec<&MemoryRecord> = records
         .iter()
         .filter(|r| r.importance.should_prune())
         .collect();
-
-    if dry_run {
-        println!("Prune dry-run — no changes made.");
-        println!("  Total records:       {}", result.total);
-        println!("  critical (kept):     {}", result.critical);
-        println!("  high (kept):         {}", result.high);
-        println!("  medium (candidate):  {}", result.medium);
-        println!("  low (candidate):     {}", result.low);
-        println!(
-            "  Would prune:         {} record(s) (low + medium importance)",
-            candidates.len()
-        );
-        if result.total > 0 {
-            println!(
-                "  Would keep:          {} record(s) (critical + high importance)",
-                result.critical + result.high
-            );
-        }
-        let pct = if result.total > 0 {
-            candidates.len() as f64 / result.total as f64 * 100.0
-        } else {
-            0.0
-        };
-        if candidates.is_empty() {
-            println!("  No prune candidates found.");
-        } else {
-            println!("  ({pct:.1}% of records are prune candidates)");
-            println!();
-            println!("  ponytail: age-based TTL unavailable because ICM's MCP output");
-            println!("  omits `created_at` timestamps. This pass uses importance as a");
-            println!("  heuristic: low and medium importance memories are candidates;");
-            println!("  high and critical are always kept. Add date-based pruning once");
-            println!("  ICM exposes timestamps through the MCP interface.");
-        }
-    } else {
-        let forget_client = client;
-        let mut forgotten = 0;
-        for candidate in &candidates {
-            match call_tool_blocking(
-                forget_client.clone(),
-                "icm_memory_forget",
-                serde_json::json!({ "id": candidate.id }),
-            ) {
-                Ok(_) => forgotten += 1,
-                Err(e) => {
-                    eprintln!("  Failed to forget {}: {e}", candidate.id);
-                }
-            }
-        }
-        result.forgotten = forgotten;
-
-        println!("Prune complete.");
-        println!("  Total records:       {}", result.total);
-        println!("  critical (kept):     {}", result.critical);
-        println!("  high (kept):         {}", result.high);
-        println!("  medium (pruned):     {}", result.medium);
-        println!("  low (pruned):        {}", result.low);
-        println!("  Forgot:              {forgotten} record(s)");
-        if forgotten != candidates.len() {
-            println!(
-                "  Skipped:             {} record(s) (forget errored)",
-                candidates.len() - forgotten
-            );
-        }
+    result.candidates = candidates.len();
+    if !dry_run {
+        result.forgotten = forget_all(&client, &candidates);
     }
-
     Ok(result)
-}
-
-/// Run an automatic prune pass during materialize if the active config has
-/// `auto_prune: true`. Fail-soft: errors are logged as warnings, never
-/// returned.
-pub(crate) fn auto_prune_if_enabled(config: &crate::config::Config) {
-    let auto = config
-        .features
-        .as_ref()
-        .and_then(|f| f.memory.iter().find(|m| m.auto_prune))
-        .is_some();
-
-    if !auto {
-        return;
-    }
-
-    tracing::info!("auto_prune: running memory prune pass during materialize");
-    match run(false) {
-        Ok(result) => {
-            tracing::info!(
-                "auto_prune: forgot {} record(s) ({} total evaluated)",
-                result.forgotten,
-                result.total
-            );
-        }
-        // `tracing` warnings are off at the default log level, and the user must learn that
-        // the configured prune did not run.
-        Err(e) => eprintln!("warning: auto_prune did not run: {e:#}"),
-    }
 }
 
 #[cfg(test)]
@@ -437,6 +290,17 @@ mod tests {
         assert_eq!(records[0].importance, Importance::Low);
         assert_eq!(records[1].id, "id-2");
         assert_eq!(records[1].importance, Importance::Critical);
+    }
+
+    #[test]
+    fn an_unknown_importance_is_kept_and_a_record_without_weight_is_unread() {
+        let text =
+            "--- a ---\n  importance: Critical\n  weight: 0.5\n--- b ---\n  importance: low\n";
+        let records = parse_recall_output(text);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].importance, Importance::Unknown);
+        assert!(!Importance::Unknown.should_prune());
+        assert_eq!(count_headers(text), 2);
     }
 
     #[test]

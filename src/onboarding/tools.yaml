@@ -1,0 +1,120 @@
+# Candidate tools that onboarding can suggest (#2791). Design: docs/design/issue-2773-onboarding.md
+# ("Tool suggestions"). llmenv only reports which binaries are on PATH; the onboarding skill
+# decides what to suggest and why. Onboarding never installs a tool: the plan shows the install
+# command, and the user runs it.
+#
+# Fields:
+#   name            the tool, as the plan names it
+#   purpose         one line: why an agent wants it
+#   evidence        one line: when it is relevant
+#   signals         top-level names from `llmenv setup --scan` that make it relevant; empty means
+#                   every user
+#   binaries        the names to look for on PATH; the first one found counts
+#   feature         the llmenv feature that a yes turns on, for a tool that runs an MCP server
+#   strong_default  shown first, with its yes preselected; still a per-item confirmation
+#   install         the install command per package manager. A script install downloads the
+#                   script and opens it for reading before it runs, never `curl | sh`
+#
+# No version numbers: an install takes the current release.
+tools:
+  - name: icm
+    purpose: Long-term memory across sessions. The llmenv memory hooks recall from it and store to it.
+    evidence: Every user. Without it, the memory hooks have nothing to call.
+    signals: []
+    binaries: [icm]
+    feature: memory
+    strong_default: true
+    install:
+      brew: brew tap rtk-ai/tap && brew install icm
+  - name: codebase-memory-mcp
+    purpose: A code graph of each repository, so the agent finds symbols and callers without a full-text search.
+    evidence: Every user with code repositories. Without it, the code-graph tools have nothing to call.
+    signals: []
+    binaries: [codebase-memory-mcp]
+    feature: codebase_memory
+    strong_default: true
+    install:
+      script: "curl -fsSLo cbm-install.sh https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh && echo 'Read cbm-install.sh, then run: bash cbm-install.sh'"
+  - name: ripgrep
+    purpose: Fast text search that skips ignored files.
+    evidence: Every user.
+    signals: []
+    binaries: [rg]
+    install:
+      brew: brew install ripgrep
+      apt: sudo apt install ripgrep
+      cargo: cargo install ripgrep
+  - name: fd
+    purpose: Fast file search by name.
+    evidence: Every user.
+    signals: []
+    binaries: [fd, fdfind]
+    install:
+      brew: brew install fd
+      apt: sudo apt install fd-find
+      cargo: cargo install fd-find
+  - name: ast-grep
+    purpose: Code search and rewrite by syntax tree, not by text.
+    evidence: Every user with code repositories.
+    signals: []
+    binaries: [ast-grep]
+    install:
+      brew: brew install ast-grep
+      cargo: cargo install ast-grep --locked
+      npm: npm install --global @ast-grep/cli
+  - name: jq
+    purpose: Read and filter JSON on the command line.
+    evidence: Every user.
+    signals: []
+    binaries: [jq]
+    install:
+      brew: brew install jq
+      apt: sudo apt install jq
+  - name: gh
+    purpose: GitHub issues, pull requests, and CI runs from the command line.
+    evidence: A repository with GitHub workflows.
+    signals: [.github/]
+    binaries: [gh]
+    install:
+      brew: brew install gh
+      apt: sudo apt install gh
+  - name: uv
+    purpose: Python environments, dependencies, and tools.
+    evidence: A Python repository.
+    signals: [pyproject.toml, requirements.txt, setup.py, uv.lock]
+    binaries: [uv]
+    install:
+      brew: brew install uv
+      script: "curl -LsSfo uv-install.sh https://astral.sh/uv/install.sh && echo 'Read uv-install.sh, then run: sh uv-install.sh'"
+  - name: ruff
+    purpose: Python lint and format.
+    evidence: A Python repository.
+    signals: [pyproject.toml, requirements.txt, setup.py, ruff.toml]
+    binaries: [ruff]
+    install:
+      brew: brew install ruff
+      uv: uv tool install ruff
+  - name: cargo-nextest
+    purpose: A faster Rust test runner with per-test processes.
+    evidence: A Rust repository.
+    signals: [Cargo.toml]
+    binaries: [cargo-nextest]
+    install:
+      brew: brew install cargo-nextest
+      cargo: cargo install cargo-nextest --locked
+  - name: shellcheck
+    purpose: Lint for shell scripts.
+    evidence: A repository with shell scripts.
+    signals: [scripts/]
+    binaries: [shellcheck]
+    install:
+      brew: brew install shellcheck
+      apt: sudo apt install shellcheck
+  - name: shfmt
+    purpose: Format shell scripts.
+    evidence: A repository with shell scripts.
+    signals: [scripts/]
+    binaries: [shfmt]
+    install:
+      brew: brew install shfmt
+      apt: sudo apt install shfmt

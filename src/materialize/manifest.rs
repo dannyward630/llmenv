@@ -140,7 +140,7 @@ impl CacheManifest {
     /// (e.g. a permissions error reading an existing dotfile).
     pub(crate) fn read(folder: &Path) -> anyhow::Result<Option<Self>> {
         let path = folder.join(MANIFEST_FILE);
-        match std::fs::read(&path) {
+        match crate::paths::bounded::state_bytes_io(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(manifest) => Ok(Some(manifest)),
                 Err(e) => {

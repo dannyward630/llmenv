@@ -50,7 +50,12 @@ pub(crate) fn detect_ssid_name() -> Option<String> {
 
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn run(program: &str, args: &[&str]) -> Option<String> {
-    super::capture_stdout("ssid detection", program, args)
+    super::probe::capture_stdout(
+        "ssid detection",
+        program,
+        args,
+        super::probe::DEFAULT_DETECT_TIMEOUT,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -115,7 +120,7 @@ fn detect_via_nmcli() -> Option<SsidReading> {
 
 #[cfg(windows)]
 fn detect_windows() -> SsidReading {
-    match run("netsh", &["wlan", "show", "interfaces"]) {
+    match run("netsh.exe", &["wlan", "show", "interfaces"]) {
         Some(out) => parse_netsh_ssid(&out).map_or(SsidReading::NotAssociated, SsidReading::Ssid),
         None => SsidReading::Undetermined("`netsh wlan show interfaces` failed".into()),
     }

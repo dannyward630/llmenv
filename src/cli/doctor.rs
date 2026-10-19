@@ -1,22 +1,27 @@
 use crate::adapter::AgentAdapter;
 use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
-use crate::plugins::cache;
 use anyhow::Context;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+mod active_features;
 mod autocompact;
 mod background;
-mod cache_gc;
+pub(super) mod cache_gc;
 mod cbm_index;
 mod cleartext;
 mod instruction_size;
+mod marketplace_pins;
 mod mcp_text;
 mod network;
+mod opencode;
+pub(super) use opencode::claude_only_colon_permission_patterns;
 mod task_text;
+mod tool_availability;
+use tool_availability::run_doctor_tool_availability;
 mod version;
-use version::{cbm_floor_warning, parse_semver_triple};
+use version::{cbm_floor_warning, opencode_floor_warning, parse_semver_triple};
 
 /// Effective value of a token-efficiency env var: the process environment
 /// wins if set (matches what Claude Code will actually see if it inherited
@@ -447,20 +452,6 @@ pub(crate) fn is_local_addr(addr: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Whether any memory block references a remote (non-local) server_host.
-/// Returns `true` when a `server_host` maps to a non-local address in the host
-/// table, or when the host table has no entry for it (assume remote).
-fn has_remote_memory_host(config: &Config) -> bool {
-    config.features.as_ref().is_some_and(|f| {
-        f.memory.iter().any(|mem| {
-            config
-                .host
-                .get(&mem.server_host)
-                .is_none_or(|h| !is_local_addr(&h.addr))
-        })
-    })
-}
-
 /// Check that external tools referenced by the active config are available on
 /// `$PATH`. Printed to stderr using the doctor pass/fail/info helpers inline
 /// with the rest of `llmenv doctor`.
@@ -497,12 +488,13 @@ const DEPENDENT_TOOLS: &[(&str, UpdatePath)] = &[
         "codebase-memory-mcp",
         UpdatePath::Reports("codebase-memory-mcp update"),
     ),
+    ("opencode", UpdatePath::SelfApply("opencode upgrade")),
 ];
 
 /// The version a tool reports through `--version`, as the last
 /// whitespace-separated token of its first output line.
 ///
-/// Both tools answer `<name> <semver>` (`icm 0.10.61`), so one shared parse
+/// Each tool answers `<name> <semver>` (`icm 0.10.61`, `opencode v2.0.30`), so one shared parse
 /// covers them rather than a per-tool format string — the fragile thing the
 /// issue was worried about. A tool whose output doesn't fit is reported as
 /// "version unknown" rather than guessed at.
@@ -510,7 +502,10 @@ const DEPENDENT_TOOLS: &[(&str, UpdatePath)] = &[
 /// A hung tool must not hang doctor, so the call stops after [`DEFAULT_TOOL_VERSION_TIMEOUT`].
 /// A failed call is logged with its cause.
 fn tool_version(binary: &str) -> Option<String> {
-    let mut cmd = std::process::Command::new(binary);
+    let program = crate::path_lookup::resolve_program(binary)
+        .inspect_err(|e| tracing::error!("cannot read the version of {binary}: {e:#}"))
+        .ok()?;
+    let mut cmd = std::process::Command::new(program);
     cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -725,35 +720,6 @@ fn run_doctor_icm_server(
     }
 }
 
-/// Report installed versions and update commands for the tools llmenv depends
-/// on but doesn't ship (#1185). Tools that aren't installed are skipped —
-/// `run_doctor_tool_availability` already reports those, and repeating it here
-/// would say the same thing twice with less context.
-///
-/// Deliberately offline: no "an update is available" claim is made, because
-/// checking would mean a network round trip per tool on every `doctor` run.
-/// The `ANTHROPIC_MODEL` problem to show. Only an enabled memory entry on the `anthropic-api`
-/// backend reads the variable, so any other config gets no warning.
-fn anthropic_model_warning(
-    config: &Config,
-    model_var: Result<String, std::env::VarError>,
-) -> Option<String> {
-    let uses_api = config
-        .features
-        .iter()
-        .flat_map(|f| f.memory.iter())
-        .filter_map(|m| m.consolidation.as_ref())
-        .any(|c| {
-            c.enabled && matches!(c.backend, crate::config::ConsolidationBackend::AnthropicApi)
-        });
-    if !uses_api {
-        return None;
-    }
-    crate::consolidation::model_problem(model_var).map(|problem| {
-        format!("{problem} This stops consolidation with the anthropic-api backend at every session end.")
-    })
-}
-
 fn run_doctor_dependent_tools(use_color: bool) {
     let pass = super::doctor_pass(use_color);
     let info = super::doctor_info(use_color);
@@ -775,9 +741,11 @@ fn run_doctor_dependent_tools(use_color: bool) {
             UpdatePath::SelfApply(_) => "update with",
             UpdatePath::Reports(_) => "check for updates with",
         };
-        let floor_warning = (*bin == "codebase-memory-mcp")
-            .then(|| cbm_floor_warning(&version))
-            .flatten();
+        let floor_warning = match *bin {
+            "codebase-memory-mcp" => cbm_floor_warning(&version),
+            "opencode" => opencode_floor_warning(&version),
+            _ => None,
+        };
         let marker = if version == "version unknown" {
             &info
         } else if floor_warning.is_some() {
@@ -847,89 +815,6 @@ fn run_doctor_sandbox(use_color: bool, config: &Config) {
             "{fail} icebreaker binary not found on PATH (required for sandboxed launch \
              credential handling)"
         );
-    }
-}
-
-fn run_doctor_tool_availability(use_color: bool, config: &Config) {
-    let pass = super::doctor_pass(use_color);
-    let fail = super::doctor_fail(use_color);
-    let info = super::doctor_info(use_color);
-
-    eprintln!();
-    eprintln!("Tool-availability checks:");
-
-    let has_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.memory.is_empty());
-
-    // icm — required when features.memory has entries
-    // mcp-proxy or uvx — required when any memory server_host is remote
-    if has_memory {
-        if crate::paths::binary_on_path("icm") {
-            eprintln!("{pass} icm found on PATH");
-        } else {
-            eprintln!("{fail} icm not found on PATH (required when features.memory is configured)");
-        }
-
-        if has_remote_memory_host(config) {
-            if crate::paths::binary_on_path("mcp-proxy") || crate::paths::binary_on_path("uvx") {
-                eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
-            } else {
-                eprintln!(
-                    "{fail} neither mcp-proxy nor uvx on PATH \
-                     (remote memory server_host requires one for TCP proxying)"
-                );
-            }
-        }
-    }
-
-    // codebase-memory-mcp — required when features.codebase_memory has entries
-    let has_codebase_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.codebase_memory.is_empty());
-    if has_codebase_memory {
-        if crate::paths::binary_on_path("codebase-memory-mcp") {
-            eprintln!("{pass} codebase-memory-mcp found on PATH");
-        } else {
-            eprintln!(
-                "{fail} codebase-memory-mcp not found on PATH (required when \
-                 features.codebase_memory is configured) — install: \
-                 https://github.com/DeusData/codebase-memory-mcp"
-            );
-        }
-    }
-
-    // claude — required when claude_code engine is not disabled
-    let claude_disabled = config
-        .disabled_engines
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case("claude_code"));
-    if !claude_disabled {
-        if crate::paths::binary_on_path("claude") {
-            eprintln!("{pass} claude found on PATH");
-        } else {
-            eprintln!(
-                "{fail} claude not found on PATH \
-                 (claude_code engine is not disabled, but the `claude` binary is missing)"
-            );
-        }
-    }
-
-    // Every other registered engine — always optional. Derived from the adapter
-    // registry rather than a hardcoded list, so a newly registered engine is
-    // reported here without a second edit (#1032).
-    for adapter in crate::adapter::registered_adapters() {
-        if crate::adapter::engine_id(adapter.as_ref()) == "claude_code" {
-            continue; // reported above, where it is required rather than optional
-        }
-        let bin = adapter.binary_name();
-        if crate::paths::binary_on_path(bin) {
-            eprintln!("{pass} {bin} found on PATH");
-        } else {
-            eprintln!("{info} {bin} not found on PATH (optional engine)");
-        }
     }
 }
 
@@ -1105,7 +990,7 @@ pub(super) fn unknown_neutral_tools(capabilities: &Capabilities) -> Vec<UnknownT
 
 /// A neutral tool whose mapping onto an active engine isn't one-to-one (#1371).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InexactToolMapping {
+struct InexactToolMapping {
     /// The neutral tool name the user wrote.
     pub tool: String,
     /// The engine id whose mapping differs.
@@ -1169,77 +1054,6 @@ fn inexact_tool_mappings(
     hits
 }
 
-/// A permission rule that is dead config under opencode (#838).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ColonPrefixRule {
-    /// `"allow"`, `"ask"`, or `"deny"` — the tier the rule was declared in.
-    pub tier: &'static str,
-    /// `"<tool>(<pattern>)"`, as the user would recognize it.
-    pub rule: String,
-}
-
-impl ColonPrefixRule {
-    /// The diagnostic for this rule. A dead `deny` fails **open** — the rule the
-    /// user wrote to block something doesn't block it — so it gets stronger
-    /// wording than a dead `allow`, which merely fails closed into a prompt.
-    pub fn message(&self) -> String {
-        let Self { tier, rule } = self;
-        let consequence = if *tier == "deny" {
-            "so the deny is NOT enforced there — whatever it was meant to block is left \
-             to opencode's default"
-        } else {
-            "so the grant never applies there"
-        };
-        format!(
-            "permission rule {rule} ({tier}) uses Claude Code's colon-prefix syntax, which \
-             opencode matches as a literal glob, {consequence}. Use a space-separated pattern \
-             (e.g. `git commit *`) for a rule both engines honour, or move the Claude-only form \
-             to `native_permissions.claude_code`"
-        )
-    }
-}
-
-/// Returns every neutral permission rule whose pattern uses Claude Code's
-/// colon-prefix syntax, for a config where opencode is also materialized (#838).
-///
-/// opencode matches a permission pattern as a plain glob against the whole
-/// command string, so `git commit:*` matches nothing there. Only the
-/// engine-neutral `permissions` block is checked; `native_permissions.claude_code`
-/// is Claude-scoped on purpose and correct as written.
-///
-/// Takes merged `capabilities` so rules contributed by a `bundle.yaml` are
-/// covered — a dead `deny` shipped in a shared bundle is the case most worth
-/// catching. `opencode_active` is passed in rather than probed so the check is
-/// testable without depending on the host's `PATH`.
-pub(super) fn claude_only_colon_permission_patterns(
-    capabilities: &Capabilities,
-    opencode_active: bool,
-) -> Vec<ColonPrefixRule> {
-    if !opencode_active {
-        return Vec::new();
-    }
-    let perms = &capabilities.permissions;
-    [
-        ("allow", &perms.allow),
-        ("ask", &perms.ask),
-        ("deny", &perms.deny),
-    ]
-    .into_iter()
-    .flat_map(|(tier, rules)| rules.iter().map(move |rule| (tier, rule)))
-    .filter_map(|(tier, rule)| {
-        let pattern = rule.pattern.as_deref()?;
-        uses_colon_prefix_syntax(pattern).then(|| ColonPrefixRule {
-            tier,
-            rule: format!(
-                "{}({})",
-                crate::util::display_safe(&rule.tool),
-                crate::util::display_safe(pattern)
-            ),
-        })
-    })
-    .collect()
-}
-
 /// Whether `matcher` is shaped like a file-extension glob (`*.rs`, `**/*.py`)
 /// or a bare extension (`.rs`) rather than a tool-name pattern.
 fn looks_like_file_glob(matcher: &str) -> bool {
@@ -1281,7 +1095,7 @@ const LEGACY_TOOL_REPLACEMENTS: &[(&str, &str)] = &[("grep", "rg"), ("find", "fd
 /// A config `allow` rule for a legacy tool with no matching allow rule for
 /// its recommended replacement (#975).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct LegacyToolRule {
+struct LegacyToolRule {
     pub legacy: &'static str,
     pub replacement: &'static str,
 }
@@ -1353,29 +1167,6 @@ fn legacy_tools_missing_replacement(capabilities: &Capabilities) -> Vec<LegacyTo
             replacement,
         })
         .collect()
-}
-
-/// Drop the platform credential entry belonging to each cache folder GC just
-/// deleted, and report how many went (#1057).
-///
-/// Keyed by folder path, so this only ever touches entries llmenv's own folders
-/// owned — never the user's default `~/.claude` login. Deliberately confined to
-/// the explicit `doctor --gc` path: removing credential entries as a side effect
-/// of `export` would be the wrong default.
-pub(crate) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
-    removed
-        .iter()
-        .filter(|path| {
-            crate::auth::credentials::forget(path)
-                .inspect_err(|e| {
-                    tracing::debug!(
-                        "could not drop credential entry for {}: {e}",
-                        path.display()
-                    );
-                })
-                .unwrap_or(false)
-        })
-        .count()
 }
 
 /// Report the durable OAuth credential cache (#1057): present or not, and
@@ -1543,10 +1334,6 @@ pub(super) fn run_doctor(
         );
     }
 
-    if let Some(problem) = anthropic_model_warning(&config, std::env::var("ANTHROPIC_MODEL")) {
-        eprintln!("{warn} {problem}");
-    }
-
     for hit in hooks_with_glob_like_matchers(&config) {
         eprintln!(
             "{warn} hook {} looks like a file-extension glob, but Claude Code matches \
@@ -1630,6 +1417,17 @@ pub(super) fn run_doctor(
 
     let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
+    let features = active_features::ActiveFeatures::resolve(&config, &config_dir, &active)
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "{warn} cannot read the features of the firing bundles: {e:#}. The checks below \
+                 use the root config only."
+            );
+            active_features::ActiveFeatures::root_only(&config, &active)
+        });
+    if let Some(problem) = features.anthropic_model_warning(std::env::var("ANTHROPIC_MODEL")) {
+        eprintln!("{warn} {problem}");
+    }
 
     // Cross-engine hook compatibility (#543 follow-up): name any hook that will
     // be silently skipped when materializing for an installed adapter with a
@@ -1656,6 +1454,11 @@ pub(super) fn run_doctor(
     let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> =
         super::installed_adapters(&config).collect();
     let claude_installed = has_engine(&installed, "claude_code");
+    if let Some(home) = std::env::var_os("HOME").filter(|_| has_engine(&installed, "opencode"))
+        && let Some(msg) = opencode::agents_skills_warning(Path::new(&home))
+    {
+        eprintln!("{warn} {msg}");
+    }
     {
         let caps = doctor_manifest
             .as_ref()
@@ -2063,7 +1866,7 @@ pub(super) fn run_doctor(
         native_claude_settings,
     );
 
-    run_doctor_tool_availability(use_color, &config);
+    run_doctor_tool_availability(use_color, &config, &features);
     run_doctor_dependent_tools(use_color);
     run_doctor_sandbox(use_color, &config);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
@@ -2106,68 +1909,27 @@ pub(super) fn run_doctor(
         }
     }
 
-    // Verify pinned marketplaces: when a marketplace source includes a `#ref`
-    // pin, the checked-out HEAD should match that pinned ref. Use `^{commit}`
-    // dereferencing so annotated tags don't false-positive (#695).
-    for m in &config.marketplace {
-        let (_, pinned_ref) = cache::split_source_ref(&m.source);
-        let Some(pinned_ref) = pinned_ref else {
-            continue;
-        };
-        let mkt_path = cache::marketplace_path(&cache_dir, &m.name);
-        // #1436 variant: an unstattable clone must not silently skip the pin
-        // check — that reads as "pin verified" in the output.
-        match mkt_path.join(".git").try_exists() {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(e) => {
-                eprintln!(
-                    "{warn} marketplace '{}' pin not verified — cannot check its clone at {}: {e}",
-                    m.name,
-                    mkt_path.display(),
-                );
-                continue;
-            }
-        }
-        let head = match cache::git_head(&mkt_path) {
-            Ok(head) => head,
-            Err(e) => {
-                eprintln!(
-                    "{warn} marketplace '{}': cannot read HEAD in its local clone: {e}",
-                    m.name,
-                );
-                continue;
-            }
-        };
-        let pinned_sha = match cache::git_peeled_ref(&mkt_path, pinned_ref) {
-            Ok(sha) => sha,
-            Err(e) => {
-                eprintln!(
-                    "{warn} marketplace '{}' pinned to '{}' cannot be resolved in the local \
-                     clone: {e} — run `llmenv plugin-sync` to repair",
-                    m.name, pinned_ref,
-                );
-                continue;
-            }
-        };
-        if head != pinned_sha {
-            eprintln!(
-                "{warn} marketplace '{}' pinned to '{}': HEAD ({}) does not match \
-                 the pinned ref's commit ({}) — run `llmenv plugin-sync` to repair",
-                m.name,
-                pinned_ref,
-                &head[..head.len().min(7)],
-                &pinned_sha[..pinned_sha.len().min(7)],
-            );
-        }
-    }
+    marketplace_pins::report_pinned_marketplaces(&config, &cache_dir, &warn);
 
     report_credential_cache(&cache_dir, &pass, &info, &warn);
 
     eprintln!("{pass} Doctor check complete.");
 
     if gc {
-        cache_gc::run(&cache_dir, &config, &pass, &warn);
+        eprintln!("{}", super::clean::DOCTOR_GC_DEPRECATED);
+        let out = cache_gc::GcOutput {
+            pass: &pass,
+            warn: &warn,
+            dry_run: false,
+        };
+        // #1346: a sweep that could not finish is not a success, as in `llmenv clean`.
+        let failures = cache_gc::run(&cache_dir, &config, out);
+        if failures > 0 {
+            anyhow::bail!(
+                "{failures} sweep entry(ies) or sweep(s) could not be checked or removed — see \
+                 the warnings above"
+            );
+        }
     }
 
     Ok(())
@@ -2196,10 +1958,11 @@ fn engine_lifecycle_hooks(
     clippy::unreachable
 )]
 mod tests {
+    use super::opencode::ColonPrefixRule;
     use super::*;
     use crate::config::{
-        Bundle, Capabilities, Features, Hook, HostEntry, Marketplace, Memory,
-        NativePermissionRules, PermissionRule, Permissions, PluginCollection,
+        Bundle, Capabilities, Features, Hook, Marketplace, Memory, NativePermissionRules,
+        PermissionRule, Permissions, PluginCollection,
     };
     use proptest::prelude::*;
 
@@ -2605,63 +2368,6 @@ mod tests {
     // #1131: memory works in `~/` and silently stops the moment you `cd` into a
     // project that disables the only bundle supplying it — with a green doctor,
     // because every other check builds from the post-disable firing set.
-    fn config_with_consolidation(backend: crate::config::ConsolidationBackend) -> Config {
-        let consolidation = crate::config::ConsolidationConfig {
-            enabled: true,
-            backend,
-            max_rules_per_session: 10,
-        };
-        Config {
-            features: Some(Features {
-                memory: vec![Memory {
-                    always_load: None,
-                    server_host: "still".into(),
-                    port: 7878,
-                    listen_host: "127.0.0.1".into(),
-                    when: vec![],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: Some(consolidation),
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
-                }],
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn anthropic_model_warning_is_silent_for_the_claude_cli_backend() {
-        let config = config_with_consolidation(crate::config::ConsolidationBackend::ClaudeCli);
-        let warning = anthropic_model_warning(&config, Ok("opus".to_string()));
-        assert_eq!(warning, None, "claude-cli never reads ANTHROPIC_MODEL");
-    }
-
-    #[test]
-    fn anthropic_model_warning_names_an_alias_for_the_api_backend() {
-        let config = config_with_consolidation(crate::config::ConsolidationBackend::AnthropicApi);
-        let warning = anthropic_model_warning(&config, Ok("opus".to_string()))
-            .expect("an alias fails the anthropic-api backend");
-        assert!(
-            warning.contains("\"opus\" is not a full model ID"),
-            "{warning}"
-        );
-        assert!(warning.contains("anthropic-api backend"), "{warning}");
-    }
-
-    #[test]
-    fn anthropic_model_warning_is_silent_for_a_full_model_id() {
-        let config = config_with_consolidation(crate::config::ConsolidationBackend::AnthropicApi);
-        let warning = anthropic_model_warning(&config, Ok("claude-sonnet-5".to_string()));
-        assert_eq!(warning, None);
-    }
-
     #[test]
     fn doctor_flags_memory_orphaned_by_disable_bundles() {
         let (root, config, active) = disabled_memory_bundle_fixture();
@@ -2683,21 +2389,12 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
-                always_load: None,
                 server_host: "still".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
                 when: vec!["mytag".into()],
-                default_topics: vec![],
-                default_type: None,
-                default_importance: None,
-                type_importance: BTreeMap::new(),
-                retention: None,
-                auto_prune: false,
-                consolidation: None,
-                mcp_permissions: None,
-                wakeup_max_tokens: None,
-                adaptive_recall: true,
+                global_topics: vec![],
+                ..Memory::default()
             }],
             ..Default::default()
         });
@@ -2722,21 +2419,12 @@ mod tests {
         let (root, mut config, active) = disabled_memory_bundle_fixture();
         config.features = Some(Features {
             memory: vec![Memory {
-                always_load: None,
                 server_host: "elsewhere".into(),
                 port: 7878,
                 listen_host: "127.0.0.1".into(),
                 when: vec!["othertag".into()],
-                default_topics: vec![],
-                default_type: None,
-                default_importance: None,
-                type_importance: BTreeMap::new(),
-                retention: None,
-                auto_prune: false,
-                consolidation: None,
-                mcp_permissions: None,
-                wakeup_max_tokens: None,
-                adaptive_recall: true,
+                global_topics: vec![],
+                ..Memory::default()
             }],
             ..Default::default()
         });
@@ -3636,92 +3324,6 @@ mod tests {
         assert!(is_local_addr("0.0.0.0"));
     }
 
-    // -- run_doctor_tool_availability --
-
-    #[test]
-    fn tool_avail_no_crash_default_config() {
-        let config = Config::default();
-        // Should not panic: checks claude + crush (both may warn), no memory entries
-        run_doctor_tool_availability(false, &config);
-    }
-
-    #[test]
-    fn tool_avail_no_crash_with_memory() {
-        let config = Config {
-            features: Some(Features {
-                memory: vec![Memory {
-                    always_load: None,
-                    server_host: "local".into(),
-                    port: 4343,
-                    listen_host: "127.0.0.1".into(),
-                    when: vec!["local".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
-                }],
-                ..Features::default()
-            }),
-            host: BTreeMap::from([(
-                "local".into(),
-                HostEntry {
-                    addr: "127.0.0.1".into(),
-                },
-            )]),
-            ..Config::default()
-        };
-        run_doctor_tool_availability(false, &config);
-    }
-
-    #[test]
-    fn tool_avail_no_crash_with_remote_memory() {
-        let config = Config {
-            features: Some(Features {
-                memory: vec![Memory {
-                    always_load: None,
-                    server_host: "remote".into(),
-                    port: 4343,
-                    listen_host: "0.0.0.0".into(),
-                    when: vec!["remote".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
-                }],
-                ..Features::default()
-            }),
-            host: BTreeMap::from([(
-                "remote".into(),
-                HostEntry {
-                    addr: "10.0.0.4".into(),
-                },
-            )]),
-            ..Config::default()
-        };
-        run_doctor_tool_availability(false, &config);
-    }
-
-    #[test]
-    fn tool_avail_no_crash_claude_disabled() {
-        let config = Config {
-            disabled_engines: vec!["claude_code".into()],
-            ..Config::default()
-        };
-        run_doctor_tool_availability(false, &config);
-    }
-
     // #1185: the two tools differ in what llmenv can actually do for them —
     // icm installs its own update, codebase-memory-mcp only prints how. The
     // report has to say which, or it claims something false about one of them.
@@ -3745,75 +3347,6 @@ mod tests {
                 "{bin}'s update command should invoke it, got {}",
                 update.command()
             );
-        }
-    }
-
-    #[test]
-    fn parse_semver_triple_accepts_the_expected_shapes() {
-        assert_eq!(parse_semver_triple("0.11.0"), Some((0, 11, 0)));
-        assert_eq!(parse_semver_triple("v0.10.8"), Some((0, 10, 8)));
-        assert_eq!(parse_semver_triple("0.11.0-rc.1"), Some((0, 11, 0)));
-        assert_eq!(parse_semver_triple("1.2.3+build"), Some((1, 2, 3)));
-    }
-
-    #[test]
-    fn parse_semver_triple_rejects_other_shapes() {
-        for bad in [
-            "0.11",
-            "0.11.0.1",
-            "0.x.0",
-            "\u{ff10}.11.0",
-            "",
-            "1234567890.0.0",
-        ] {
-            assert_eq!(parse_semver_triple(bad), None, "{bad:?}");
-        }
-    }
-
-    proptest! {
-        /// Any triple that fits nine digits round-trips through the text form, with or without
-        /// a `v` prefix and a suffix.
-        #[test]
-        fn parse_semver_triple_round_trips(
-            a in 0u64..1_000_000_000,
-            b in 0u64..1_000_000_000,
-            c in 0u64..1_000_000_000,
-            prefix in prop::sample::select(vec!["", "v"]),
-            suffix in prop::sample::select(vec!["", "-rc.1", "+build.5"]),
-        ) {
-            let text = format!("{prefix}{a}.{b}.{c}{suffix}");
-            prop_assert_eq!(parse_semver_triple(&text), Some((a, b, c)));
-        }
-
-        /// The parser never panics, and only accepts text that starts with a digit or `v`.
-        #[test]
-        fn parse_semver_triple_never_panics(text in "\\PC{0,24}") {
-            if parse_semver_triple(&text).is_some() {
-                prop_assert!(text.starts_with(|c: char| c.is_ascii_digit() || c == 'v'));
-            }
-        }
-    }
-
-    #[test]
-    fn cbm_floor_warning_fires_only_below_the_floor() {
-        let warning = cbm_floor_warning("0.10.8").expect("0.10.8 is below the floor");
-        assert!(warning.contains("0.10.8 is older than 0.12.0"), "{warning}");
-        assert!(
-            cbm_floor_warning("0.11.0").is_some(),
-            "0.11.0 is below the 0.12.0 floor"
-        );
-        for ok in ["0.12.0", "0.12.1", "1.0.0"] {
-            assert_eq!(cbm_floor_warning(ok), None, "{ok:?}");
-        }
-    }
-
-    #[test]
-    fn cbm_floor_warning_fires_for_an_unparseable_version() {
-        for unknown in ["version unknown", "garbage", ""] {
-            let warning = cbm_floor_warning(unknown)
-                .unwrap_or_else(|| panic!("{unknown:?} must warn, not pass silently"));
-            assert!(warning.contains("could not be checked"), "{warning}");
-            assert!(warning.contains(unknown), "{warning}");
         }
     }
 

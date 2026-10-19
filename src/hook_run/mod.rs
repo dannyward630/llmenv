@@ -27,6 +27,7 @@ use notice::{
     log_memory_without_channel, log_notice_without_channel, write_hook_line, write_notice_only,
 };
 use transcript_link::ensure_transcript_session;
+mod cbm_index_cmd;
 pub(crate) mod features_scope;
 pub(crate) mod idempotency;
 mod launch_client;
@@ -36,6 +37,7 @@ mod recall;
 mod record_hash;
 mod relevance;
 pub(crate) mod repeat_detect;
+mod respawn;
 mod resume_cache;
 mod session_ledger;
 mod session_notices;
@@ -44,10 +46,26 @@ mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
+pub(crate) use cbm_index_cmd::index_result_path;
+use cbm_index_cmd::{
+    create_result_file, direct_index_stdout, index_command, index_job_command, uses_wrapper,
+};
+mod stop_reminder;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
 pub(crate) mod transcript;
 mod transcript_link;
+use respawn::respawn_job;
+use stop_reminder::resolve_stop_reminder;
+mod global_topics;
+mod web_fetch;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod agent_state_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod cbm_trigger_tests;
 
 use std::io::Write;
 use std::str::FromStr;
@@ -68,6 +86,7 @@ use crate::mcp::resolve::MemoryHookSettings;
 use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
 use crate::session_log::{ScopeContext, scope_header_content, scope_metadata_json, state};
 use llmenv_config::LogLevel;
+use web_fetch::{handle_web_fetch_post_tool_use, icm_store_command};
 
 /// A single cross-project, tag-scoped recall the TurnStart hook issues against
 /// ICM. Exposes the recall contract (#197) so it is testable without a live
@@ -411,7 +430,7 @@ fn hook_cwd(payload: &serde_json::Value, fallback: &str) -> std::path::PathBuf {
 /// without a project scope would return other projects' memories (#2688).
 fn wake_args(
     event: HookEvent,
-    settings: Option<MemoryHookSettings>,
+    settings: Option<&MemoryHookSettings>,
     payload: &serde_json::Value,
     cwd: &str,
     session_id: Option<&str>,
@@ -447,7 +466,7 @@ fn records_locally(event: HookEvent) -> bool {
 /// An unsafe `session_id` cannot key a ledger file, so it takes the stateless actions.
 fn uses_adaptive(
     event: HookEvent,
-    settings: Option<MemoryHookSettings>,
+    settings: Option<&MemoryHookSettings>,
     session_id: Option<&str>,
 ) -> bool {
     settings.is_some_and(|s| s.adaptive_recall)
@@ -466,7 +485,7 @@ fn uses_adaptive(
 struct MemoryCall<'a> {
     event: HookEvent,
     client: &'a McpHttpClient,
-    settings: Option<MemoryHookSettings>,
+    settings: Option<&'a MemoryHookSettings>,
     session_id: Option<&'a str>,
     state_dir: Option<std::path::PathBuf>,
     payload: &'a serde_json::Value,
@@ -503,6 +522,7 @@ async fn run_event_memory(call: MemoryCall<'_>) -> anyhow::Result<HookText> {
         store: &store,
         session_id,
         payload: call.payload,
+        global_topics: call.settings.map_or(&[], |s| &s.global_topics),
     };
     match call.event {
         HookEvent::SessionStart => {
@@ -719,9 +739,9 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
                     eprintln!("llmenv: failed to write hook output: {e}");
                 }
                 if blocks_by_exit_code(adapter.name()) {
-                    // opencode's shim reads nothing but the exit code, so the
-                    // envelope above is inert there and the reason has to go
-                    // to stderr to reach anyone. Claude Code is left on exit 0
+                    // The opencode plugin blocks on exit 2 and shows stderr as the
+                    // reason; it also reads the envelope, but exit 2 is the one signal
+                    // that every hook bridge agrees on. Claude Code is left on exit 0
                     // deliberately: it already blocks on the envelope alone,
                     // and exiting 2 there would change a working path for no
                     // gain.
@@ -938,6 +958,9 @@ fn resolve_pre_tool_text(
     // silently downgrade the deny to an allow.
     // #317 phase 3: checked before the write guard only because both deny and
     // the first deny wins; neither ordering is load-bearing beyond that.
+    // Each subagent keeps its own hook state (#2936). Repeat detection derives the same key.
+    let agent_key = claude_session_id.map(|id| session_state::agent_state_key(id, stdin_payload));
+    let state_id = agent_key.as_deref();
     let scan_deny = crate::hook_run::slippage::handle_transcript_scan(
         config.features.as_ref().and_then(|f| f.slippage.as_ref()),
         stdin_payload,
@@ -949,7 +972,7 @@ fn resolve_pre_tool_text(
     let write_guard = crate::hook_run::slippage::handle_pre_tool_use(
         config.features.as_ref().and_then(|f| f.slippage.as_ref()),
         stdin_payload,
-        claude_session_id,
+        state_id,
         state_dir,
     );
     if !write_guard.is_empty() {
@@ -966,7 +989,7 @@ fn resolve_pre_tool_text(
         let deny = crate::hook_run::task_nudge::handle_pre_tool_use(
             tracker,
             stdin_payload,
-            claude_session_id,
+            state_id,
             state_dir,
         );
         if !deny.is_empty() {
@@ -984,7 +1007,7 @@ fn resolve_pre_tool_text(
     {
         let ro_text = crate::hook_run::read_once::handle_pre_tool_use(
             stdin_payload,
-            claude_session_id,
+            state_id,
             read_once,
             state_dir,
         );
@@ -1026,68 +1049,6 @@ fn resolve_pre_tool_text(
         .flatten()
         .collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
-/// The task-tracker's `Stop` reminder, with repeat-detection applied: once
-/// the identical reminder has fired `threshold` times in a row for this
-/// session, `repeat_detect::handle_stop` appends a pointer to `llmenv task
-/// wait` (see #1006 — this is the same on-by-default detector as
-/// `resolve_pre_tool_text`, applied to Stop-event nagging instead of
-/// `PreToolUse` tool-call repetition).
-fn resolve_stop_reminder(
-    state_dir: &std::path::Path,
-    claude_session_id: Option<&str>,
-    config: &crate::config::Config,
-    stop_payload: &serde_json::Value,
-) -> String {
-    // #2511: a stop that a Stop hook caused gets no reminder, so the hook cannot loop the agent.
-    if stop_dedupe::is_hook_continuation(stop_payload) {
-        return String::new();
-    }
-    let mut reminder = crate::task::stop_hook_reminder(state_dir, claude_session_id);
-    // #2456: a turn that ends with a question to the user parks the task that waits for it.
-    if let Some(tracker) = config
-        .features
-        .as_ref()
-        .and_then(|f| f.task_tracker.as_ref())
-    {
-        let waiting = crate::hook_run::task_nudge::handle_stop(tracker, stop_payload, state_dir);
-        if !waiting.is_empty() {
-            if !reminder.is_empty() {
-                reminder.push_str("\n\n");
-            }
-            reminder.push_str(&waiting);
-        }
-    }
-    // #317: appended before repeat-detect wraps the text, so a repeat warning
-    // stays the last thing read — it's about the turn that just happened,
-    // while the checklist is about what to do before ending.
-    let critique = crate::hook_run::slippage::handle_stop(
-        config.features.as_ref().and_then(|f| f.slippage.as_ref()),
-    );
-    if !critique.is_empty() {
-        if !reminder.is_empty() {
-            reminder.push_str("\n\n");
-        }
-        reminder.push_str(&critique);
-    }
-    // #2511: runs before repeat-detect, which counts only the reminders that are emitted.
-    let reminder = stop_dedupe::emit_once(state_dir, claude_session_id, &reminder);
-    let repeat_detect_cfg = config
-        .features
-        .as_ref()
-        .and_then(|f| f.repeat_detect.clone())
-        .unwrap_or_default();
-    if repeat_detect_cfg.enabled {
-        crate::hook_run::repeat_detect::handle_stop(
-            &reminder,
-            claude_session_id,
-            &repeat_detect_cfg,
-            state_dir,
-        )
-    } else {
-        reminder
-    }
 }
 
 /// Build the `LLMENV_TRACE_TIMING` marker payload from whichever phase
@@ -1303,13 +1264,14 @@ fn run_inner(
     // #317: counted here rather than inside the pipeline below, which the
     // #702 early-exit can skip entirely — a metric that only accrues when
     // something else happens to want the event would undercount silently.
+    let agent_key = claude_session_id.map(|id| session_state::agent_state_key(id, stdin_payload));
     if counts_tool_use(event)
         && let Some(state_dir) = state_dir_or_log("slippage counters not updated")
     {
         crate::hook_run::slippage::handle_post_tool_use(
             config.features.as_ref().and_then(|f| f.slippage.as_ref()),
             stdin_payload,
-            claude_session_id,
+            agent_key.as_deref(),
             &state_dir,
         );
     }
@@ -1352,7 +1314,7 @@ fn run_inner(
         let text = crate::hook_run::task_nudge::handle_post_tool_use(
             tracker,
             stdin_payload,
-            claude_session_id,
+            agent_key.as_deref(),
             &state_dir,
         );
         (!text.is_empty()).then_some(text)
@@ -1532,24 +1494,29 @@ fn run_inner(
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
         let resolved_client =
             resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
-        let settings = resolved_client.as_ref().map(|r| r.settings);
+        let settings = resolved_client.as_ref().map(|r| r.settings.clone());
         // Default type/importance markers (R1, R3) from the resolved entry, which
         // can be top-level or bundle-declared, when the chunk has none of its own.
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
-        let (wake, memory_notice) =
-            match wake_args(event, settings, stdin_payload, &env.cwd, claude_session_id) {
-                Ok(args) => (args, None),
-                Err(e) => {
-                    tracing::error!("memory skipped for {event}: {e:#}");
-                    let args = WakeUpArgs {
-                        max_tokens: settings.and_then(|s| s.wakeup_max_tokens),
-                        project: None,
-                    };
-                    (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
-                }
-            };
+        let (wake, memory_notice) = match wake_args(
+            event,
+            settings.as_ref(),
+            stdin_payload,
+            &env.cwd,
+            claude_session_id,
+        ) {
+            Ok(args) => (args, None),
+            Err(e) => {
+                tracing::error!("memory skipped for {event}: {e:#}");
+                let args = WakeUpArgs {
+                    max_tokens: settings.as_ref().and_then(|s| s.wakeup_max_tokens),
+                    project: None,
+                };
+                (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
+            }
+        };
         let memory_skipped = memory_notice.is_some();
         let client = resolved_client.map(|r| r.client);
         let state_path = state::state_path()
@@ -1681,14 +1648,17 @@ fn run_inner(
                     && !memory_skipped
                 {
                     let wake_call = (!continues_session(stdin_payload)).then_some(&wake);
-                    let actions =
-                        dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call);
+                    let actions = global_topics::turn_actions(
+                        dispatch(event, &tag_queries, &bundle_queries, &tag_ranks, wake_call),
+                        &query,
+                        settings.as_ref().map_or(&[], |s| &s.global_topics),
+                    );
                     // Use minimal chunk for storage to avoid duplication. (#1792)
                     let store_content = store_content_for_event(event, &chunk, &storage_chunk);
                     memory = match run_event_memory(MemoryCall {
                         event,
                         client,
-                        settings,
+                        settings: settings.as_ref(),
                         session_id: claude_session_id,
                         state_dir: crate::paths::state_dir()
                             .inspect_err(|e| {
@@ -2299,135 +2269,6 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Tool name constants for WebFetch and WebSearch tools.
-const TOOL_NAME_WEBFETCH: &str = "WebFetch";
-const TOOL_NAME_WEBSEARCH: &str = "WebSearch";
-
-/// Build ICM memory store arguments for a WebFetch/WebSearch PostToolUse event.
-/// Returns `None` if the payload is not a WebFetch/WebSearch tool result.
-///
-/// # Format
-/// The stored memory carries topic `web-fetch` and importance `low` so it decays
-/// quickly and can be bulk-cleared via `icm_memory_forget_topic("web-fetch")`.
-#[must_use]
-fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value> {
-    let tool_name = payload["tool_name"].as_str()?;
-    if tool_name != TOOL_NAME_WEBFETCH && tool_name != TOOL_NAME_WEBSEARCH {
-        return None;
-    }
-    let is_search = tool_name == TOOL_NAME_WEBSEARCH;
-    let source_field = if is_search { "query" } else { "url" };
-    let source_value = payload["tool_input"][source_field]
-        .as_str()
-        .unwrap_or("unknown");
-    let label = if is_search { "Query" } else { "URL" };
-    let response = payload["tool_response"]
-        .as_str()
-        .map_or_else(|| json_or_empty(&payload["tool_response"]), String::from);
-    let needs_indicator = response.chars().count() > 1000;
-    let mut truncated: String = response.chars().take(1000).collect();
-    if needs_indicator {
-        truncated.push_str("... (truncated)");
-    }
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let content = format!(
-        "{label}: {source_value}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
-    );
-    // The id is derived from the event, so a re-spawn or a resumed job sends the same one (#2397).
-    let session = payload["session_id"].as_str().unwrap_or_default();
-    let event = payload["tool_use_id"]
-        .as_str()
-        .map_or_else(|| timestamp.to_string(), String::from);
-    // `content` holds the fetch time, so the id uses its stable parts: with a `tool_use_id` the
-    // same tool call gives the same id at any later second.
-    let request_id =
-        idempotency::request_id(&[session, "icm-store", &event, source_value, &truncated]);
-    Some(json!({
-        "content": content,
-        "topic": "web-fetch",
-        "importance": "low",
-        detached_store::REQUEST_ID_FIELD: request_id,
-        detached_store::REQUEST_KEY_FIELD: session,
-    }))
-}
-
-/// Handle PostToolUse for WebFetch/WebSearch by spawning a detached child
-/// that stores the fetched content in ICM with fast-falloff memory
-/// (importance: low, topic: web-fetch). The hook returns immediately instead of
-/// blocking on the MCP round trip. Best-effort — failures are logged at debug
-/// level and never propagated to the caller. The child's stderr goes to the
-/// shared bounded log rather than `/dev/null` so its own failures are
-/// diagnosable (#1133).
-///
-/// Returns the spawned [`std::process::Child`] purely so callers such as
-/// tests can reap it (#1095) — production intentionally drops it unwaited,
-/// identical to the previous behavior, since the child is
-/// process-group-detached and outlives this process regardless.
-fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::process::Child> {
-    handle_web_fetch_in(checkpoint::spawner_state_dir().as_deref(), payload)
-}
-
-/// The `llmenv icm-store` child, before its stderr log and process group are set.
-fn icm_store_command(
-    exe: std::path::PathBuf,
-    checkpoint: Option<&std::path::Path>,
-) -> std::process::Command {
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("icm-store")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null());
-    if let Some(path) = checkpoint {
-        cmd.arg("--checkpoint").arg(path);
-    }
-    cmd
-}
-
-/// [`handle_web_fetch_post_tool_use`] with the state dir for the checkpoint given (#2396).
-fn handle_web_fetch_in(
-    state_dir: Option<&std::path::Path>,
-    payload: &serde_json::Value,
-) -> Option<std::process::Child> {
-    let args = web_fetch_store_args(payload)?;
-    let Ok(payload_json) = serde_json::to_string(&args) else {
-        tracing::error!("icm-store: failed to serialize store args");
-        return None;
-    };
-    // Spawns this same binary as a detached child. The path is this process's own image, not input.
-    // nosemgrep: rust.lang.security.current-exe.current-exe
-    let Ok(exe) = std::env::current_exe() else {
-        tracing::error!("icm-store: cannot resolve current_exe for detached store");
-        return None;
-    };
-    let checkpoint = checkpoint::begin(
-        state_dir,
-        checkpoint::JobKind::IcmStore,
-        &args,
-        payload["session_id"].as_str(),
-    );
-    let mut cmd = icm_store_command(exe, checkpoint.as_deref());
-    crate::session_log::redirect_stderr_to_detached_log(
-        &mut cmd,
-        crate::session_log::detached_child_log_path,
-    );
-    crate::mcp::proxy::detach_process_group(&mut cmd);
-    let Ok(mut child) = cmd.spawn() else {
-        tracing::error!("icm-store: failed to spawn detached store child");
-        return None;
-    };
-    if let Some(mut stdin) = child.stdin.take()
-        && let Err(e) = stdin.write_all(payload_json.as_bytes())
-    {
-        tracing::error!("icm-store: failed to pipe args to detached child: {e}");
-    }
-    // Not waited on by the caller: the child is process-group-detached and
-    // outlives us.
-    Some(child)
-}
-
 /// Where codebase-memory-mcp's index cache lives for `cm`/`state_dir`: the
 /// configured `index_path` override, or `state_dir/codebase-memory` by
 /// default. Single source of truth for both the spawned child's
@@ -2460,91 +2301,6 @@ fn cache_dir_of(index_path: Option<&str>, state_dir: &std::path::Path) -> std::p
     index_path
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state_dir.join("codebase-memory"))
-}
-
-/// Builds the `codebase-memory-mcp cli index_repository` subprocess command
-/// for `project_root`, without spawning it — kept separate so tests can
-/// assert on the command shape without launching a real process (#365).
-///
-/// `CBM_CACHE_DIR` is only set when `cm.index_path` is explicit (#1493);
-/// `CBM_ALLOWED_ROOT` is never set (#1495). `CBM_MEM_BUDGET_MB` is set when
-/// `cm.mem_budget_mb` is (#2154). Same treatment as `resolve_codebase_memory`
-/// (`src/mcp/resolve.rs`), which this mirrors so the SessionStart auto-index
-/// and the MCP server launch agree on scope and budget.
-/// The indexer command for `project_root`. The checkpointed wrapper (`detached_cbm`) rebuilds it
-/// from a checkpoint file (#2396).
-///
-/// `index_path` MUST already be expanded (see [`expanded_index_path`]). A literal `~` would reach
-/// the child as a directory name.
-fn index_command(
-    project_root: &std::path::Path,
-    index_path: Option<&str>,
-    mem_budget_mb: Option<u32>,
-) -> std::process::Command {
-    // repo_path must become JSON text regardless (the CLI arg is a JSON
-    // string), so this lossy step is unavoidable here — unlike the env var
-    // below, which can carry the raw OsStr straight through.
-    let args_json =
-        serde_json::json!({ "repo_path": project_root.display().to_string() }).to_string();
-    let mut cmd = std::process::Command::new("codebase-memory-mcp");
-    cmd.args(["cli", "index_repository", &args_json])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Some(index_path) = index_path {
-        cmd.env("CBM_CACHE_DIR", index_path);
-    }
-    if let Some(budget) = mem_budget_mb {
-        cmd.env("CBM_MEM_BUDGET_MB", budget.to_string());
-    }
-    cmd
-}
-
-/// Where the last index result of `project_root` is kept, under `cache_dir`. The cache directory
-/// is shared by every project, so the file name carries a stable key of the project root. The
-/// writer and `llmenv doctor` both call this (#2154).
-pub(crate) fn index_result_path(
-    cache_dir: &std::path::Path,
-    project_root: &std::path::Path,
-) -> std::path::PathBuf {
-    use sha2::{Digest, Sha256};
-    #[cfg(unix)]
-    let bytes = {
-        use std::os::unix::ffi::OsStrExt;
-        project_root.as_os_str().as_bytes().to_vec()
-    };
-    #[cfg(not(unix))]
-    let bytes = project_root.to_string_lossy().into_owned().into_bytes();
-    let digest = Sha256::digest(&bytes);
-    let key: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    cache_dir.join(format!("index-result-{key}.json"))
-}
-
-/// Send the stdout of an indexer that `cmd` starts directly to the result file. When `cmd` is the
-/// wrapper it does this for the indexer it starts (#2154).
-fn direct_index_stdout(
-    cmd: &mut std::process::Command,
-    wrapped: bool,
-    result_path: &std::path::Path,
-) {
-    if !wrapped {
-        cmd.stdout(result_stdout(result_path));
-    }
-}
-
-/// Create the result file at `path`, owner-only and new. An existing file or symlink at `path` is
-/// removed first, so the open can neither follow a link nor reuse a file that another user made.
-fn create_result_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    // A failed removal shows below: `create_new` then fails on what is still there.
-    if let Some(e) = session_state::removal_error_to_log(std::fs::remove_file(path)) {
-        tracing::error!("could not remove result file {} ({e})", path.display());
-    }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
 }
 
 /// The SessionEnd dedup snapshot path. Other events have none. A missing state directory skips
@@ -2771,48 +2527,6 @@ mod write_hook_line_tests {
     }
 }
 
-/// The stdout for an indexer that reports its result as JSON: the result file, or null when the
-/// file cannot be created (a missing result is a smaller problem than skipping the index).
-fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
-    match create_result_file(path) {
-        Ok(file) => std::process::Stdio::from(file),
-        Err(e) => {
-            tracing::warn!(
-                "cannot create the index result file {}, so doctor cannot report the result: {e}",
-                path.display()
-            );
-            std::process::Stdio::null()
-        }
-    }
-}
-
-/// Whether an index job runs through the `cbm-index-run` wrapper: it needs a checkpoint and an
-/// executable to run it with (#2396).
-fn uses_wrapper(checkpoint: Option<&std::path::Path>, exe: Option<&std::path::Path>) -> bool {
-    checkpoint.is_some() && exe.is_some()
-}
-
-/// The process that runs one index job: `llmenv cbm-index-run` when there is a checkpoint and an
-/// executable to run it with, else the indexer itself (`direct`) (#2396).
-fn index_job_command(
-    checkpoint: Option<&std::path::Path>,
-    exe: Option<std::path::PathBuf>,
-    direct: impl FnOnce() -> std::process::Command,
-) -> std::process::Command {
-    match (checkpoint, exe) {
-        (Some(path), Some(exe)) => {
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("cbm-index-run")
-                .arg("--checkpoint")
-                .arg(path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null());
-            cmd
-        }
-        _ => direct(),
-    }
-}
-
 /// Fire-and-forget: registers `project_root` with codebase-memory-mcp's
 /// index + background auto-watch (#365). Mirrors `post_session_consolidation`'s
 /// detached-spawn pattern — indexing a large repo can take minutes (the
@@ -2835,6 +2549,18 @@ fn trigger_codebase_memory_index(
     cm: &crate::config::CodebaseMemory,
     state_dir: &std::path::Path,
 ) -> Option<String> {
+    trigger_index_with(project_root, cm, state_dir, || {
+        crate::path_lookup::resolve_program("codebase-memory-mcp")
+    })
+}
+
+/// [`trigger_codebase_memory_index`] with the program lookup given, so a test needs no indexer.
+fn trigger_index_with(
+    project_root: &std::path::Path,
+    cm: &crate::config::CodebaseMemory,
+    state_dir: &std::path::Path,
+    find_program: impl FnOnce() -> anyhow::Result<std::path::PathBuf>,
+) -> Option<String> {
     // A checkpointed run goes through `llmenv cbm-index-run`, which observes the indexer's exit
     // status. Without a checkpoint the indexer starts directly, as before (#2396).
     let index_path = match expanded_index_path(cm) {
@@ -2844,6 +2570,13 @@ fn trigger_codebase_memory_index(
             return Some(index_skipped_notice(&format!(
                 "cannot expand index_path: {e:#}"
             )));
+        }
+    };
+    let program = match find_program() {
+        Ok(program) => program,
+        Err(e) => {
+            tracing::error!("codebase-memory index skipped: {e:#}");
+            return Some(index_skipped_notice(&format!("{e:#}")));
         }
     };
     let cache_dir = cache_dir_of(index_path.as_deref(), state_dir);
@@ -2861,7 +2594,12 @@ fn trigger_codebase_memory_index(
     // The wrapper is used only with both a checkpoint and an executable (`index_job_command`).
     let wrapped = uses_wrapper(checkpoint.as_deref(), exe.as_deref());
     let mut cmd = index_job_command(checkpoint.as_deref(), exe, || {
-        index_command(project_root, index_path.as_deref(), cm.mem_budget_mb)
+        index_command(
+            &program,
+            project_root,
+            index_path.as_deref(),
+            cm.mem_budget_mb,
+        )
     });
     let log_path = cache_dir.join("index.log");
     // Only the default cache dir (under llmenv's own state tree) gets
@@ -2945,81 +2683,6 @@ fn resume_checkpoints_with(
     let resumed = checkpoint::resume_pending(state_dir, checkpoint::now_secs(), spawn);
     tracing::debug!("resumed {resumed} unfinished background job(s)");
     resumed
-}
-
-/// Start the child for one stale checkpoint, with the inputs and the working directory of the
-/// first run. The memory backend and the project come from that directory, so a checkpoint whose
-/// directory is gone is not run: it would store into the project of the session that resumes it.
-fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::Result<()> {
-    respawn_job_with_exe(cp, path, std::env::current_exe)
-}
-
-/// [`respawn_job`] with the image lookup passed in, so a test can make it fail.
-fn respawn_job_with_exe(
-    cp: &checkpoint::Checkpoint,
-    path: &std::path::Path,
-    current_exe: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
-) -> anyhow::Result<()> {
-    use checkpoint::JobKind;
-    let cwd = cp
-        .cwd
-        .as_deref()
-        .map(std::path::Path::new)
-        .filter(|d| d.is_dir())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "the working directory of the first run ({}) is gone",
-                cp.cwd.as_deref().unwrap_or("not recorded")
-            )
-        })?;
-    // Spawns this same binary as a detached child. The path is this process's own image, not input.
-    // nosemgrep: rust.lang.security.current-exe.current-exe
-    let exe = match current_exe() {
-        Ok(exe) => exe,
-        Err(e) => {
-            // Returning Ok keeps the bumped attempt count. A restore would retry this job on every
-            // session and never reach MAX_ATTEMPTS (#2720).
-            tracing::error!(
-                "background job {} not resumed, cannot resolve current_exe: {e}",
-                path.display()
-            );
-            return Ok(());
-        }
-    };
-    let stdin = cp.inputs.to_string();
-    match cp.kind {
-        JobKind::IcmStore => spawn_detached(icm_store_command(exe, Some(path)), Some(&stdin), cwd),
-        JobKind::SessionLogRecord => spawn_detached(
-            crate::session_log::detached::record_command(exe, Some(path)),
-            Some(&stdin),
-            cwd,
-        ),
-        JobKind::Consolidation => {
-            spawn_detached(consolidation_run_command(exe, Some(path)), None, cwd)
-        }
-        // Not resumable: `resume_pending` skips it, because `SessionStart` starts the indexer.
-        JobKind::CbmIndex => Ok(()),
-    }
-}
-
-/// Spawn `cmd` as a detached child in `cwd` with the shared bounded stderr log, and write `stdin`
-/// to it. Not waited on.
-fn spawn_detached(
-    mut cmd: std::process::Command,
-    stdin: Option<&str>,
-    cwd: &std::path::Path,
-) -> anyhow::Result<()> {
-    cmd.current_dir(cwd);
-    crate::session_log::redirect_stderr_to_detached_log(
-        &mut cmd,
-        crate::session_log::detached_child_log_path,
-    );
-    crate::mcp::proxy::detach_process_group(&mut cmd);
-    let mut child = cmd.spawn()?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text.as_bytes())?;
-    }
-    Ok(())
 }
 
 /// True for the event that ends a session and so starts consolidation.
@@ -3181,8 +2844,9 @@ mod tests {
         }
     }
 
+    use super::web_fetch::handle_web_fetch_in;
     use super::*;
-    use crate::memory::resolve::DEFAULT_MEMORY_HOOK;
+    use crate::memory::resolve::default_memory_hook;
 
     #[test]
     fn append_pending_notice_joins_with_a_newline_when_text_is_non_empty() {
@@ -3314,13 +2978,18 @@ mod tests {
         let payload = json!({
             "session_id": "sess-1", "tool_use_id": "tu1", "tool_name": "WebFetch",
             "tool_input": {"url": "https://example.com"}, "tool_response": "body",
+            "cwd": dir.path().join("proj-a").display().to_string(),
         });
+        std::fs::create_dir(dir.path().join("proj-a")).unwrap();
         let child = handle_web_fetch_in(Some(dir.path()), &payload);
         let listed = checkpoint::checkpoint_entries_for_test(dir.path());
         assert_eq!(listed.len(), 1, "{listed:?}");
         let (kind, inputs, session) = &listed[0];
         assert_eq!(*kind, checkpoint::JobKind::IcmStore);
-        assert_eq!(inputs["topic"], "web-fetch");
+        assert_eq!(
+            inputs["topic"], "web-fetch-proj-a",
+            "the page keeps its project (#2911)"
+        );
         assert!(
             !inputs[detached_store::REQUEST_ID_FIELD]
                 .as_str()
@@ -3423,31 +3092,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_detached_runs_in_the_directory_and_feeds_stdin() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "cat > out.txt; pwd > cwd.txt"])
-            .stdin(std::process::Stdio::piped());
-        spawn_detached(cmd, Some("payload"), dir.path()).unwrap();
-        let out = dir.path().join("out.txt");
-        for _ in 0..200 {
-            // The shell creates the file before `pwd` writes it, so wait for content.
-            let written = std::fs::read_to_string(dir.path().join("cwd.txt"))
-                .is_ok_and(|text| !text.is_empty());
-            if written {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        assert_eq!(std::fs::read_to_string(out).unwrap(), "payload");
-        let cwd = std::fs::read_to_string(dir.path().join("cwd.txt")).unwrap();
-        assert_eq!(
-            std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
-            dir.path().canonicalize().unwrap()
-        );
-    }
-
-    #[test]
     fn the_resume_step_starts_a_stale_job_in_its_working_directory() {
         let dir = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
@@ -3476,17 +3120,6 @@ mod tests {
             1,
             "SessionStart starts the indexer itself, so a resume would only count an attempt"
         );
-    }
-
-    #[test]
-    fn a_job_whose_working_directory_is_gone_is_not_resumed() {
-        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
-        cp.cwd = Some("/definitely/not/a/directory".into());
-        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
-        assert!(err.to_string().contains("is gone"), "{err}");
-        cp.cwd = None;
-        let err = respawn_job(&cp, std::path::Path::new("/s/checkpoints/x.json")).unwrap_err();
-        assert!(err.to_string().contains("not recorded"), "{err}");
     }
 
     #[test]
@@ -3526,26 +3159,6 @@ mod tests {
     }
 
     #[test]
-    fn a_job_whose_image_cannot_be_resolved_is_logged_and_not_spawned() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
-        cp.cwd = Some(dir.path().display().to_string());
-        let mut result = None;
-        let logs = crate::test_log_capture::capture_logs(|| {
-            result = Some(respawn_job_with_exe(
-                &cp,
-                std::path::Path::new("/s/x.json"),
-                || Err(std::io::Error::other("no image")),
-            ));
-        });
-        assert!(
-            result.is_some_and(|r| r.is_ok()),
-            "a failed lookup settles as Ok"
-        );
-        assert!(logs.contains("cannot resolve current_exe"), "{logs}");
-    }
-
-    #[test]
     fn only_a_context_losing_session_start_resets_read_state() {
         let with = |source: &str| serde_json::json!({ "source": source });
         assert!(resets_read_state(HookEvent::SessionStart, &with("compact")));
@@ -3569,16 +3182,13 @@ mod tests {
     #[test]
     fn adaptive_applies_only_to_its_events_with_a_valid_session() {
         let on = Some(MemoryHookSettings {
-            wakeup_max_tokens: None,
             adaptive_recall: true,
-            default_type: None,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         });
         let off = Some(MemoryHookSettings {
-            wakeup_max_tokens: None,
-            adaptive_recall: false,
-            default_type: None,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         });
         for event in [
             HookEvent::SessionStart,
@@ -3586,15 +3196,19 @@ mod tests {
             HookEvent::PostToolUseFailure,
             HookEvent::SubagentStart,
         ] {
-            assert!(uses_adaptive(event, on, Some("s1")), "{event}");
-            assert!(!uses_adaptive(event, off, Some("s1")), "{event}");
-            assert!(!uses_adaptive(event, on, None), "{event}");
+            assert!(uses_adaptive(event, on.as_ref(), Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, off.as_ref(), Some("s1")), "{event}");
+            assert!(!uses_adaptive(event, on.as_ref(), None), "{event}");
             assert!(
-                !uses_adaptive(event, on, Some("../x")),
+                !uses_adaptive(event, on.as_ref(), Some("../x")),
                 "unsafe id: {event}"
             );
         }
-        assert!(!uses_adaptive(HookEvent::SessionEnd, on, Some("s1")));
+        assert!(!uses_adaptive(
+            HookEvent::SessionEnd,
+            on.as_ref(),
+            Some("s1")
+        ));
     }
 
     #[test]
@@ -3757,6 +3371,10 @@ mod tests {
             &serde_json::Value::Null,
         );
         assert!(text.contains("tests"), "the critique is present: {text:?}");
+        assert!(
+            !text.starts_with('\n'),
+            "no separator before the first part: {text:?}"
+        );
 
         let without = crate::config::Config {
             features: Some(crate::config::Features {
@@ -4082,6 +3700,7 @@ mod tests {
             mcp_permissions: None,
             wakeup_max_tokens: None,
             adaptive_recall: true,
+            global_topics: crate::config::Memory::default().global_topics,
         }];
         let mut persisted_host = std::collections::BTreeMap::new();
         persisted_host.insert(
@@ -4103,7 +3722,7 @@ mod tests {
             url,
             crate::memory::MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                settings: DEFAULT_MEMORY_HOOK,
+                settings: default_memory_hook(),
             },
             "memory_url must read the persisted merge cache instead of falling \
                  back to a live merge of a bundle that declares no memory/host"
@@ -4159,7 +3778,7 @@ mod tests {
             url,
             crate::memory::MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                settings: DEFAULT_MEMORY_HOOK,
+                settings: default_memory_hook(),
             }
         );
     }
@@ -4227,7 +3846,7 @@ mod tests {
             url,
             crate::memory::MemoryEndpoint::Active {
                 url: "http://still.local:7878/mcp".into(),
-                settings: DEFAULT_MEMORY_HOOK,
+                settings: default_memory_hook(),
             },
             "a key mismatch must fall back to a correct live merge, never the stale cache"
         );
@@ -4375,21 +3994,13 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
-                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
                     when: vec!["network-home".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
                     wakeup_max_tokens: Some(750),
-                    adaptive_recall: true,
+                    global_topics: vec![],
+                    ..crate::config::Memory::default()
                 }],
                 ..Default::default()
             }),
@@ -4427,21 +4038,12 @@ mod tests {
         let config = crate::config::Config {
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
-                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
                     when: vec!["network-home".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
+                    global_topics: vec![],
+                    ..crate::config::Memory::default()
                 }],
                 ..Default::default()
             }),
@@ -4699,21 +4301,12 @@ mod tests {
             }],
             features: Some(crate::config::Features {
                 memory: vec![crate::config::Memory {
-                    always_load: None,
                     server_host: "still".into(),
                     port: 7878,
                     listen_host: "127.0.0.1".into(),
                     when: vec!["mytag".into()],
-                    default_topics: vec![],
-                    default_type: None,
-                    default_importance: None,
-                    type_importance: std::collections::BTreeMap::new(),
-                    retention: None,
-                    auto_prune: false,
-                    consolidation: None,
-                    mcp_permissions: None,
-                    wakeup_max_tokens: None,
-                    adaptive_recall: true,
+                    global_topics: vec![],
+                    ..crate::config::Memory::default()
                 }],
                 ..Default::default()
             }),
@@ -4924,7 +4517,7 @@ mod tests {
         let config = crate::config::Config::default();
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
         assert!(
@@ -4945,7 +4538,7 @@ mod tests {
         };
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
         assert!(
@@ -4969,7 +4562,7 @@ mod tests {
         };
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s2"), &config, false, state_dir.path())
             .expect("test");
@@ -5057,6 +4650,7 @@ mod tests {
             mcp_permissions: None,
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/repos/proj"),
             cm.index_path.as_deref(),
             cm.mem_budget_mb,
@@ -5102,6 +4696,7 @@ mod tests {
             mcp_permissions: None,
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/repos/proj"),
             cm.index_path.as_deref(),
             cm.mem_budget_mb,
@@ -5255,6 +4850,7 @@ mod tests {
             ..Default::default()
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/r"),
             with.index_path.as_deref(),
             with.mem_budget_mb,
@@ -5265,140 +4861,12 @@ mod tests {
             ..Default::default()
         };
         let cmd = index_command(
+            std::path::Path::new("codebase-memory-mcp"),
             std::path::Path::new("/r"),
             without.index_path.as_deref(),
             without.mem_budget_mb,
         );
         assert_eq!(env_of(&cmd, "CBM_MEM_BUDGET_MB"), None);
-    }
-
-    #[test]
-    fn the_wrapper_is_used_only_with_a_checkpoint_and_an_executable() {
-        let p = Some(std::path::Path::new("/c"));
-        let e = Some(std::path::Path::new("/exe"));
-        assert!(uses_wrapper(p, e));
-        assert!(!uses_wrapper(p, None));
-        assert!(!uses_wrapper(None, e));
-        assert!(!uses_wrapper(None, None));
-    }
-
-    #[test]
-    fn a_result_file_that_cannot_be_replaced_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("result.json");
-        std::fs::create_dir(&path).unwrap();
-        std::fs::write(path.join("inside"), "x").unwrap();
-        assert!(create_result_file(&path).is_err());
-    }
-
-    #[test]
-    fn the_result_path_is_stable_per_project_and_differs_between_projects() {
-        let dir = std::path::Path::new("/cache");
-        let a = index_result_path(dir, std::path::Path::new("/work/a"));
-        assert_eq!(a, index_result_path(dir, std::path::Path::new("/work/a")));
-        assert_ne!(a, index_result_path(dir, std::path::Path::new("/work/b")));
-        assert_eq!(a.parent(), Some(dir));
-        let name = a.file_name().unwrap().to_string_lossy().into_owned();
-        let key = name
-            .strip_prefix("index-result-")
-            .and_then(|n| n.strip_suffix(".json"))
-            .unwrap();
-        assert!(
-            key.len() == 16 && key.bytes().all(|b| b.is_ascii_hexdigit()),
-            "{name}"
-        );
-    }
-
-    #[test]
-    fn the_result_stdout_truncates_the_file_and_falls_back_to_null() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("result.json");
-        std::fs::write(&path, "old result that is long").unwrap();
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "echo new"]).stdout(result_stdout(&path));
-        assert!(cmd.status().unwrap().success());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
-        // A path in a folder that does not exist cannot be opened: the child still runs.
-        let missing = dir.path().join("no/such/dir/result.json");
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "echo ignored"])
-            .stdout(result_stdout(&missing));
-        assert!(cmd.status().unwrap().success());
-        assert!(!missing.exists());
-    }
-
-    #[test]
-    fn trigger_codebase_memory_index_creates_owner_only_bounded_log() {
-        use std::os::unix::fs::PermissionsExt;
-        let state_dir = tempfile::tempdir().unwrap();
-        let cm = crate::config::CodebaseMemory {
-            allowed_roots: vec![],
-            mem_budget_mb: None,
-            when: vec!["proj".to_string()],
-            index_path: None,
-            mcp_permissions: None,
-        };
-        trigger_codebase_memory_index(std::path::Path::new("/repos/proj"), &cm, state_dir.path());
-
-        let log_path = state_dir.path().join("codebase-memory").join("index.log");
-        let meta = std::fs::metadata(&log_path)
-            .unwrap_or_else(|e| panic!("expected {} to exist: {e}", log_path.display()));
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-    }
-
-    #[test]
-    fn an_indexer_started_directly_writes_its_result_but_the_wrapper_does_it_otherwise() {
-        let dir = tempfile::tempdir().unwrap();
-        let result = dir.path().join("result.json");
-        let run = |checkpointed: bool| {
-            let mut cmd = std::process::Command::new("sh");
-            cmd.args(["-c", "echo '{}'"])
-                .stdout(std::process::Stdio::null());
-            direct_index_stdout(&mut cmd, checkpointed, &result);
-            cmd.status().unwrap();
-        };
-        run(true);
-        assert!(
-            !result.exists(),
-            "the wrapper writes the file when there is a checkpoint"
-        );
-        run(false);
-        assert_eq!(std::fs::read_to_string(&result).unwrap().trim(), "{}");
-    }
-
-    // #1196: a user-configured `index_path` can be shared with a
-    // codebase-memory-mcp process running under a different uid (separate
-    // service account, container with different uid mapping). Forcing it to
-    // 0700 — appropriate for llmenv's own state tree — breaks that sharing
-    // with an EACCES surfaced only via `tracing::debug!`. Only the *default*
-    // (state_dir-rooted) cache dir gets hardened; an explicit override keeps
-    // whatever permissions its owner already gave it.
-    #[cfg(unix)]
-    #[test]
-    fn trigger_codebase_memory_index_leaves_user_index_path_permissions_alone() {
-        use std::os::unix::fs::PermissionsExt;
-        let state_dir = tempfile::tempdir().unwrap();
-        let index_dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(index_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let cm = crate::config::CodebaseMemory {
-            allowed_roots: vec![],
-            mem_budget_mb: None,
-            when: vec!["proj".to_string()],
-            index_path: Some(index_dir.path().to_str().unwrap().to_string()),
-            mcp_permissions: None,
-        };
-
-        trigger_codebase_memory_index(std::path::Path::new("/repos/proj"), &cm, state_dir.path());
-
-        let mode = std::fs::metadata(index_dir.path())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o755,
-            "a user-configured index_path must keep its prior permissions, got {mode:o}"
-        );
     }
 
     // PRELOADED_CONFIG is a process-global cache; these two tests populate and
@@ -5468,7 +4936,12 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
+            let cmd = index_command(
+                std::path::Path::new("codebase-memory-mcp"),
+                &project_root,
+                cm.index_path.as_deref(),
+                cm.mem_budget_mb,
+            );
             let args: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
@@ -5493,7 +4966,12 @@ mod tests {
                 mcp_permissions: None,
             };
             let project_root = std::path::PathBuf::from(&path_str);
-            let cmd = index_command(&project_root, cm.index_path.as_deref(), cm.mem_budget_mb);
+            let cmd = index_command(
+                std::path::Path::new("codebase-memory-mcp"),
+                &project_root,
+                cm.index_path.as_deref(),
+                cm.mem_budget_mb,
+            );
             let envs: std::collections::BTreeMap<String, String> = cmd
                 .get_envs()
                 .filter_map(|(k, v)| {
@@ -6265,10 +5743,10 @@ mod tests {
 
     fn memory_settings(default_type: Option<llmenv_config::MemoryType>) -> MemoryHookSettings {
         MemoryHookSettings {
-            wakeup_max_tokens: None,
             adaptive_recall: true,
             default_type,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         }
     }
 
@@ -6320,174 +5798,6 @@ mod tests {
         assert!(
             out.contains("episodic"),
             "existing marker must survive: {out}"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_extracts_url_and_summary() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "# Hello\n\nThis is fetched content",
-        });
-        let args = web_fetch_store_args(&payload).expect("should detect WebFetch");
-        assert_eq!(args["topic"], "web-fetch");
-        assert_eq!(args["importance"], "low");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("https://example.com"), "url in content");
-        assert!(content.contains("WebFetch"), "tool name in content");
-        assert!(
-            content.contains("Fetched at (epoch)"),
-            "timestamp in content"
-        );
-        assert!(content.contains("Hello"), "content preview in content");
-    }
-
-    #[test]
-    fn web_fetch_request_id_is_stable_per_tool_call_and_keyed_by_session() {
-        let payload = |tool_use_id: &str, url: &str| {
-            json!({
-                "session_id": "sess-1", "tool_use_id": tool_use_id, "tool_name": "WebFetch",
-                "tool_input": {"url": url}, "tool_response": "body",
-            })
-        };
-        let a = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
-        let again = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
-        assert_eq!(
-            a[detached_store::REQUEST_ID_FIELD],
-            again[detached_store::REQUEST_ID_FIELD]
-        );
-        assert_eq!(a[detached_store::REQUEST_KEY_FIELD], "sess-1");
-        let other_call = web_fetch_store_args(&payload("tu2", "https://a")).expect("args");
-        assert_ne!(
-            a[detached_store::REQUEST_ID_FIELD],
-            other_call[detached_store::REQUEST_ID_FIELD]
-        );
-        let other_url = web_fetch_store_args(&payload("tu1", "https://b")).expect("args");
-        assert_ne!(
-            a[detached_store::REQUEST_ID_FIELD],
-            other_url[detached_store::REQUEST_ID_FIELD]
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_supports_web_search() {
-        let payload = json!({
-            "tool_name": "WebSearch",
-            "tool_input": {"query": "rust programming"},
-            "tool_response": "Search results here",
-        });
-        let args = web_fetch_store_args(&payload).expect("should detect WebSearch");
-        assert_eq!(args["topic"], "web-fetch");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("WebSearch"));
-        assert!(content.contains("Search results"));
-        assert!(content.contains("Query: rust programming"));
-        assert!(content.contains("Tool: WebSearch"));
-    }
-
-    #[test]
-    fn web_fetch_store_args_ignores_non_web_fetch_tools() {
-        let payload = json!({
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "tool_response": "result",
-        });
-        assert!(
-            web_fetch_store_args(&payload).is_none(),
-            "non-WebFetch tool should return None"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_missing_url_or_tool_input() {
-        // Missing url key within tool_input.
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {},
-            "tool_response": "content",
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle missing url");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("unknown"), "should fall back to 'unknown'");
-
-        // Missing entire tool_input key — same serde_json Null path.
-        let payload2 = json!({
-            "tool_name": "WebFetch",
-            "tool_response": "content",
-        });
-        let args2 = web_fetch_store_args(&payload2).expect("should handle missing tool_input");
-        let content2 = args2["content"].as_str().unwrap();
-        assert!(
-            content2.contains("unknown"),
-            "should fall back to 'unknown'"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_empty_response() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "",
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle empty response");
-        let content = args["content"].as_str().unwrap();
-        assert!(
-            content.contains("Content preview:\n"),
-            "empty content after preview header"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_truncates_long_content() {
-        let long = "x".repeat(2000);
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": long,
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle long content");
-        let content = args["content"].as_str().unwrap();
-        let preview = content.split("Content preview:\n").nth(1).unwrap_or("");
-        assert!(
-            preview.ends_with("... (truncated)"),
-            "truncation indicator should be present, got: {preview:?}"
-        );
-        let truncated = preview.strip_suffix("... (truncated)").unwrap_or(preview);
-        assert!(
-            truncated.len() <= 1000,
-            "truncated content should be at most 1000 chars, got {}",
-            truncated.len()
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_returns_none_for_null_payload() {
-        assert!(web_fetch_store_args(&serde_json::Value::Null).is_none());
-    }
-
-    #[test]
-    fn web_fetch_store_args_returns_none_for_missing_tool_name() {
-        let payload = json!({
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "content",
-        });
-        assert!(web_fetch_store_args(&payload).is_none());
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_object_tool_response() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": {"content": [{"type": "text", "text": "hello world"}]},
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle object response");
-        let content = args["content"].as_str().unwrap();
-        assert!(
-            content.contains("hello world"),
-            "extracted text from object response"
         );
     }
 
@@ -7102,11 +6412,10 @@ mod adaptive_routing_tests {
         run_event_memory(MemoryCall {
             event,
             client: &client,
-            settings: Some(MemoryHookSettings {
-                wakeup_max_tokens: None,
+            settings: Some(&MemoryHookSettings {
                 adaptive_recall,
-                default_type: None,
-                default_importance: None,
+                global_topics: vec![],
+                ..MemoryHookSettings::default()
             }),
             session_id: Some("s1"),
             state_dir: Some(state_dir.path().to_path_buf()),
@@ -7180,26 +6489,37 @@ mod adaptive_routing_tests {
         let cwd = repo.path().to_str().unwrap();
         let payload = json!({"cwd": cwd});
         let adaptive = Some(MemoryHookSettings {
-            wakeup_max_tokens: None,
             adaptive_recall: true,
-            default_type: None,
-            default_importance: None,
+            global_topics: vec![],
+            ..MemoryHookSettings::default()
         });
-        let start = wake_args(HookEvent::SessionStart, adaptive, &payload, "/", Some("s1"))
-            .ok()
-            .and_then(|w| w.project);
+        let start = wake_args(
+            HookEvent::SessionStart,
+            adaptive.as_ref(),
+            &payload,
+            "/",
+            Some("s1"),
+        )
+        .ok()
+        .and_then(|w| w.project);
         assert_eq!(start.as_deref(), Some("wake-repo"));
         // #2253: the stateless TurnStart recall is scoped to the session project.
         let stateless = wake_args(HookEvent::TurnStart, None, &payload, "/", Some("s1"))
             .ok()
             .and_then(|w| w.project);
         assert_eq!(stateless.as_deref(), Some("wake-repo"));
-        let adaptive_turn = wake_args(HookEvent::TurnStart, adaptive, &payload, "/", Some("s1"))
-            .ok()
-            .and_then(|w| w.project);
+        let adaptive_turn = wake_args(
+            HookEvent::TurnStart,
+            adaptive.as_ref(),
+            &payload,
+            "/",
+            Some("s1"),
+        )
+        .ok()
+        .and_then(|w| w.project);
         assert_eq!(adaptive_turn, None, "the ledger holds the project");
         // Adaptive is on, but no session id means the stateless path runs. It must still scope.
-        let no_session = wake_args(HookEvent::TurnStart, adaptive, &payload, "/", None)
+        let no_session = wake_args(HookEvent::TurnStart, adaptive.as_ref(), &payload, "/", None)
             .ok()
             .and_then(|w| w.project);
         assert_eq!(
