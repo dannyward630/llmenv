@@ -1,4 +1,8 @@
 pub(crate) mod agents_md;
+mod bundle_file;
+#[cfg(test)]
+use bundle_file::BUNDLE_YAML_KNOWN_KEYS;
+pub(crate) use bundle_file::read_bundle_yaml;
 pub mod capabilities;
 pub mod rules;
 
@@ -90,10 +94,10 @@ pub fn merge(
 
     for b in bundles {
         let am = b.path.join("AGENTS.md");
-        match std::fs::read_to_string(&am) {
-            Ok(content) => agents_parts.push((b.name.clone(), content)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        let content = bundle_file::read_bundle_text(&am)
+            .map_err(|e| anyhow::anyhow!("bundle '{}': reading {}: {e}", b.name, am.display()))?;
+        if let Some(content) = content {
+            agents_parts.push((b.name.clone(), content));
         }
         for sub in COPIED_SUBDIRS {
             let dir = b.path.join(sub);
@@ -227,177 +231,14 @@ pub(crate) fn merge_signature(
     for b in sorted {
         update_len_prefixed(&mut h, b.name.as_bytes());
         h.update([b.precedence]);
-        let bytes = match std::fs::read(b.path.join("bundle.yaml")) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e.into()),
-        };
-        update_len_prefixed(&mut h, &bytes);
+        let path = b.path.join("bundle.yaml");
+        let text = bundle_file::read_bundle_text(&path)
+            .map_err(|e| anyhow::anyhow!("bundle '{}': reading {}: {e}", b.name, path.display()))?
+            .unwrap_or_default();
+        update_len_prefixed(&mut h, text.as_bytes());
     }
 
     Ok(hex::encode(h.finalize()))
-}
-
-/// Keys that a `bundle.yaml` fragment is allowed to declare. Any other top-level
-/// key is rejected with a hard error rather than silently dropped.
-const BUNDLE_YAML_KNOWN_KEYS: &[&str] = &[
-    "permissions",
-    "hooks",
-    "plugins",
-    "mcp",
-    "lsp",
-    "skills",
-    "output_styles",
-    "env",
-    "auto_memory_enabled",
-    "effort_level",
-    "model_effort",
-    "advisor_model",
-    // Parsed so validation can name the replacement (#2409); never merged.
-    "advisor_size",
-    "native_permissions",
-    "native_hooks",
-    "native_plugins",
-    "native_mcp",
-    "native_model_providers",
-    "native_default_models",
-    "native",
-    "features",
-    "host",
-    // Found during #1031: these two were missing despite Capabilities' own doc
-    // comments documenting bundle-level support ("contributed by this
-    // capability source (bundle or top-level)") — any bundle.yaml declaring
-    // either was hard-rejected as an unknown key, with no test ever
-    // exercising the documented claim.
-    "model_providers",
-    "default_models",
-];
-
-/// Read an optional `bundle.yaml` capability fragment from a bundle directory.
-/// Returns `None` when the file is absent — bundles carry capabilities only if
-/// they choose to.
-///
-/// `pub(crate)`: also called by `hook_run`'s memory diagnostics, which need one
-/// suppressed bundle's declarations without merging it into the manifest.
-///
-/// # Errors
-/// An unreadable file, invalid YAML, or an unknown top-level key.
-pub(crate) fn read_bundle_yaml(
-    bundle_root: &Path,
-    name: &str,
-) -> anyhow::Result<Option<Capabilities>> {
-    let path = bundle_root.join("bundle.yaml");
-    let s = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "bundle '{name}': reading {}: {e}",
-                path.display()
-            ));
-        }
-    };
-    let raw: serde_yaml::Value = serde_yaml::from_str(&s)
-        .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
-    if let Some(mapping) = raw.as_mapping() {
-        for key in mapping.keys() {
-            if let Some(k) = key.as_str()
-                && !BUNDLE_YAML_KNOWN_KEYS.contains(&k)
-            {
-                anyhow::bail!(
-                    "bundle '{name}': unknown key '{k}' in bundle.yaml — \
-                     known keys: {}",
-                    BUNDLE_YAML_KNOWN_KEYS.join(", ")
-                );
-            }
-        }
-    }
-    let mut caps: Capabilities = serde_yaml::from_value(raw)
-        .map_err(|e| anyhow::anyhow!("bundle '{name}': parsing {}: {e}", path.display()))?;
-
-    // Track which bundle each hook came from, so the adapter can resolve relative paths later.
-    // We don't resolve paths here because duplicate hooks (e.g., "hooks/guard.sh" from two bundles)
-    // must dedup correctly before being adapted into settings.json.
-    for hook in &mut caps.hooks {
-        hook.bundle_origin = Some(bundle_root.to_path_buf());
-    }
-
-    let context = format!("bundle '{name}'");
-    for key in caps.env.keys() {
-        crate::config::validate_capabilities_env_key(&context, key)?;
-    }
-    llmenv_config::validate_effort(&context, &caps)?;
-    llmenv_config::validate_advisor(&context, &caps)?;
-    let permission_rules = caps
-        .permissions
-        .allow
-        .iter()
-        .chain(caps.permissions.ask.iter())
-        .chain(caps.permissions.deny.iter());
-    for rule in permission_rules {
-        crate::config::validate_permission_rule(&context, rule)?;
-    }
-    for (engine, nr) in &caps.native_permissions {
-        let ctx = format!("bundle '{name}': native_permissions['{engine}']");
-        for s in nr.allow.iter().chain(nr.ask.iter()).chain(nr.deny.iter()) {
-            crate::config::validate_permission_string(&ctx, s)?;
-        }
-    }
-
-    // Validate bundle-contributed memory entries with the same checks that
-    // Config::validate() applies to top-level features.memory entries.
-    if let Some(features) = &caps.features {
-        for mem in &features.memory {
-            if mem.when.is_empty() {
-                anyhow::bail!(
-                    "{context}: features.memory entry for '{}' has no 'when' tags — every memory entry must declare at least one activation tag",
-                    mem.server_host
-                );
-            }
-            if mem.listen_host.parse::<std::net::IpAddr>().is_err() {
-                anyhow::bail!(
-                    "{context}: features.memory entry for '{}': listen_host '{}' is not a valid \
-                     IP address literal (hostnames not supported)",
-                    mem.server_host,
-                    mem.listen_host
-                );
-            }
-            if let Some(n) = mem.wakeup_max_tokens
-                && !crate::config::WAKEUP_MAX_TOKENS_RANGE.contains(&n)
-            {
-                anyhow::bail!(
-                    "{context}: features.memory entry for '{}': wakeup_max_tokens ({n}) must be \
-                     between {} and {} (icm's own MCP handler clamps to this range; llmenv \
-                     fails fast instead of silently truncating)",
-                    mem.server_host,
-                    crate::config::WAKEUP_MAX_TOKENS_RANGE.start(),
-                    crate::config::WAKEUP_MAX_TOKENS_RANGE.end()
-                );
-            }
-        }
-        for th in &features.throttle {
-            if th.when.is_empty() {
-                anyhow::bail!(
-                    "{context}: features.throttle entry for '{}' has no 'when' tags — \
-                     every throttle entry must declare at least one activation tag",
-                    th.backend
-                );
-            }
-            if th.backend.is_empty() {
-                anyhow::bail!("{context}: features.throttle entry has an empty 'backend' field");
-            }
-        }
-        for cm in &features.codebase_memory {
-            if cm.when.is_empty() {
-                anyhow::bail!(
-                    "{context}: features.codebase_memory entry has no 'when' tags — \
-                     every codebase_memory entry must declare at least one activation tag"
-                );
-            }
-        }
-    }
-
-    Ok(Some(caps))
 }
 
 /// Walk `dir` collecting regular files into `out`, keyed by their path
@@ -462,6 +303,38 @@ mod tests {
             manifest.rules[0].rel,
             std::path::PathBuf::from("rules/style.md")
         );
+    }
+
+    #[test]
+    fn a_fifo_in_place_of_a_bundle_file_fails_the_merge_and_names_it() {
+        for file in ["AGENTS.md", "bundle.yaml"] {
+            let tmp = tempdir().unwrap();
+            let bundle_dir = tmp.path().join("b");
+            std::fs::create_dir_all(&bundle_dir).unwrap();
+            let fifo = bundle_dir.join(file);
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let err = if file == "AGENTS.md" {
+                let bundle = BundleRef {
+                    name: "b".into(),
+                    path: bundle_dir,
+                    precedence: 1,
+                };
+                merge(&Capabilities::default(), &BTreeMap::new(), &[bundle]).unwrap_err()
+            } else {
+                read_bundle_yaml(&bundle_dir, "b").unwrap_err()
+            };
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(file) && text.contains("not a regular file"),
+                "{text}"
+            );
+        }
     }
 
     #[test]
