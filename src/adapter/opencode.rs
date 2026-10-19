@@ -876,20 +876,11 @@ impl AgentAdapter for OpencodeAdapter {
             .mcps
             .iter()
             .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
-        // Same gate #980 gave Claude Code: a user who wants the tracker but
-        // still wants opencode's native todo list keeps `block_engine_task_tools`
-        // off and the redirect isn't registered.
-        let redirects_todowrite = manifest
-            .capabilities
-            .features
-            .as_ref()
-            .and_then(|f| f.task_tracker.as_ref())
-            .is_some_and(|t| t.enabled && t.block_engine_task_tools);
         let mcp_servers: Vec<&str> = manifest.mcps.iter().map(|m| m.name.as_str()).collect();
         owned.extend(hook_bridge::write(
             out,
             &all_hooks,
-            guards_index_repository || redirects_todowrite,
+            guards_index_repository,
             &mcp_servers,
         )?);
 

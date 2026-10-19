@@ -22,8 +22,8 @@ const CONFIG_GUARD_MATCHER: &str = "Write|Edit|MultiEdit";
 /// Write the plugin and its hook table into `out/plugin`, and return the owned paths.
 ///
 /// `needs_pre_tool_hook` adds `hook-run pre_tool_use` for every tool call. It serves the
-/// `index_repository` name guard (#1331) and the task redirect (#1304), and its per-call cost
-/// is why it is not always registered.
+/// `index_repository` name guard (#1331), and its per-call cost is why it is not always
+/// registered. opencode 2.x has no todo tool, so the tracker has nothing to redirect there.
 pub(super) fn write(
     out: &Path,
     hooks: &[crate::config::Hook],

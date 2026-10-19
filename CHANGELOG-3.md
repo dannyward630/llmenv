@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `llmenv prune` and `llmenv doctor --gc`. Use `llmenv clean`. `prune` now runs all of `clean`; `doctor --gc` keeps its own sweeps for now. Both print a deprecation line. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#deprecated-commands) (#2917) [feat:cli]
 
+### Removed
+
+- The task tracker no longer redirects opencode's `todowrite` tool: opencode 2.x has no todo tool, and llmenv supports opencode 2.x only (#2846) [fix:hook]
+
 ### Fixed
 
 - opencode 2.x loads the llmenv plugin again: 2.0 refused the 1.x-style plugin, so no llmenv hook ran on opencode. The new plugin runs a hook only for the tools its matcher names, sends the Claude Code tool names, argument keys, and session id, blocks on exit code 2 or a `deny` decision, and shows the error of a hook that cannot run. llmenv supports opencode 2.x only, and `llmenv doctor` reports an older opencode as unsupported. See [engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#2840, #2841) [fix:adapter]

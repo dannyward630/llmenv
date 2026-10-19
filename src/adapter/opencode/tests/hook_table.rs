@@ -108,32 +108,3 @@ fn materialize_manifest_hook_mcp_tool_kind_skipped() {
     let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
     assert!(!shim_src.contains("some_tool"));
 }
-
-#[test]
-fn todowrite_redirect_follows_the_task_tracker_gate() {
-    let tracker = |enabled: bool, block: bool| {
-        let mut m = crate::merge::MergedManifest::default();
-        m.capabilities.features = Some(crate::config::Features {
-            task_tracker: Some(crate::config::TaskTracker {
-                enabled,
-                block_engine_task_tools: block,
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-        m
-    };
-    let registered = |m: &crate::merge::MergedManifest| {
-        let tmp = tempfile::tempdir().unwrap();
-        OpencodeAdapter.materialize(m, tmp.path()).unwrap();
-        std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json"))
-            .unwrap()
-            .contains("hook-run pre_tool_use")
-    };
-    assert!(registered(&tracker(true, true)), "tracker on, redirect on");
-    assert!(
-        !registered(&tracker(true, false)),
-        "block_engine_task_tools off must leave the native todo list alone"
-    );
-    assert!(!registered(&tracker(false, true)), "tracker off");
-}

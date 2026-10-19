@@ -747,21 +747,8 @@ start/done/delete. The native tool is suppressed and the agent is told the
 agent is told the `llmenv task` id to use for follow-up; the redirect is off
 when the tracker is disabled. (#985)
 
-opencode's built-in todo list is redirected the same way (added in v3.11.0).
-Its one tool, `todowrite`, replaces the whole list on every call, so llmenv
-reconciles rather than applying a single operation: todos are matched to tracked
-tasks **by title** (opencode's todo ids are per-session and mean nothing to the
-tracker), a title that isn't tracked yet is added, `in_progress` starts a task,
-and `completed` finishes it. Resending an unchanged list is a no-op, which
-matters because opencode resends everything on every edit.
-
-A tracked task that disappears from the array is **left open**. opencode sends
-no tombstone, so "finished", "abandoned", and "the model rewrote the list and
-forgot one" are indistinguishable — closing on that signal would silently lose
-work. The reply says how many tasks were dropped so you can close them with
-`llmenv task done <id>` if they really are finished. opencode has no `todoread`
-tool (reading happens through session state and the UI, not a tool call), so
-there is nothing to intercept on the read side. (#1304)
+opencode 2.x has no todo tool, so there is nothing to redirect on opencode.
+(Changed in v3.13.0. From v3.11.0, llmenv redirected the opencode 1.x `todowrite` tool, #1304.)
 
 Set `features.task_tracker.block_engine_task_tools: false` (added in v3.10.0,
 default `true`) to keep the CLAUDE.md fragment and reminders while letting
