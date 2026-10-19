@@ -15,9 +15,5 @@ pub(crate) fn tidy_reason(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if one_line.chars().count() <= MAX_REASON_CHARS {
-        return one_line;
-    }
-    let kept: String = one_line.chars().take(MAX_REASON_CHARS - 1).collect();
-    format!("{kept}…")
+    crate::util::truncate_ellipsis(&one_line, MAX_REASON_CHARS)
 }

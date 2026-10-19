@@ -678,32 +678,12 @@ const MAX_TEXT_FILE_BYTES: u64 = 64 * 1024;
 
 /// Read a text file named by `flag`. It refuses anything but a regular file, because a device
 /// such as `/dev/zero` never ends and a FIFO blocks on open. It refuses a file over
-/// [`MAX_TEXT_FILE_BYTES`].
+/// [`MAX_TEXT_FILE_BYTES`]. The open does not block, so a FIFO swapped in after a check cannot
+/// hang the read.
 fn read_text_file(path: &std::path::Path, flag: &str) -> anyhow::Result<String> {
-    use anyhow::Context as _;
-    use std::io::Read as _;
-    let describe = || format!("cannot read {flag} {}", path.display());
-    let not_regular = || anyhow::anyhow!("{flag} {} is not a regular file", path.display());
-    // Check before `open`: opening a FIFO with no writer blocks.
-    anyhow::ensure!(
-        std::fs::metadata(path).with_context(describe)?.is_file(),
-        not_regular()
-    );
-    let file = std::fs::File::open(path).with_context(describe)?;
-    // Check again on the open handle, in case the path changed after the first check.
-    anyhow::ensure!(
-        file.metadata().with_context(describe)?.is_file(),
-        not_regular()
-    );
-    let mut text = String::new();
-    file.take(MAX_TEXT_FILE_BYTES + 1)
-        .read_to_string(&mut text)
-        .with_context(describe)?;
-    anyhow::ensure!(
-        text.len() as u64 <= MAX_TEXT_FILE_BYTES,
-        "{flag} {} is larger than {MAX_TEXT_FILE_BYTES} bytes",
-        path.display()
-    );
+    let text = llmenv_paths::read_text_bounded(path, MAX_TEXT_FILE_BYTES)
+        .and_then(|text| text.ok_or_else(|| std::io::ErrorKind::NotFound.into()))
+        .map_err(|e| anyhow::anyhow!("cannot read {flag} {}: {e}", path.display()))?;
     Ok(text.trim_end().to_string())
 }
 
@@ -1049,10 +1029,6 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
     Ok(remote)
 }
 
-fn shell_escape(s: &str) -> String {
-    crate::util::single_quote(s)
-}
-
 /// Reject any var in `vars` whose name isn't a valid shell identifier.
 /// Applied to adapter-returned env vars before they propagate, so the
 /// `export NAME=...` contract holds regardless of which emission path runs.
@@ -1091,7 +1067,7 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
 fn validate_var_value(value: &str) -> anyhow::Result<()> {
     // Only NUL is rejected: it can't survive in a C-string env var and would
     // truncate the export. Newlines/CR are safe because every emission path
-    // single-quotes the value (shell_escape), and values like
+    // single-quotes the value (`util::single_quote`), and values like
     // LLMENV_ICM_CONTEXT are legitimately multiline. (#469)
     if value.contains('\0') {
         anyhow::bail!("variable value contains forbidden NUL byte");
@@ -1615,14 +1591,14 @@ fn run_export(
             } else {
                 println!("# source: adapter (bundles: {bundle_list})");
             }
-            println!("export {}={}", key, shell_escape(&value));
+            println!("export {}={}", key, crate::util::single_quote(&value));
         }
     } else {
         for (key, value) in vars {
             validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
             validate_var_value(&value)
                 .with_context(|| format!("variable '{key}': invalid value"))?;
-            println!("export {}={}", key, shell_escape(&value));
+            println!("export {}={}", key, crate::util::single_quote(&value));
         }
     }
 
@@ -6275,14 +6251,14 @@ mod tests {
 
     #[test]
     fn shell_escape_protects_metacharacters() {
-        assert_eq!(shell_escape("normal"), "'normal'");
-        assert_eq!(shell_escape("with'quote"), "'with'\\''quote'");
-        assert_eq!(shell_escape("$var"), "'$var'");
-        assert_eq!(shell_escape("$(cmd)"), "'$(cmd)'");
-        assert_eq!(shell_escape("`cmd`"), "'`cmd`'");
+        assert_eq!(crate::util::single_quote("normal"), "'normal'");
+        assert_eq!(crate::util::single_quote("with'quote"), "'with'\\''quote'");
+        assert_eq!(crate::util::single_quote("$var"), "'$var'");
+        assert_eq!(crate::util::single_quote("$(cmd)"), "'$(cmd)'");
+        assert_eq!(crate::util::single_quote("`cmd`"), "'`cmd`'");
         // Newlines/CR stay inside the single-quoted string — inert at shell source time.
-        assert_eq!(shell_escape("line1\nline2"), "'line1\nline2'");
-        assert_eq!(shell_escape("line1\rline2"), "'line1\rline2'");
+        assert_eq!(crate::util::single_quote("line1\nline2"), "'line1\nline2'");
+        assert_eq!(crate::util::single_quote("line1\rline2"), "'line1\rline2'");
     }
 
     #[test]

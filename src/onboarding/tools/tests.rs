@@ -136,6 +136,14 @@ fn no_install_command_pipes_a_download_into_a_shell() {
                 .iter()
                 .any(|pipe| command.contains(pipe));
             assert!(!piped, "{}: {command}", tool.name);
+            // A downloaded script must not run in the same command: a pager in between cannot
+            // stop it, because the pager exits 0 on quit.
+            if command.contains("curl ") {
+                let runs = ["&& sh ", "&& bash ", "; sh ", "; bash "]
+                    .iter()
+                    .any(|run| command.contains(run));
+                assert!(!runs, "{}: {command}", tool.name);
+            }
         }
     }
 }

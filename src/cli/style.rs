@@ -151,23 +151,7 @@ pub fn blocked_annotation(refs: &[String], use_color: bool) -> String {
     paint(&body, AnsiColor::Red, use_color)
 }
 
-/// Truncate `s` to at most `max_len` **characters** (not bytes), appending
-/// `…` (U+2026, itself counted within `max_len`) when truncation occurs.
-/// UTF-8-boundary-safe: always truncates on a `char` boundary since it
-/// iterates `chars()` rather than slicing bytes.
-#[must_use]
-pub fn truncate_ellipsis(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        return s.to_string();
-    }
-    if max_len == 0 {
-        return String::new();
-    }
-    let keep = max_len.saturating_sub(1);
-    let mut out: String = s.chars().take(keep).collect();
-    out.push('…');
-    out
-}
+pub(crate) use crate::util::truncate_ellipsis;
 
 /// Parse a space-separated style token string (`"bold cyan"`, `"#ff00aa"`,
 /// `"color-208"`) into ANSI escape codes wrapping `s`. Unknown tokens are

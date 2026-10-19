@@ -20,6 +20,9 @@ const MAX_ATTEMPTS: u32 = 3;
 const PRUNE_DAYS: u64 = 7;
 /// Above this, a payload is not checkpointed. The job still runs, as before.
 const MAX_INPUT_BYTES: usize = 64 * 1024;
+/// The largest checkpoint file that a load reads: the input cap plus room for the other fields.
+/// A larger file is not a checkpoint that llmenv wrote.
+const MAX_CHECKPOINT_BYTES: u64 = 2 * MAX_INPUT_BYTES as u64;
 /// Seconds added to a job's longest timeout before its checkpoint counts as stale.
 const DEADLINE_MARGIN_SECS: u64 = 60;
 /// Jobs one `SessionStart` runs again. A long outage leaves one checkpoint per event, and an
@@ -169,7 +172,8 @@ fn save(path: &Path, checkpoint: &Checkpoint) -> anyhow::Result<()> {
 /// # Errors
 /// The file cannot be read or is not a checkpoint.
 pub(crate) fn load(path: &Path) -> anyhow::Result<Checkpoint> {
-    let text = std::fs::read_to_string(path)
+    let text = llmenv_paths::read_text_bounded(path, MAX_CHECKPOINT_BYTES)
+        .and_then(|text| text.ok_or_else(|| std::io::ErrorKind::NotFound.into()))
         .with_context(|| format!("reading checkpoint {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing checkpoint {}", path.display()))
 }

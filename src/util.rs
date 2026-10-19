@@ -90,20 +90,53 @@ pub(crate) fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
+/// Truncate `s` to at most `max_len` **characters** (not bytes), appending
+/// `…` (U+2026, itself counted within `max_len`) when truncation occurs.
+/// UTF-8-boundary-safe: always truncates on a `char` boundary since it
+/// iterates `chars()` rather than slicing bytes.
+#[must_use]
+pub(crate) fn truncate_ellipsis(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    if max_len == 0 {
+        return String::new();
+    }
+    let keep = max_len.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
 /// Whether `expanded_path` lies within `cache_root`. Components are compared, not text, so
-/// `/cache2` is not within `/cache`. When both paths exist, links are resolved first, so a link
-/// outside the root that points into it counts as within. Otherwise `..` components are
-/// normalized lexically, so `/cache/llmenv/../../../etc/passwd` cannot pass for a path that does
-/// not exist yet.
+/// `/cache2` is not within `/cache`. `..` components are normalized lexically, so
+/// `/cache/llmenv/../../../etc/passwd` cannot pass. Links are resolved in the part of each path
+/// that exists, so a link outside the root that points into it counts as within, and a new file
+/// under a link that leaves the root does not.
 #[must_use]
 pub(crate) fn is_within(cache_root: &std::path::Path, expanded_path: &str) -> bool {
     let path = std::path::Path::new(expanded_path);
-    match (
-        std::fs::canonicalize(path),
-        std::fs::canonicalize(cache_root),
-    ) {
-        (Ok(path), Ok(root)) => path.starts_with(root),
-        _ => normalize_path(path).starts_with(cache_root),
+    resolve_existing(path).starts_with(resolve_existing(cache_root))
+}
+
+/// `path` normalized, with links resolved in its longest prefix that exists. The rest is joined
+/// on as it is, because it does not exist yet.
+fn resolve_existing(path: &std::path::Path) -> std::path::PathBuf {
+    let normalized = normalize_path(path);
+    let mut prefix = normalized.as_path();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(mut resolved) = std::fs::canonicalize(prefix) {
+            resolved.extend(rest.iter().rev());
+            return resolved;
+        }
+        match (prefix.file_name(), prefix.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                prefix = parent;
+            }
+            _ => return normalized,
+        }
     }
 }
 
@@ -187,6 +220,27 @@ fn a_link_into_the_root_counts_as_within() {
     assert!(!is_within(
         &root,
         &dir.path().join("other").display().to_string()
+    ));
+}
+
+#[cfg(all(test, unix))]
+#[test]
+#[expect(clippy::unwrap_used, reason = "test code")]
+fn a_new_file_under_a_link_out_of_the_root_is_not_within() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("cache");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+    let new_file = root.join("escape").join("new.json");
+    assert!(!is_within(&root, &new_file.display().to_string()));
+    let new_inside = root.join("sub").join("new.json");
+    assert!(is_within(&root, &new_inside.display().to_string()));
+    let missing_root = dir.path().join("not-yet");
+    assert!(is_within(
+        &missing_root,
+        &missing_root.join("a").display().to_string()
     ));
 }
 

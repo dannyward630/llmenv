@@ -30,8 +30,8 @@ pub(super) fn run_login(global: bool) -> anyhow::Result<()> {
         // Reject CLAUDE_CONFIG_DIR pointing at an arbitrary directory — that would
         // write auth tokens + a manifest dotfile somewhere unexpected.
         let current_folder = crate::env_var::utf8_var("CLAUDE_CONFIG_DIR")?
-            .map(PathBuf::from)
-            .filter(|p| p.starts_with(&adapter_root));
+            .filter(|p| crate::util::is_within(&adapter_root, p))
+            .map(PathBuf::from);
         if current_folder.is_none() {
             eprintln!(
                 "note: CLAUDE_CONFIG_DIR is not set or not under the llmenv adapter root — \

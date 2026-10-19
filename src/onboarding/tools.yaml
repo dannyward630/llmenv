@@ -34,7 +34,7 @@ tools:
     feature: codebase_memory
     strong_default: true
     install:
-      script: curl -fsSLo cbm-install.sh https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh && less cbm-install.sh && bash cbm-install.sh
+      script: "curl -fsSLo cbm-install.sh https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh && echo 'Read cbm-install.sh, then run: bash cbm-install.sh'"
   - name: ripgrep
     purpose: Fast text search that skips ignored files.
     evidence: Every user.
@@ -85,7 +85,7 @@ tools:
     binaries: [uv]
     install:
       brew: brew install uv
-      script: curl -LsSfo uv-install.sh https://astral.sh/uv/install.sh && less uv-install.sh && sh uv-install.sh
+      script: "curl -LsSfo uv-install.sh https://astral.sh/uv/install.sh && echo 'Read uv-install.sh, then run: sh uv-install.sh'"
   - name: ruff
     purpose: Python lint and format.
     evidence: A Python repository.
