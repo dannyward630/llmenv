@@ -97,6 +97,9 @@ impl Checkpoint {
             attempts: 1,
             session_id: session_id.map(str::to_string),
             cwd: std::env::current_dir()
+                .inspect_err(|e| {
+                    tracing::error!("{} checkpoint has no working directory: {e}", kind.as_str());
+                })
                 .ok()
                 .map(|d| d.display().to_string()),
         }
@@ -245,8 +248,7 @@ pub(crate) fn list(state_dir: &Path) -> Vec<Entry> {
 /// its child may still be running, a kind that is not resumable is skipped, and one that can never
 /// run again is deleted with a notice. At most
 /// [`MAX_RESUMED_PER_START`] jobs start. A lock keeps two sessions that start together from
-/// running the same job twice. If `spawn` fails, the checkpoint goes back to its earlier state, so
-/// a failure to start does not use up an attempt. Old files are pruned first. Returns the number
+/// running the same job twice. A failure to start uses up an attempt. Old files are pruned first. Returns the number
 /// of jobs handed to `spawn`.
 pub(crate) fn resume_pending(
     state_dir: &Path,
@@ -289,39 +291,9 @@ pub(crate) fn resume_pending(
     resumed
 }
 
-/// Why `checkpoint` can never run again, or `None` when it can. A job runs in the working directory
-/// of its first run, so a job whose directory is gone fails on every start and is never pruned,
-/// because each failed start restores its file (#2912). A directory that cannot be read for another
-/// reason is kept, because the cause can be temporary.
-fn unrunnable_reason(checkpoint: &Checkpoint) -> Option<String> {
-    let Some(cwd) = checkpoint.cwd.as_deref() else {
-        return Some("it has no recorded working directory".to_string());
-    };
-    match std::fs::metadata(cwd) {
-        Ok(meta) if meta.is_dir() => None,
-        Ok(_) => Some(format!("its working directory {cwd} is not a directory")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Some(format!("its working directory {cwd} is gone"))
-        }
-        Err(_) => None,
-    }
-}
-
-/// Delete a checkpoint that can never run, and tell the agent once which job it was.
-fn drop_unrunnable(path: &Path, checkpoint: &Checkpoint, reason: &str) {
-    let job = path
-        .file_name()
-        .map_or_else(|| checkpoint.kind.as_str().into(), |n| n.to_string_lossy());
-    match complete(path) {
-        Ok(()) => crate::agent_notice::record_logged(format!(
-            "llmenv: removed the unfinished background job {job}, because {reason}. \
-             The job cannot run again."
-        )),
-        Err(e) => tracing::error!("background job {job} cannot run again ({reason}): {e:#}"),
-    }
-}
-
-/// Save the bumped checkpoint, start the job, and restore the old file when the start fails.
+/// Save the bumped checkpoint and start the job. A failed start keeps the bumped count: a restore
+/// would also reset the age of the file, so a start that always fails would run at every session
+/// start, never reach [`MAX_ATTEMPTS`], and never be pruned (#2912, #2720).
 fn restart(
     path: &Path,
     checkpoint: &Checkpoint,
@@ -336,10 +308,11 @@ fn restart(
         return false;
     }
     if let Err(e) = spawn(&bumped, path) {
-        tracing::error!("background job {} not resumed: {e:#}", path.display());
-        if let Err(e) = save(path, checkpoint) {
-            tracing::error!("{e:#}");
-        }
+        tracing::error!(
+            "background job {} not resumed (attempt {}/{MAX_ATTEMPTS}): {e:#}",
+            path.display(),
+            bumped.attempts
+        );
         return false;
     }
     true
@@ -433,7 +406,9 @@ pub(crate) fn begin(
 }
 
 mod inputs;
+mod unrunnable;
 pub(crate) use inputs::{InputsError, inputs_or_checkpoint};
+use unrunnable::{drop_unrunnable, unrunnable_reason};
 
 /// Delete the checkpoint of a job that finished, or that cannot succeed on a retry. A job that
 /// failed in a way a later run may fix leaves its file. Fail-soft.

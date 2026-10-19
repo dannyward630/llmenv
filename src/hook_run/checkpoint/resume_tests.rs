@@ -45,15 +45,38 @@ fn resume_skips_a_fresh_checkpoint_and_one_at_the_attempt_cap() {
 }
 
 #[test]
-fn a_failed_start_restores_the_checkpoint_so_no_attempt_is_lost() {
+fn a_start_that_always_fails_stops_at_the_attempt_cap() {
     let dir = tempfile::tempdir().unwrap();
     let mut stale = cp(JobKind::IcmStore, 1);
     stale.started_at = 1000;
     let path = write(dir.path(), &stale).unwrap().unwrap();
-    let now = 1000 + JobKind::IcmStore.deadline_secs() + 1;
-    let resumed = resume_pending(dir.path(), now, |_, _| anyhow::bail!("no such directory"));
-    assert_eq!(resumed, 0);
-    assert_eq!(load(&path).unwrap(), stale, "the file is as it was");
+    let step = JobKind::IcmStore.deadline_secs() + 1;
+    let mut starts = 0;
+    for n in 1..=5 {
+        resume_pending(dir.path(), 1000 + step * n, |_, _| {
+            starts += 1;
+            anyhow::bail!("spawn failed")
+        });
+    }
+    assert_eq!(
+        starts,
+        MAX_ATTEMPTS - 1,
+        "each failed start uses an attempt"
+    );
+    assert_eq!(load(&path).unwrap().attempts, MAX_ATTEMPTS);
+}
+
+#[test]
+fn a_working_directory_under_a_file_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("plain-file");
+    std::fs::write(&file, "").unwrap();
+    let path = stale_in(
+        dir.path(),
+        Some(&file.join("project").display().to_string()),
+    );
+    resume_pending(dir.path(), u64::MAX / 2, |_, _| panic!("must not run"));
+    assert!(!path.exists());
 }
 
 #[test]

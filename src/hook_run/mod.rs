@@ -3343,18 +3343,7 @@ fn respawn_job_with_exe(
         })?;
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
-    let exe = match current_exe() {
-        Ok(exe) => exe,
-        Err(e) => {
-            // Returning Ok keeps the bumped attempt count. A restore would retry this job on every
-            // session and never reach MAX_ATTEMPTS (#2720).
-            tracing::error!(
-                "background job {} not resumed, cannot resolve current_exe: {e}",
-                path.display()
-            );
-            return Ok(());
-        }
-    };
+    let exe = current_exe().context("cannot resolve current_exe")?;
     let stdin = cp.inputs.to_string();
     match cp.kind {
         JobKind::IcmStore => spawn_detached(icm_store_command(exe, Some(path)), Some(&stdin), cwd),
@@ -3863,23 +3852,18 @@ mod tests {
     }
 
     #[test]
-    fn a_job_whose_image_cannot_be_resolved_is_logged_and_not_spawned() {
+    fn a_job_whose_image_cannot_be_resolved_is_a_failed_start() {
         let dir = tempfile::tempdir().unwrap();
         let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
         cp.cwd = Some(dir.path().display().to_string());
-        let mut result = None;
-        let logs = crate::test_log_capture::capture_logs(|| {
-            result = Some(respawn_job_with_exe(
-                &cp,
-                std::path::Path::new("/s/x.json"),
-                || Err(std::io::Error::other("no image")),
-            ));
-        });
+        let err = respawn_job_with_exe(&cp, std::path::Path::new("/s/x.json"), || {
+            Err(std::io::Error::other("no image"))
+        })
+        .expect_err("a failed lookup is a failed start, which uses an attempt");
         assert!(
-            result.is_some_and(|r| r.is_ok()),
-            "a failed lookup settles as Ok"
+            format!("{err:#}").contains("cannot resolve current_exe"),
+            "{err:#}"
         );
-        assert!(logs.contains("cannot resolve current_exe"), "{logs}");
     }
 
     #[test]
