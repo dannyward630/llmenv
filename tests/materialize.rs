@@ -348,3 +348,45 @@ fn gc_dry_run_lists_the_same_entries_and_removes_none() {
         "the dry run must list exactly what a real run removes"
     );
 }
+
+// #2917: over generated cache trees, a gc dry run lists exactly what a real run removes.
+#[test]
+fn gc_dry_run_matches_the_real_run() {
+    use proptest::prelude::*;
+    fn listing(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out: Vec<_> = std::fs::read_dir(root)
+            .expect("read root")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        out.sort();
+        out
+    }
+    let entry = (any::<bool>(), any::<bool>());
+    proptest!(ProptestConfig::with_cases(24), |(entries in proptest::collection::vec(entry, 0..8))| {
+        let tmp = tempdir().expect("tempdir");
+        let old_time = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 30);
+        for (i, (is_stage, is_old)) in entries.iter().enumerate() {
+            let suffix = if *is_stage { ".tmp" } else { "" };
+            let dir = tmp.path().join(format!("e{i}{suffix}"));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let marker = dir.join("marker");
+            std::fs::write(&marker, "x").expect("write marker");
+            if *is_old {
+                set_mtime(&marker, old_time);
+                set_mtime(&dir, old_time);
+            }
+        }
+        let week = Duration::from_secs(60 * 60 * 24 * 7);
+        let before = listing(tmp.path());
+
+        let preview = cache::gc(tmp.path(), week, HashingMode::Loose, true).expect("gc preview");
+        prop_assert_eq!(listing(tmp.path()), before);
+        let real = cache::gc(tmp.path(), week, HashingMode::Loose, false).expect("gc");
+
+        let mut listed = preview.removed.clone();
+        listed.sort();
+        let mut removed = real.removed.clone();
+        removed.sort();
+        prop_assert_eq!(listed, removed);
+    });
+}

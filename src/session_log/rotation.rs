@@ -375,6 +375,36 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_lists_exactly_what_a_real_run_removes() {
+        use proptest::prelude::*;
+        proptest!(ProptestConfig::with_cases(24), |(ages in proptest::collection::vec(any::<bool>(), 0..6))| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session-log.jsonl");
+            write_bytes(&path, 3);
+            let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
+            for (i, is_old) in ages.iter().enumerate() {
+                let rotation = rotation_path(&path, u32::try_from(i + 1).unwrap());
+                write_bytes(&rotation, 3);
+                if *is_old {
+                    File::options().write(true).open(&rotation).unwrap().set_modified(old).unwrap();
+                }
+            }
+            let week = Duration::from_secs(7 * 86_400);
+
+            let mut listed = prune_rotations(&path, week, true).unwrap();
+            for (i, _) in ages.iter().enumerate() {
+                prop_assert!(rotation_path(&path, u32::try_from(i + 1).unwrap()).exists());
+            }
+            let mut removed = prune_rotations(&path, week, false).unwrap();
+
+            listed.sort();
+            removed.sort();
+            prop_assert_eq!(listed, removed);
+            prop_assert!(path.exists(), "the active file was removed");
+        });
+    }
+
+    #[test]
     fn the_locked_pass_keeps_a_file_that_a_rotation_made_new_and_skips_a_gone_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-log.jsonl");

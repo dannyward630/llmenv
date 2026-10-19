@@ -107,6 +107,59 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_lists_exactly_what_a_real_run_removes_and_keeps_units_whole() {
+        use proptest::prelude::*;
+        const SUFFIXES: [&str; 4] = [".db", ".db-wal", ".db-shm", ".log"];
+        let file = (
+            0usize..3,
+            0usize..SUFFIXES.len(),
+            any::<bool>(),
+            any::<bool>(),
+        );
+        proptest!(ProptestConfig::with_cases(24), |(files in proptest::collection::vec(file, 0..10))| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut in_use = Vec::new();
+            for (base, suffix, is_old, held) in &files {
+                let path = dir.path().join(format!("repo{base}{}", SUFFIXES[*suffix]));
+                std::fs::write(&path, "x").unwrap();
+                if *is_old {
+                    backdate(&path);
+                }
+                if *held {
+                    in_use.push(path);
+                }
+            }
+            let week = Duration::from_secs(7 * 86_400);
+            let names = |d: &Path| -> Vec<std::ffi::OsString> {
+                let mut v: Vec<_> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name()).collect();
+                v.sort();
+                v
+            };
+            let before = names(dir.path());
+
+            let preview = sweep_legacy_indexes(dir.path(), week, &in_use, true).unwrap();
+            prop_assert_eq!(names(dir.path()), before.clone());
+            let real = sweep_legacy_indexes(dir.path(), week, &in_use, false).unwrap();
+
+            let mut listed = preview.removed.clone();
+            listed.sort();
+            let mut removed = real.removed.clone();
+            removed.sort();
+            prop_assert_eq!(&listed, &removed);
+            // A database goes with all of its files or not at all.
+            for base in 0..3 {
+                let stem = format!("repo{base}.db");
+                let unit: Vec<_> = before
+                    .iter()
+                    .filter(|n| n.to_string_lossy().starts_with(&stem))
+                    .collect();
+                let gone = unit.iter().filter(|n| !dir.path().join(n).exists()).count();
+                prop_assert!(gone == 0 || gone == unit.len(), "unit {} split: {:?}", stem, unit);
+            }
+        });
+    }
+
+    #[test]
     fn a_dry_run_lists_the_old_database_files_and_removes_none() {
         let dir = tempfile::tempdir().unwrap();
         let old_db = dir.path().join("Users-x-repo.db");

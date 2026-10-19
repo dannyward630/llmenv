@@ -207,6 +207,57 @@ mod tests {
         SystemTime::now() - 30 * DAY
     }
 
+    /// Every path under `root`, so a test can tell that a run changed nothing.
+    fn listing(root: &Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+        let mut out = std::collections::BTreeSet::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(listing(&path));
+            }
+            out.insert(path);
+        }
+        out
+    }
+
+    #[test]
+    fn a_dry_run_lists_exactly_what_a_real_run_removes() {
+        use proptest::prelude::*;
+        let entry = (any::<bool>(), any::<bool>(), any::<bool>());
+        proptest!(ProptestConfig::with_cases(24), |(entries in proptest::collection::vec(entry, 0..8))| {
+            let root = tempfile::tempdir().unwrap();
+            let resolved = fs::canonicalize(root.path()).unwrap();
+            let mut in_use = Vec::new();
+            for (i, (is_dir, is_old, held)) in entries.iter().enumerate() {
+                let path = root.path().join(format!("e{i}"));
+                if *is_dir {
+                    fs::create_dir(&path).unwrap();
+                    fs::write(path.join("f"), b"x").unwrap();
+                } else {
+                    fs::write(&path, b"x").unwrap();
+                }
+                if *is_old {
+                    age_tree(&path, old());
+                }
+                if *held {
+                    in_use.push(resolved.join(format!("e{i}")));
+                }
+            }
+            let before = listing(root.path());
+
+            let preview = sweep(root.path(), DAY * 7, &in_use, true).unwrap();
+            prop_assert_eq!(&listing(root.path()), &before);
+            let real = sweep(root.path(), DAY * 7, &in_use, false).unwrap();
+
+            let mut listed = preview.removed.clone();
+            listed.sort();
+            let mut removed = real.removed.clone();
+            removed.sort();
+            prop_assert_eq!(listed, removed);
+            prop_assert!(real.failed.is_empty());
+        });
+    }
+
     #[test]
     fn a_dry_run_lists_the_old_entries_and_removes_none() {
         let root = tempfile::tempdir().unwrap();
