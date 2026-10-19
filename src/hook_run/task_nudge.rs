@@ -24,6 +24,8 @@ use crate::hook_run::shell_split::{
 use crate::task::Tracking;
 
 mod deny;
+mod notices;
+use notices::{needs_state, note_no_state, note_unlocked_skip};
 mod stop;
 pub(crate) use deny::state_dir_deny;
 use deny::{
@@ -193,7 +195,7 @@ pub(crate) fn handle_post_tool_use(
         return waiting_reminder(&tracking);
     }
     let Some(path) = session_id.and_then(|id| state_path(state_dir, id)) else {
-        if tool == "Skill" || MUTATING_TOOLS.contains(&tool) {
+        if needs_state(tool) {
             note_no_state(session_id);
         }
         return String::new();
@@ -231,27 +233,6 @@ pub(crate) fn handle_post_tool_use(
 
 /// Logs and notices that the nudges are off for a call, because the payload has no session id
 /// that can name a state file (#2536).
-fn note_no_state(session_id: Option<&str>) {
-    let cause = match session_id {
-        None => "the hook payload has no session id".to_owned(),
-        Some(id) => format!("the session id {id:?} is not a plain name"),
-    };
-    crate::agent_notice::record_logged(format!(
-        "llmenv skipped the task nudge check: {cause}, so the nudge state has no file. Fix: run \
-         `llmenv doctor` to check the engine's hook payload."
-    ));
-}
-
-/// Logs and notices a nudge state change that was not saved, because the lock was busy or
-/// could not be taken.
-fn note_unlocked_skip(path: &Path) {
-    crate::agent_notice::record_logged(format!(
-        "llmenv: the task nudge state {} was not saved, because its lock is busy or cannot be \
-         taken. A nudge may repeat. Fix: run `llmenv doctor` to check the state directory.",
-        path.display()
-    ));
-}
-
 /// Reset the counters while tasks are tracked.
 fn settle(tracking: &Tracking, state: &mut NudgeState) {
     if matches!(tracking, Tracking::Tracked { .. }) {

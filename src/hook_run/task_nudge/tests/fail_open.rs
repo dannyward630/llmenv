@@ -41,13 +41,13 @@ fn a_nudge_with_no_session_id_is_named_to_the_agent() {
     assert!(notices().contains("session id"), "{}", notices());
 }
 
+/// A read-only call has no nudge to lose, so a missing state gets no notice. The check is on the
+/// decision, because the notice list is shared by every test in one process.
 #[test]
-fn a_read_only_call_with_no_session_id_adds_no_notice() {
-    let dir = TempDir::new().unwrap();
-    let tracker = TaskTracker::default();
-    let read = serde_json::json!({ "tool_name": "Read" });
-    handle_post_tool_use(&tracker, &read, None, dir.path());
-    assert_eq!(crate::agent_notice::current(), None);
+fn a_read_only_call_needs_no_nudge_state() {
+    assert!(!needs_state("Read"));
+    assert!(!needs_state("Bash"));
+    assert!(needs_state("Edit") && needs_state("Write") && needs_state("Skill"));
 }
 
 #[cfg(unix)]
