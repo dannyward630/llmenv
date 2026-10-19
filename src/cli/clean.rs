@@ -12,7 +12,7 @@ use crate::materialize::cache::PruneMode;
 use crate::paths;
 
 /// The line that `llmenv prune` prints before it runs `clean`.
-pub(super) const PRUNE_DEPRECATED: &str = "llmenv prune is deprecated; use llmenv clean";
+const PRUNE_DEPRECATED: &str = "llmenv prune is deprecated; use llmenv clean";
 /// The line that `llmenv doctor --gc` prints before its sweeps.
 pub(super) const DOCTOR_GC_DEPRECATED: &str = "llmenv doctor --gc is deprecated; use llmenv clean";
 
