@@ -258,10 +258,11 @@ materialized inside the llmenv cache directory.
 
 ### Env vars
 
-| Variable               | Points to                                                              | Notes                                                                                          |
-|------------------------|------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
-| `CRUSH_GLOBAL_CONFIG`  | `<cache>/crush/...` (the directory containing `crush.json`)            | Crush joins `crush.json` onto this path itself — it must be a directory, not the file          |
-| `CRUSH_GLOBAL_DATA`    | `<state_dir>/crush`                                                    | A dedicated subdir of the stable llmenv state dir; Crush needs no separate workaround          |
+| Variable                       | Points to                                         | Notes                                                                                                            |
+|--------------------------------|---------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `OPENCODE_CONFIG_DIR`          | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, `service.json`, and the `plugin/` folder from here                  |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | `1`                                               | opencode does not load skills from `~/.claude` or a project `.claude` folder (added in v3.13.0)                  |
+| `TMPDIR`, `TMP`, `TEMP`        | `<state>/tmp`                                     | temp files of opencode and its subprocesses stay in llmenv's state folder, as for Claude Code (added in v3.13.0) |
 
 `CRUSH_GLOBAL_CONFIG` and `CLAUDE_CONFIG_DIR` use separate namespaces and can
 coexist in a single shell session without conflict.
@@ -384,6 +385,7 @@ opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns 
 | `opencode.json` | `$schema` (points at the `opencode.schema.json` sidecar below), `instructions`, `mcp`, `lsp`, `permission` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
 | `opencode.schema.json` | JSON Schema (draft 2020-12) generated from the same typed structs that render `opencode.json`, so it always matches what llmenv actually writes. Root allows `additionalProperties`, so passthrough/native-overlay keys never fail IDE validation. |
 | `AGENTS.md` | the merged rules document opencode loads as project instructions — omitted entirely when that resolves to nothing (added in v3.10.0; earlier versions wrote a 0-byte file) |
+| `service.json` | `{"disabled":true}`, so each opencode client starts a private server with this environment instead of attaching to the shared background server, which can run with another scope's config (added in v3.13.0) |
 | `rules/*.md` | rule files copied verbatim and listed in `instructions` by absolute path, because opencode 2.x resolves a relative entry from the project folder (changed in v3.13.0) |
 | skills (`SKILL.md`) | first-class and plugin-projected skills, in opencode's claude-compatible format |
 | `command/*.md`, `commands/*.md`, `agents/*.md` | plugin commands go to `command/`; bundle commands are translated in place in `commands/`; plugin and bundle agents go to `agents/` and gain `mode: subagent`. A bundle agent replaces a plugin agent of the same name (changed in v3.13.0: agents were in `command/`, so opencode showed them as slash commands) |

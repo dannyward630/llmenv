@@ -20,6 +20,8 @@ mod hook_bridge;
 
 const OPENCODE_JSON_FILE: &str = "opencode.json";
 const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
+/// The background-server settings that opencode reads from its config folder.
+const OPENCODE_SERVICE_FILE: &str = "service.json";
 
 // ── Typed output structs for opencode.json ──
 
@@ -397,17 +399,21 @@ impl AgentAdapter for OpencodeAdapter {
     fn env_vars(
         &self,
         cache_dir: &Path,
-        _state_dir: &Path,
+        state_dir: &Path,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let dir = cache_dir.to_str().ok_or_else(|| {
             anyhow::anyhow!("cache_dir is not valid UTF-8: {}", cache_dir.display())
         })?;
+        let (_, temp_vars) = crate::adapter::temp_dir::temp_dir_vars(state_dir)?;
         // opencode 2.x also loads the skills in `~/.claude` and a project `.claude` folder on
         // every session, outside llmenv's scope rules. This variable turns those roots off (#2843).
         Ok(vec![
             ("OPENCODE_CONFIG_DIR".into(), dir.to_owned()),
             ("OPENCODE_DISABLE_CLAUDE_CODE".into(), "1".into()),
-        ])
+        ]
+        .into_iter()
+        .chain(temp_vars)
+        .collect())
     }
 
     fn materialize(&self, manifest: &MergedManifest, out: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -996,6 +1002,12 @@ impl AgentAdapter for OpencodeAdapter {
         let out_path = out.join(OPENCODE_JSON_FILE);
         crate::paths::write_owner_only(&out_path, &json_bytes)?;
         owned.push(PathBuf::from(OPENCODE_JSON_FILE));
+
+        // opencode 2.x clients attach to one shared background server, which can run with the
+        // config folder of another scope. `disabled` makes each client start a private server
+        // that has this environment, as `--standalone` does (#2845).
+        crate::paths::write_owner_only(&out.join(OPENCODE_SERVICE_FILE), br#"{"disabled":true}"#)?;
+        owned.push(PathBuf::from(OPENCODE_SERVICE_FILE));
 
         // Write JSON Schema sidecar.
         if let Some(schema) = self.config_schema() {
@@ -1643,6 +1655,7 @@ mod tests {
 
     mod agents;
     mod hook_table;
+    mod server;
     use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
     use crate::merge::rules::RuleFile;
@@ -3495,34 +3508,6 @@ mod tests {
         let map: serde_yaml::Mapping =
             serde_yaml::from_str("name: a\ndescription: d\nallowed_tools: [Read]\n").unwrap();
         assert!(dropped_agent_keys(&map).is_empty());
-    }
-
-    #[test]
-    fn env_vars_returns_opencode_config_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vars = OpencodeAdapter.env_vars(tmp.path(), tmp.path()).unwrap();
-        assert!(vars.contains(&(
-            "OPENCODE_CONFIG_DIR".into(),
-            tmp.path().to_string_lossy().into_owned()
-        )));
-    }
-
-    #[test]
-    fn env_vars_turn_off_the_claude_skill_roots() {
-        let tmp = tempfile::tempdir().unwrap();
-        let vars = OpencodeAdapter.env_vars(tmp.path(), tmp.path()).unwrap();
-        assert!(vars.contains(&("OPENCODE_DISABLE_CLAUDE_CODE".into(), "1".into())));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn env_vars_rejects_non_utf8_cache_dir() {
-        use std::os::unix::ffi::OsStringExt;
-        let non_utf8 = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
-        let err = OpencodeAdapter
-            .env_vars(&non_utf8, Path::new("/tmp"))
-            .unwrap_err();
-        assert!(err.to_string().contains("not valid UTF-8"));
     }
 
     #[test]
