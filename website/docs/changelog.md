@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- When llmenv cannot connect to an MCP server or the umans usage API and `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` is set, the error names the variable, because llmenv sends these requests without a proxy. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#memory-backend-memory) (#2884) [feat:mcp]
 - `llmenv setup --scan ROOT...` prints the repositories under the roots as JSON evidence for onboarding: top-level names, workflow names, and a fixed set of manifest keys. It reads no source, runs no repository script, and writes nothing. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---scan) (#2785) [feat:cli]
 - `llmenv setup --tools` prints the tools that onboarding can suggest, with the binary found on `PATH` for each. ICM and codebase-memory-mcp come first. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---tools) (#2791) [feat:cli]
 - `llmenv clean` is the one cleanup command. It removes the stale cache folders that `prune` removed, then runs the age-based sweeps that `doctor --gc` ran, and `--dry-run` lists every item from both. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#clean) (#2917) [feat:cli]
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The `setup-llmenv` skill proposes bundles from a scan of your repositories, each with its evidence, and suggests tools with ICM and codebase-memory-mcp first. It shows the whole plan before it writes. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup) (#2786) [feat:cli]
 - The `llmenv clean` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
 - The codebase-memory-mcp floor is now 0.12.0, and `llmenv doctor` warns below it. The docs say a repo indexed from the CLI is not watched, and that 0.12.0 changes the index format from 1 to 2 (#2853) [fix:mcp]
 - llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]

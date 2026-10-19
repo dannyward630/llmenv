@@ -964,6 +964,11 @@ import (choose which keys to seed from your global `settings.json` into the
 materialized config). Writes a template `config.yaml` and an agent orientation
 guide, then optionally hands off to the AI engine for further configuration.
 
+(changed in v3.13.0) The setup skill that the wizard hands off to asks which folders hold your repositories.
+It runs `setup --scan` on them, and proposes one bundle per language or practice, each with the files that support it.
+It runs `setup --tools` and recommends ICM memory and codebase-memory-mcp first.
+You accept or reject each suggestion, and the skill writes nothing before you approve the plan.
+
 - `--no-launch` skips the AI engine handoff at the end.
 - `--rescan` re-scans existing configs without overwriting files.
 
