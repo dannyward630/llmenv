@@ -19,9 +19,10 @@ fn a_bash_call_without_a_string_command_is_denied_and_named() {
         let payload = serde_json::json!({ "tool_name": "Bash", "tool_input": input });
         let logs = crate::test_log_capture::capture_logs(|| {
             let out = handle_pre_tool_use(&tracker, &payload, Some("s1"), dir.path());
+            // No message argument: CodeQL reads the deny text as derived from the session id.
             assert!(
                 out.starts_with("__DENY__:") && out.contains("tool_input.command"),
-                "{input}: {out}"
+                "a call with a bad command is denied and named"
             );
         });
         assert!(

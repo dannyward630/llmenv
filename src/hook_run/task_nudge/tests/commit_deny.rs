@@ -221,9 +221,10 @@ fn an_unreadable_task_store_denies_a_commit_and_skips_the_nudge() {
     };
     let deny = handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path());
     assert!(deny.starts_with("__DENY__:"));
+    // No message argument: CodeQL reads the deny text as derived from the session id.
     assert!(
         deny.contains("task store cannot be read ("),
-        "names the cause: {deny}"
+        "the deny names the cause"
     );
     let edit = serde_json::json!({ "tool_name": "Edit" });
     assert_eq!(

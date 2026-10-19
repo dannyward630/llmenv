@@ -1109,6 +1109,11 @@ fn session_start_on_the_icm_host(fake_proxy: &str) -> assert_cmd::assert::Assert
     let script = bin.path().join("mcp-proxy");
     fs::write(&script, fake_proxy).unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    // The proxy start gives mcp-proxy the absolute path of `icm` (#2948), so a host with no `icm`
+    // installed needs a stand-in too. The stand-in proxy never runs it.
+    let icm = bin.path().join("icm");
+    fs::write(&icm, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&icm, fs::Permissions::from_mode(0o755)).unwrap();
     let old_path = std::env::var("PATH").unwrap_or_default();
     hook_cmd(dir.path(), &config_path, "session_start")
         .env("PATH", format!("{}:{old_path}", bin.path().display()))
