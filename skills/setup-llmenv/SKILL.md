@@ -150,7 +150,7 @@ A tool that runs an MCP server also has `feature` and `strong_default`.
 1. Show the tools with `strong_default: true` first: ICM memory (`feature: memory`) and codebase-memory-mcp (`feature: codebase_memory`).
    Much of llmenv depends on them, so recommend both, with yes as the default answer.
    Each one still needs the user's own yes, because each one runs an MCP server.
-   Show the server command in full.
+   Show the `features` entry that a yes adds to `config.yaml`, and the binary that the server runs (`binaries`).
    If the user says no, say what stops working.
    Without ICM, the memory hooks have nothing to recall.
    Without codebase-memory-mcp, the code-graph tools have nothing to call.
