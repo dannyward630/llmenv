@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context as _;
+
 use crate::materialize::cache::{GcReport, gc_remove_link, is_expired};
 
 /// The file name endings of a codebase-memory-mcp index database and its SQLite side files.
@@ -34,7 +36,7 @@ fn database_of(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
 /// With `dry_run`, the report lists the same files and nothing is removed (#2917).
 ///
 /// # Errors
-/// `dir` exists but cannot be read.
+/// `dir` exists but cannot be read, or one of its entries cannot be read.
 pub(crate) fn sweep_legacy_indexes(
     dir: &Path,
     older_than: Duration,
@@ -46,7 +48,16 @@ pub(crate) fn sweep_legacy_indexes(
         return Ok(report);
     };
     let mut databases: BTreeMap<Vec<u8>, Vec<PathBuf>> = BTreeMap::new();
-    for entry in entries.filter_map(|entry| crate::paths::readable_entry(dir, "cbm sweep", entry)) {
+    for entry in entries {
+        // An unread entry can be the `-wal` of a database that is still in use, so no unit can be
+        // judged complete. The sweep stops and removes nothing.
+        let entry = entry.with_context(|| {
+            format!(
+                "cannot read an entry of {}, so no index database was removed. Fix: check the \
+                 permissions of the folder",
+                dir.display()
+            )
+        })?;
         if let Some(base) = database_of(&entry.file_name()) {
             databases.entry(base).or_default().push(entry.path());
         }
