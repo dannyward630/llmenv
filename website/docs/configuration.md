@@ -1121,6 +1121,7 @@ blocking.
 The same reset applies to the `read_before_edit` record of `features.slippage` and to the `repeat_detect` counter.
 (changed in v3.13.0) Each subagent has its own cache, apart from the main agent and from other subagents, because it does not see the files that the others read.
 The same split applies to the `read_before_edit` record and the counters of `features.slippage`, to the task-tracker nudge and commit-gate state, and to the `repeat_detect` counter.
+A `/clear` resets the state of the main agent only. The state of a subagent is deleted after 7 days.
 
 ```yaml
 features:
