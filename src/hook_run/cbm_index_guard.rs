@@ -46,14 +46,56 @@ pub(crate) fn handle_roots(
     else {
         return String::new();
     };
-    let active_tags = crate::scope::matcher::Env::detect_for_config(config)
-        .map(|env| crate::scope::evaluate(config, &env).tags)
+    let active = crate::scope::matcher::Env::detect_for_config(config)
+        .map(|env| crate::scope::evaluate(config, &env))
         .inspect_err(|e| {
             tracing::error!("index guard checks every codebase-memory entry: scopes unread: {e:#}");
         })
         .ok();
-    crate::mcp::cbm_roots::guard_decision(repo_path, config, active_tags.as_ref())
+    let entries = match &active {
+        Some(active) => match crate::paths::config_dir()
+            .and_then(|dir| codebase_memory_entries(config, &dir, active))
+        {
+            Ok(entries) => entries,
+            Err(e) => {
+                return format!(
+                    "__DENY__:{repo_path} cannot be checked: {e:#}. Fix that bundle, or ask the \
+                     user to run `llmenv doctor`."
+                );
+            }
+        },
+        None => root_entries(config),
+    };
+    crate::mcp::cbm_roots::guard_decision(repo_path, &entries, active.as_ref().map(|a| &a.tags))
         .map_or_else(String::new, |reason| format!("__DENY__:{reason}"))
+}
+
+/// The `codebase_memory` entries of the root config and of the firing bundles, as export merges
+/// them. The hook config holds the root entries only, and a bundle-only entry must still bound
+/// the roots (#2922).
+fn codebase_memory_entries(
+    config: &crate::config::Config,
+    config_dir: &std::path::Path,
+    active: &crate::scope::ActiveScopes,
+) -> anyhow::Result<Vec<crate::config::CodebaseMemory>> {
+    let mut entries = root_entries(config);
+    let firing = crate::cli::firing_bundles(&config.bundle, active, None);
+    for b in crate::cli::build_bundle_refs(config_dir, active, &firing) {
+        let caps = crate::merge::read_bundle_yaml(&b.path, &b.name)?;
+        if let Some(features) = caps.and_then(|c| c.features) {
+            entries.extend(features.codebase_memory);
+        }
+    }
+    crate::util::dedup(&mut entries);
+    Ok(entries)
+}
+
+fn root_entries(config: &crate::config::Config) -> Vec<crate::config::CodebaseMemory> {
+    config
+        .features
+        .as_ref()
+        .map(|f| f.codebase_memory.clone())
+        .unwrap_or_default()
 }
 
 /// Tool name this guard fires on. Callers register a `PreToolUse` matcher for
@@ -112,6 +154,49 @@ fn name_override_reason(name: &str) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    fn firing(tag: &str) -> crate::scope::ActiveScopes {
+        crate::scope::ActiveScopes {
+            scopes: vec![crate::scope::ActiveScope {
+                id: "host".to_string(),
+                kind: "host",
+                tags: vec![tag.to_string()],
+                ..crate::scope::ActiveScope::default()
+            }],
+            tags: [tag.to_string()].into(),
+            ..crate::scope::ActiveScopes::default()
+        }
+    }
+
+    #[test]
+    fn the_guard_sees_an_entry_that_only_a_firing_bundle_declares() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("bundles").join("cbm");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bundle.yaml"),
+            "features:\n  codebase_memory:\n    - when: [work]\n",
+        )
+        .unwrap();
+        let config = crate::config::Config {
+            bundle: vec![crate::config::Bundle {
+                name: "cbm".to_string(),
+                when: vec!["work".to_string()],
+            }],
+            ..crate::config::Config::default()
+        };
+        let entries = codebase_memory_entries(&config, root.path(), &firing("work")).unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            codebase_memory_entries(&config, root.path(), &firing("home"))
+                .unwrap()
+                .is_empty(),
+            "a bundle that does not fire adds no entry"
+        );
+        std::fs::write(dir.join("bundle.yaml"), "features: [\n").unwrap();
+        let err = codebase_memory_entries(&config, root.path(), &firing("work")).unwrap_err();
+        assert!(format!("{err:#}").contains("cbm"), "{err:#}");
+    }
 
     fn payload(tool: &str, input: serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "tool_name": tool, "tool_input": input })

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::{canonical, list_roots};
-use crate::config::{CodebaseMemory, Config};
+use crate::config::CodebaseMemory;
 
 /// The `repo_path` of an `index_repository` call that is outside the allowed roots, as the
 /// reason to deny it. `None` when it is inside one. Both sides must be canonical, so a link into
@@ -33,15 +33,14 @@ pub(super) fn path_outside_roots(repo_path: &Path, roots: &[PathBuf]) -> Option<
 /// tags from its own folder, which a `cd` can move away from the session's project, so when no
 /// entry matches, or the scopes cannot be read (`active_tags` is `None`), every entry counts, as
 /// before #2922. The server's own root check stays the backstop.
+///
+/// `entries` must hold the entries of the root config and of the firing bundles, as export merges
+/// them. With no entry, codebase memory is off and the guard does not apply.
 pub(crate) fn guard_decision(
     repo_path: &str,
-    config: &Config,
+    entries: &[CodebaseMemory],
     active_tags: Option<&BTreeSet<String>>,
 ) -> Option<String> {
-    let entries = config
-        .features
-        .as_ref()
-        .map(|f| f.codebase_memory.as_slice())?;
     guard_decision_with(repo_path, entries, active_tags, list_roots)
 }
 

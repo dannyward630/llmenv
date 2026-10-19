@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn the_guard_does_not_apply_without_a_codebase_memory_entry() {
         assert_eq!(
-            guard_decision("/anywhere", &crate::config::Config::default(), None),
+            guard_decision("/anywhere", &[], Some(&std::collections::BTreeSet::new())),
             None
         );
     }
