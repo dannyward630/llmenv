@@ -37,3 +37,38 @@ pub(crate) fn expand_tilde_with_env(
     };
     Ok(format!("{home}{rest}"))
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn home(value: Option<&str>) -> impl Fn(&str) -> Result<String, VarError> + '_ {
+        move |_| value.map(str::to_string).ok_or(VarError::NotPresent)
+    }
+
+    proptest! {
+        /// Only `~` and `~/rest` expand. Anything else comes back as it was, whatever HOME is.
+        #[test]
+        fn only_a_bare_tilde_or_a_tilde_slash_expands(
+            path in "[~a-z/.]{0,12}",
+            value in proptest::option::of("/[a-z]{1,8}"),
+        ) {
+            let expands = path == "~" || path.starts_with("~/");
+            let got = expand_tilde_with_env(&path, &home(value.as_deref()));
+            match (expands, value.as_deref()) {
+                (false, _) => prop_assert_eq!(got.unwrap(), path),
+                (true, Some(h)) => prop_assert_eq!(got.unwrap(), format!("{h}{}", &path[1..])),
+                (true, None) => prop_assert!(got.unwrap_err().to_string().contains("HOME")),
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_home_is_an_error() {
+        let err = expand_tilde_with_env("~/x", &home(Some(""))).unwrap_err();
+        assert!(err.to_string().contains("HOME"), "{err}");
+    }
+}

@@ -68,3 +68,64 @@ fn strip_json_nulls_depth(value: &mut serde_json::Value, depth: usize) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use serde_json::Value;
+
+    use super::*;
+
+    fn arb_value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            "[a-z]{0,3}".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(5, 40, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+                proptest::collection::btree_map("[a-c]", inner, 0..4)
+                    .prop_map(|m| Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    /// No object key holds a null after the strip.
+    fn no_null_key(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => map.values().all(|v| !v.is_null() && no_null_key(v)),
+            Value::Array(items) => items.iter().all(no_null_key),
+            _ => true,
+        }
+    }
+
+    /// The shape of `value` with each null-valued key dropped, built by the test as the oracle.
+    fn oracle(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| (k.clone(), oracle(v)))
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(items.iter().map(oracle).collect()),
+            other => other.clone(),
+        }
+    }
+
+    proptest! {
+        /// Within the depth limit, every null-valued key goes, a null array item stays, the rest
+        /// is unchanged, and a second strip changes nothing.
+        #[test]
+        fn the_strip_drops_null_keys_only(value in arb_value()) {
+            let mut once = value.clone();
+            strip_json_nulls(&mut once);
+            prop_assert!(no_null_key(&once));
+            prop_assert_eq!(&once, &oracle(&value));
+            let mut twice = once.clone();
+            strip_json_nulls(&mut twice);
+            prop_assert_eq!(twice, once);
+        }
+    }
+}

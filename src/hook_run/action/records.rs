@@ -58,3 +58,50 @@ pub(crate) fn split_recall_records(text: &str) -> Vec<String> {
         .filter(|record| !record.is_empty())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn arb_records() -> impl Strategy<Value = Vec<(String, String)>> {
+        proptest::collection::vec(
+            (
+                prop_oneof![
+                    Just(SCOPE_CONTEXT_TOPIC.to_string()),
+                    "[a-z]{1,8}",
+                    "[a-zé日]{1,4}",
+                ],
+                "[a-z][a-z ]{0,12}[a-z]",
+            ),
+            0..6,
+        )
+    }
+
+    proptest! {
+        /// The filter drops the scope-context records and keeps every other record, in order.
+        #[test]
+        fn only_the_scope_context_records_are_dropped(records in arb_records()) {
+            let text: Vec<String> = records.iter().map(|(t, b)| format!("[{t}] {b}")).collect();
+            let expected: Vec<&String> = records
+                .iter()
+                .zip(&text)
+                .filter(|((t, _), _)| t != SCOPE_CONTEXT_TOPIC)
+                .map(|(_, line)| line)
+                .collect();
+            let kept = without_unscoped_records(&text.join("\n"));
+            let kept: Vec<&str> = kept.lines().collect();
+            prop_assert_eq!(kept, expected.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        }
+
+        /// A record line carries a topic of 1 to 200 characters, counted as characters, not
+        /// bytes, so a topic in a script with wide characters is not cut short.
+        #[test]
+        fn the_topic_bound_counts_characters(n in 0usize..=203, wide in any::<bool>()) {
+            let c = if wide { "日" } else { "a" };
+            let line = format!("[{}] body", c.repeat(n));
+            prop_assert_eq!(is_record_start(&line), (1..=MAX_TOPIC_CHARS).contains(&n));
+        }
+    }
+}

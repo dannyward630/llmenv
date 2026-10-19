@@ -92,3 +92,34 @@ fn a_link_loop_and_a_dangling_link_are_errors() {
     assert!(err.contains("does not exist"), "{err}");
     assert!(err.contains("missing.yaml"), "names the target: {err}");
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+    /// For any chain of links in a folder, a resolved marker stays inside the folder and is no
+    /// link. Each link points at another name, a parent step, a folder step, or an absolute path.
+    #[test]
+    fn a_resolved_marker_stays_inside_its_folder(
+        targets in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "l0", "l1", "l2", "file", "sub/file", "../file", "sub/../l1", "./l2", "/etc/hosts",
+                "ROOT/file", "ROOT/../file",
+            ]),
+            3,
+        ),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("file"), "id: f\n").unwrap();
+        std::fs::write(root.join("sub").join("file"), "id: s\n").unwrap();
+        for (i, target) in targets.iter().enumerate() {
+            let target = target.replace("ROOT", &root.display().to_string());
+            symlink(target, root.join(format!("l{i}"))).unwrap();
+        }
+        if let Ok(found) = resolve_inside(&root, &root.join("l0"), PathBuf::from("l0")) {
+            proptest::prop_assert!(found.starts_with(&root), "{} left {}", found.display(), root.display());
+            let is_link = std::fs::symlink_metadata(&found).is_ok_and(|m| m.file_type().is_symlink());
+            proptest::prop_assert!(!is_link, "{} is a link", found.display());
+        }
+    }
+}

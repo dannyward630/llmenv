@@ -89,3 +89,24 @@ async fn a_failed_topic_beside_an_answer_is_noticed() {
         .unwrap_err();
     assert!(format!("{err:#}").contains("errors-resolved"), "{err:#}");
 }
+
+proptest::proptest! {
+    /// One recall per topic that is not blank after a trim, each across every project, and the
+    /// stateless turn never keeps an empty-project recall.
+    #[test]
+    fn each_non_blank_topic_is_one_recall(
+        names in proptest::collection::vec("[ \t]{0,2}[a-z-]{0,6}[ \t]{0,2}", 0..6),
+        project in proptest::option::of("[a-z]{1,6}"),
+    ) {
+        let expected: Vec<&str> = names.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect();
+        let queries = topic_queries("q", &names, 3);
+        let got: Vec<&str> = queries.iter().map(|q| q.topic.as_deref().unwrap()).collect();
+        proptest::prop_assert_eq!(got, expected);
+        proptest::prop_assert!(queries.iter().all(|q| q.project.as_deref() == Some("")));
+        let start = vec![Action::Recall(project.clone().unwrap_or_default())];
+        let actions = turn_actions(start, "q", &names);
+        proptest::prop_assert!(
+            actions.iter().all(|a| !matches!(a, Action::Recall(p) if p.is_empty()))
+        );
+    }
+}
