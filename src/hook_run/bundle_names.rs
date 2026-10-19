@@ -31,6 +31,24 @@ pub(super) fn recall_bundle_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scope::{ActiveScope, ActiveScopes};
+    use proptest::prelude::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// One active scope of `kind` with the given tags and enable and disable lists.
+    fn scope(kind: &'static str, tags: &[&str], enable: &[&str], disable: &[&str]) -> ActiveScope {
+        ActiveScope {
+            id: kind.to_string(),
+            kind,
+            tags: names(tags),
+            enable_bundles: names(enable),
+            disable_bundles: names(disable),
+            ..ActiveScope::default()
+        }
+    }
 
     // #1125: the recall-keyword/context-chunk bundle list is a second selection
     // that also ignored `disable_bundles`, so a bundle a project opts out of
@@ -38,29 +56,17 @@ mod tests {
     // context chunk stored in the memory backend.
     #[test]
     fn recall_bundle_names_excludes_disabled_bundles() {
-        let scope = |id: &str, enable: &[&str], disable: &[&str]| crate::scope::ActiveScope {
-            id: id.to_string(),
-            kind: "project",
-            tags: vec![],
-            project_root: None,
-            enable_bundles: enable.iter().map(|s| (*s).to_string()).collect(),
-            disable_bundles: disable.iter().map(|s| (*s).to_string()).collect(),
-            name: None,
-            description: None,
-            unknown_fields: vec![],
-        };
-
-        let active = crate::scope::ActiveScopes {
+        let active = ActiveScopes {
             scopes: vec![
-                scope("user", &["yaks", "rust-dev"], &[]),
-                scope("project", &["web-dev"], &["yaks"]),
+                scope("user", &[], &["yaks", "rust-dev"], &[]),
+                scope("project", &[], &["web-dev"], &["yaks"]),
             ],
             ..Default::default()
         };
 
         assert_eq!(
             recall_bundle_names(&[], &active),
-            vec!["rust-dev".to_string(), "web-dev".to_string()],
+            names(&["rust-dev", "web-dev"]),
             "a disabled bundle must not reach recall queries or the stored chunk, \
                  even when another scope enables it"
         );
@@ -68,27 +74,15 @@ mod tests {
 
     #[test]
     fn recall_bundle_names_dedupes_and_sorts() {
-        let scope = |id: &str, enable: &[&str]| crate::scope::ActiveScope {
-            id: id.to_string(),
-            kind: "user",
-            tags: vec![],
-            project_root: None,
-            enable_bundles: enable.iter().map(|s| (*s).to_string()).collect(),
-            disable_bundles: vec![],
-            name: None,
-            description: None,
-            unknown_fields: vec![],
-        };
-
-        let active = crate::scope::ActiveScopes {
-            scopes: vec![scope("a", &["zed", "alpha"]), scope("b", &["alpha"])],
+        let active = ActiveScopes {
+            scopes: vec![
+                scope("user", &[], &["zed", "alpha"], &[]),
+                scope("user", &[], &["alpha"], &[]),
+            ],
             ..Default::default()
         };
 
-        assert_eq!(
-            recall_bundle_names(&[], &active),
-            vec!["alpha".to_string(), "zed".to_string()]
-        );
+        assert_eq!(recall_bundle_names(&[], &active), names(&["alpha", "zed"]));
     }
 
     #[test]
@@ -97,24 +91,81 @@ mod tests {
             name: "web-dev".into(),
             when: vec!["web".into()],
         }];
-        let active = crate::scope::ActiveScopes {
-            scopes: vec![crate::scope::ActiveScope {
-                id: "user".into(),
-                kind: "user",
-                tags: vec!["web".into()],
-                project_root: None,
-                enable_bundles: vec![],
-                disable_bundles: vec![],
-                name: None,
-                description: None,
-                unknown_fields: vec![],
-            }],
+        let active = ActiveScopes {
+            scopes: vec![scope("user", &["web"], &[], &[])],
             tags: std::iter::once("web".to_string()).collect(),
             ..Default::default()
         };
-        assert_eq!(
-            recall_bundle_names(&bundles, &active),
-            vec!["web-dev".to_string()]
-        );
+        assert_eq!(recall_bundle_names(&bundles, &active), names(&["web-dev"]));
+    }
+
+    const BUNDLES: [&str; 4] = ["a", "b", "c", "d"];
+
+    fn subset() -> impl Strategy<Value = Vec<&'static str>> {
+        proptest::sample::subsequence(BUNDLES.to_vec(), 0..=BUNDLES.len())
+    }
+
+    #[test]
+    fn a_bundle_that_fires_by_tag_but_a_scope_disables_is_not_named() {
+        let bundles = vec![crate::config::Bundle {
+            name: "web-dev".into(),
+            when: vec!["web".into()],
+        }];
+        let active = ActiveScopes {
+            scopes: vec![scope("project", &["web"], &[], &["web-dev"])],
+            tags: std::iter::once("web".to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(recall_bundle_names(&bundles, &active).is_empty());
+    }
+
+    const TAGS: [&str; 3] = ["t1", "t2", "t3"];
+
+    proptest! {
+        /// The names are the enabled names and the bundles whose `when` meets an active tag,
+        /// minus every name a scope disables: sorted and unique (#1125, #2924).
+        #[test]
+        fn names_are_the_fired_and_enabled_bundles_minus_the_disabled(
+            scopes in proptest::collection::vec((subset(), subset()), 0..4),
+            when in proptest::collection::vec(
+                proptest::option::of(proptest::sample::select(TAGS.to_vec())),
+                BUNDLES.len(),
+            ),
+            tags in proptest::sample::subsequence(TAGS.to_vec(), 0..=TAGS.len()),
+        ) {
+            let bundles: Vec<crate::config::Bundle> = BUNDLES
+                .iter()
+                .zip(&when)
+                .map(|(name, tag)| crate::config::Bundle {
+                    name: (*name).to_string(),
+                    when: tag.iter().map(|t| (*t).to_string()).collect(),
+                })
+                .collect();
+            let active = ActiveScopes {
+                scopes: scopes
+                    .iter()
+                    .map(|(enable, disable)| scope("project", &[], enable, disable))
+                    .collect(),
+                tags: tags.iter().map(|t| (*t).to_string()).collect(),
+                ..Default::default()
+            };
+            let disabled: std::collections::BTreeSet<&str> =
+                scopes.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+            let fired = BUNDLES
+                .iter()
+                .zip(&when)
+                .filter(|(_, tag)| tag.is_some_and(|t| tags.contains(&t)))
+                .map(|(name, _)| *name);
+            let expected: std::collections::BTreeSet<&str> = scopes
+                .iter()
+                .flat_map(|(e, _)| e.iter().copied())
+                .chain(fired)
+                .filter(|name| !disabled.contains(name))
+                .collect();
+
+            let got = recall_bundle_names(&bundles, &active);
+
+            prop_assert_eq!(got, expected.into_iter().map(String::from).collect::<Vec<_>>());
+        }
     }
 }

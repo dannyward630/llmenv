@@ -87,24 +87,41 @@ pub(super) fn classify_claude_path(path: &str) -> &'static str {
     }
 }
 
+/// The path of the `claude` program on `PATH`, looked up without a process, so the lookup cannot
+/// hang or fail to start (#2923).
 fn find_claude_binary() -> Option<String> {
-    let out = std::process::Command::new("which")
-        .arg("claude")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() { None } else { Some(path) }
+    find_claude_binary_in(std::env::var_os("PATH").as_deref())
+}
+
+fn find_claude_binary_in(path_var: Option<&std::ffi::OsStr>) -> Option<String> {
+    crate::path_lookup::find_on_path("claude", path_var).map(|path| path.display().to_string())
+}
+
+#[cfg(test)]
+#[test]
+#[expect(clippy::expect_used, reason = "test code")]
+fn the_claude_lookup_finds_the_program_in_an_absolute_folder_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("test");
+    let claude = dir.path().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n").expect("test");
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).expect("test");
+    let path_var = std::env::join_paths([dir.path()]).expect("test");
+    assert_eq!(
+        find_claude_binary_in(Some(&path_var)),
+        Some(claude.display().to_string())
+    );
+    assert_eq!(find_claude_binary_in(None), None);
+    let empty = std::env::join_paths([dir.path().join("none")]).expect("test");
+    assert_eq!(find_claude_binary_in(Some(&empty)), None);
 }
 
 /// Seed `installMethod` into `out/settings.json` if absent (#346).
 ///
 /// Detects how `claude` was installed by inspecting its binary path, then
 /// writes the result as a foreign key so it survives every re-render.
-/// No-op if `settings.json` does not exist (materialize hasn't run yet) or if
-/// `installMethod` is already present.
+/// No-op if `settings.json` does not exist (materialize hasn't run yet), if
+/// `installMethod` is already present, or if `claude` is not on `PATH`.
 ///
 /// # Errors
 /// Returns an error if the file exists but cannot be read or written.
@@ -132,9 +149,13 @@ pub(crate) fn seed_install_method(out: &std::path::Path) -> anyhow::Result<()> {
         }
     }
 
-    let method = find_claude_binary()
-        .as_deref()
-        .map_or("native", classify_claude_path);
+    // Without the binary the method is unknown. The key is written only once, so a guess here
+    // would stay after `claude` is on PATH; the next run seeds it instead (#2923).
+    let Some(binary) = find_claude_binary() else {
+        tracing::debug!("installMethod not seeded: claude is not on PATH");
+        return Ok(());
+    };
+    let method = classify_claude_path(&binary);
     let mut seeded = serde_json::Map::new();
     seeded.insert("installMethod".to_string(), serde_json::Value::from(method));
     apply_seeded_settings(out, &seeded)

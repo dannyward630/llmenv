@@ -6,6 +6,7 @@
 //! - `diff`   — show what changed since last session
 //! - `prune`  — TTL-based memory forgetting (R4)
 
+pub(crate) mod auto_prune;
 pub(crate) mod project;
 pub mod prune;
 

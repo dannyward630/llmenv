@@ -121,8 +121,8 @@ and plugins activate automatically.
 | `llmenv upgrade [--check] [--track beta\|release]` | Self-upgrade from the latest GitHub release |
 | `llmenv memory stats\|list\|diff\|prune` | Inspect ICM memory state |
 | `llmenv check-stale [--auto-fix]` | Warn if the running agent's config has drifted |
-| `llmenv prune [--all] [--older-than DUR] [--dry-run]` | Clean stale cache folders |
-| `llmenv doctor [--gc] [--all] [--probe-mcp] [--restart-memory-proxy]` | Validate wiring (and more) |
+| `llmenv clean [--all] [--older-than DUR] [--dry-run] [--plugin-cache]` | Remove stale cache and state files |
+| `llmenv doctor [--all] [--probe-mcp] [--restart-memory-proxy]` | Validate wiring (and more) |
 | `llmenv task <subcommand>` | Track tasks in a session that survives `/clear` and `/compact` |
 | `llmenv sync` | Sync the config with GitHub (git add, commit, push) |
 

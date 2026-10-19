@@ -462,19 +462,12 @@ impl AgentAdapter for OpencodeAdapter {
         "opencode"
     }
 
-    /// The trait answers with a `bool`, so a failed PATH check is logged and noticed here, and
-    /// reads as inactive (#2753).
+    /// Active when `OPENCODE_CONFIG_DIR` is set or `opencode` is on `PATH`.
     fn is_active(&self) -> bool {
         if std::env::var_os("OPENCODE_CONFIG_DIR").is_some() {
             return true;
         }
-        binary_on_path("opencode").unwrap_or_else(|e| {
-            tracing::error!("opencode adapter treated as inactive: {e:#}");
-            crate::agent_notice::record(format!(
-                "llmenv: the opencode adapter is treated as inactive: {e:#}."
-            ));
-            false
-        })
+        binary_on_path("opencode")
     }
 
     fn binary_name(&self) -> &'static str {
@@ -565,9 +558,8 @@ impl AgentAdapter for OpencodeAdapter {
 
         // Built-in `llmenv` skill: one reference file per enabled first-party
         // feature. No-op when none are enabled.
-        let features = manifest.capabilities.features.clone().unwrap_or_default();
         owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
-            out, &features,
+            out, manifest,
         )?);
 
         // #1130/#1333/#1335: opencode has no native output-style concept —

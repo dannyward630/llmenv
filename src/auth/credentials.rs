@@ -931,7 +931,7 @@ mod tests {
     }
 
     // Not run on macOS: there `forget` invokes `security`, which would reach the
-    // developer's real keychain. The macOS path is exercised by `doctor --gc`.
+    // developer's real keychain. The macOS path is exercised by `llmenv clean`.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn forget_is_a_noop_where_credentials_live_in_the_folder() {

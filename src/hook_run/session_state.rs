@@ -111,6 +111,22 @@ fn note_prune_failure(what: &str, path: &Path, err: &std::io::Error) {
     ));
 }
 
+/// The state file name for the agent that fired the hook. Parallel subagents share the session
+/// id, so each subagent gets its own state (#2901, #2936). The main agent keeps the bare session
+/// id, which the Stop handlers and the `/clear` reset also use. The agent part is a hash of the
+/// session id and the agent id, so any `agent_id` is safe in a path and no two keys are equal.
+/// A session id that is not a plain name comes back as it is, so the caller still rejects it.
+pub(crate) fn agent_state_key(session_id: &str, payload: &serde_json::Value) -> String {
+    let agent_id = match payload.get("agent_id") {
+        None | Some(serde_json::Value::Null) => return session_id.to_string(),
+        _ if !crate::paths::is_valid_short_name(session_id) => return session_id.to_string(),
+        Some(serde_json::Value::String(id)) => id.clone(),
+        Some(other) => other.to_string(),
+    };
+    let hash = super::record_hash::hash_prefix(format!("{session_id}\0{agent_id}").as_bytes());
+    format!("{session_id}.agent-{hash}")
+}
+
 /// Whether a `SessionStart` `source` means the model's context was emptied, so
 /// state that records what the model has seen no longer holds (#2381).
 pub(crate) fn context_was_lost(source: Option<&str>) -> bool {
@@ -242,6 +258,13 @@ pub(crate) fn unix_now() -> i64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_key_hashes_the_session_and_the_agent_id_as_text() {
+        let key = agent_state_key("s1", &serde_json::json!({ "agent_id": "a7" }));
+        let hash = super::super::record_hash::hash_prefix(b"s1\0a7");
+        assert_eq!(key, format!("s1.agent-{hash}"));
+    }
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 

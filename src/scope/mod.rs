@@ -1,3 +1,4 @@
+pub(crate) mod marker_file;
 pub mod matcher;
 pub mod network;
 mod probe;
@@ -131,7 +132,7 @@ pub fn evaluate(cfg: &Config, env: &Env) -> ActiveScopes {
             }
         }
     }
-    if let Some(p) = matcher::discover_project(env) {
+    if let Some(p) = marker_file::discover_project(env) {
         scopes.push(ActiveScope {
             id: p.id,
             kind: "project",

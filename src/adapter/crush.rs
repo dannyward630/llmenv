@@ -201,9 +201,8 @@ impl AgentAdapter for CrushAdapter {
         // Built-in `llmenv` skill: one reference file per enabled first-party
         // feature. No-op when none are enabled. Counted toward `skills_paths`
         // below so Crush discovers it even when it's the only skill present.
-        let features = manifest.capabilities.features.clone().unwrap_or_default();
         let llmenv_skill_paths =
-            crate::adapter::llmenv_skill::materialize_llmenv_skill(out, &features)?;
+            crate::adapter::llmenv_skill::materialize_llmenv_skill(out, manifest)?;
         owned.extend(llmenv_skill_paths.iter().cloned());
 
         // #1130: Crush has no native output-style concept — render each

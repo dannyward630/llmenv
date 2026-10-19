@@ -161,8 +161,8 @@ Everyday commands:
 | `llmenv export [--compress]` | Resolve + export the environment |
 | `llmenv regenerate` | Re-materialize without exporting env vars |
 | `llmenv status [section]` | Show active scopes, tags, and config status |
-| `llmenv doctor [--gc] [--all] [--probe-mcp]` | Validate wiring |
-| `llmenv prune [--all]` | Clean stale cache folders |
+| `llmenv doctor [--all] [--probe-mcp]` | Validate wiring |
+| `llmenv clean [--all] [--dry-run]` | Remove stale cache and state files |
 | `llmenv task ...` | Track work across sessions (see [`task`](commands.md#task)) |
 
 Full per-command reference: [commands.md](commands.md).

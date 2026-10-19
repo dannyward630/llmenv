@@ -154,7 +154,9 @@ jobs:
           tool: cargo-mutants@27.1.0
       - name: Detect CPU count
         run: echo "CARGO_BUILD_JOBS=$(scripts/core_count.sh)" >> "$GITHUB_ENV"
-      - run: cargo mutants --workspace --shard ${{ strategy.job-index }}/8
+      - run: cargo mutants --workspace --shard "$SHARD/8"
+        env:
+          SHARD: ${{ strategy.job-index }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:

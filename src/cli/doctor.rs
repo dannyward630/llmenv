@@ -1,20 +1,22 @@
 use crate::adapter::AgentAdapter;
 use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
-use crate::plugins::cache;
 use anyhow::Context;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 mod autocompact;
 mod background;
-mod cache_gc;
+pub(super) mod cache_gc;
 mod cbm_index;
 mod cleartext;
 mod instruction_size;
+mod marketplace_pins;
 mod mcp_text;
 mod network;
 mod task_text;
+mod tool_availability;
+use tool_availability::run_doctor_tool_availability;
 mod version;
 use version::{cbm_floor_warning, parse_semver_triple};
 
@@ -389,7 +391,10 @@ const DEPENDENT_TOOLS: &[(&str, UpdatePath)] = &[
 /// A hung tool must not hang doctor, so the call stops after [`DEFAULT_TOOL_VERSION_TIMEOUT`].
 /// A failed call is logged with its cause.
 fn tool_version(binary: &str) -> Option<String> {
-    let mut cmd = std::process::Command::new(binary);
+    let program = crate::path_lookup::resolve_program(binary)
+        .inspect_err(|e| tracing::error!("cannot read the version of {binary}: {e:#}"))
+        .ok()?;
+    let mut cmd = std::process::Command::new(program);
     cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -519,7 +524,7 @@ fn icm_server_check(version: &str) -> (CheckLevel, String) {
 
 /// The local `icm` version for a host that serves memory, or the reason it is unknown.
 fn local_icm_version() -> Result<String, String> {
-    if !crate::adapter::binary_on_path("icm").map_err(|e| format!("{e:#}"))? {
+    if !crate::adapter::binary_on_path("icm") {
         return Err("icm is not on PATH, but this host serves ICM memory".to_string());
     }
     tool_version("icm").ok_or_else(|| "`icm --version` failed or printed no version".to_string())
@@ -640,7 +645,7 @@ fn run_doctor_dependent_tools(use_color: bool) {
 
     let installed: Vec<_> = DEPENDENT_TOOLS
         .iter()
-        .filter(|(bin, _)| on_path(bin, &warn) == Some(true))
+        .filter(|(bin, _)| crate::adapter::binary_on_path(bin))
         .collect();
     if installed.is_empty() {
         return;
@@ -667,105 +672,6 @@ fn run_doctor_dependent_tools(use_color: bool) {
         eprintln!("{marker} {bin} {version} — {how} `{}`", update.command());
         if let Some(text) = floor_warning {
             eprintln!("{warn} {text}");
-        }
-    }
-}
-
-fn run_doctor_tool_availability(use_color: bool, config: &Config) {
-    let pass = super::doctor_pass(use_color);
-    let fail = super::doctor_fail(use_color);
-    let info = super::doctor_info(use_color);
-
-    eprintln!();
-    eprintln!("Tool-availability checks:");
-
-    let has_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.memory.is_empty());
-
-    // icm — required when features.memory has entries
-    // mcp-proxy or uvx — required when any memory server_host is remote
-    if has_memory {
-        match on_path("icm", &fail) {
-            Some(true) => eprintln!("{pass} icm found on PATH"),
-            Some(false) => eprintln!(
-                "{fail} icm not found on PATH (required when features.memory is configured)"
-            ),
-            None => {}
-        }
-
-        if has_remote_memory_host(config) {
-            match (on_path("mcp-proxy", &fail), on_path("uvx", &fail)) {
-                (Some(true), _) | (_, Some(true)) => {
-                    eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
-                }
-                (Some(false), Some(false)) => eprintln!(
-                    "{fail} neither mcp-proxy nor uvx on PATH \
-                     (remote memory server_host requires one for TCP proxying)"
-                ),
-                _ => {}
-            }
-        }
-    }
-
-    // codebase-memory-mcp — required when features.codebase_memory has entries
-    let has_codebase_memory = config
-        .features
-        .as_ref()
-        .is_some_and(|f| !f.codebase_memory.is_empty());
-    if has_codebase_memory {
-        match on_path("codebase-memory-mcp", &fail) {
-            Some(true) => eprintln!("{pass} codebase-memory-mcp found on PATH"),
-            Some(false) => eprintln!(
-                "{fail} codebase-memory-mcp not found on PATH (required when \
-                 features.codebase_memory is configured) — install: \
-                 https://github.com/DeusData/codebase-memory-mcp"
-            ),
-            None => {}
-        }
-    }
-
-    // claude — required when claude_code engine is not disabled
-    let claude_disabled = config
-        .disabled_engines
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case("claude_code"));
-    if !claude_disabled {
-        match on_path("claude", &fail) {
-            Some(true) => eprintln!("{pass} claude found on PATH"),
-            Some(false) => eprintln!(
-                "{fail} claude not found on PATH \
-                 (claude_code engine is not disabled, but the `claude` binary is missing)"
-            ),
-            None => {}
-        }
-    }
-
-    // Every other registered engine — always optional. Derived from the adapter
-    // registry rather than a hardcoded list, so a newly registered engine is
-    // reported here without a second edit (#1032).
-    for adapter in crate::adapter::registered_adapters() {
-        if crate::adapter::engine_id(adapter.as_ref()) == "claude_code" {
-            continue; // reported above, where it is required rather than optional
-        }
-        let bin = adapter.binary_name();
-        match on_path(bin, &fail) {
-            Some(true) => eprintln!("{pass} {bin} found on PATH"),
-            Some(false) => eprintln!("{info} {bin} not found on PATH (optional engine)"),
-            None => {}
-        }
-    }
-}
-
-/// Whether `bin` is on `PATH`, or `None` after a `marker` line that names why the check could
-/// not run. A failed check must not read as "not installed" (#2753).
-fn on_path(bin: &str, marker: &str) -> Option<bool> {
-    match crate::adapter::binary_on_path(bin) {
-        Ok(found) => Some(found),
-        Err(e) => {
-            eprintln!("{marker} cannot check whether {bin} is on PATH: {e:#}");
-            None
         }
     }
 }
@@ -843,7 +749,7 @@ pub(super) fn unknown_neutral_tools(capabilities: &Capabilities) -> Vec<UnknownT
 
 /// A neutral tool whose mapping onto an active engine isn't one-to-one (#1371).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InexactToolMapping {
+struct InexactToolMapping {
     /// The neutral tool name the user wrote.
     pub tool: String,
     /// The engine id whose mapping differs.
@@ -1019,7 +925,7 @@ const LEGACY_TOOL_REPLACEMENTS: &[(&str, &str)] = &[("grep", "rg"), ("find", "fd
 /// A config `allow` rule for a legacy tool with no matching allow rule for
 /// its recommended replacement (#975).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct LegacyToolRule {
+struct LegacyToolRule {
     pub legacy: &'static str,
     pub replacement: &'static str,
 }
@@ -1091,29 +997,6 @@ fn legacy_tools_missing_replacement(capabilities: &Capabilities) -> Vec<LegacyTo
             replacement,
         })
         .collect()
-}
-
-/// Drop the platform credential entry belonging to each cache folder GC just
-/// deleted, and report how many went (#1057).
-///
-/// Keyed by folder path, so this only ever touches entries llmenv's own folders
-/// owned — never the user's default `~/.claude` login. Deliberately confined to
-/// the explicit `doctor --gc` path: removing credential entries as a side effect
-/// of `export` would be the wrong default.
-pub(crate) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
-    removed
-        .iter()
-        .filter(|path| {
-            crate::auth::credentials::forget(path)
-                .inspect_err(|e| {
-                    tracing::debug!(
-                        "could not drop credential entry for {}: {e}",
-                        path.display()
-                    );
-                })
-                .unwrap_or(false)
-        })
-        .count()
 }
 
 /// Report the durable OAuth credential cache (#1057): present or not, and
@@ -1419,14 +1302,7 @@ pub(super) fn run_doctor(
     // `--all`: "why isn't my permission rule working on opencode" is the
     // question doctor exists to answer.
     // Collected once: each `installed_adapters` call repeats its disabled_engines warning.
-    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> = super::installed_adapters(&config)
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "{} cannot list the installed engines, so the engine checks are skipped: {e:#}",
-                super::doctor_fail(use_color)
-            );
-            Vec::new()
-        });
+    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> = super::installed_adapters(&config);
     let claude_installed = has_engine(&installed, "claude_code");
     {
         let caps = doctor_manifest
@@ -1866,57 +1742,27 @@ pub(super) fn run_doctor(
         }
     }
 
-    // Verify pinned marketplaces: when a marketplace source includes a `#ref`
-    // pin, the checked-out HEAD should match that pinned ref. Use `^{commit}`
-    // dereferencing so annotated tags don't false-positive (#695).
-    for m in &config.marketplace {
-        let (_, pinned_ref) = cache::split_source_ref(&m.source);
-        let Some(pinned_ref) = pinned_ref else {
-            continue;
-        };
-        let mkt_path = cache::marketplace_path(&cache_dir, &m.name);
-        if !mkt_path.join(".git").exists() {
-            continue;
-        }
-        let head = match cache::git_head(&mkt_path) {
-            Ok(head) => head,
-            Err(e) => {
-                eprintln!(
-                    "{warn} marketplace '{}': cannot read HEAD in its local clone: {e}",
-                    m.name,
-                );
-                continue;
-            }
-        };
-        let pinned_sha = match cache::git_peeled_ref(&mkt_path, pinned_ref) {
-            Ok(sha) => sha,
-            Err(e) => {
-                eprintln!(
-                    "{warn} marketplace '{}' pinned to '{}' cannot be resolved in the local \
-                     clone: {e} — run `llmenv plugin-sync` to repair",
-                    m.name, pinned_ref,
-                );
-                continue;
-            }
-        };
-        if head != pinned_sha {
-            eprintln!(
-                "{warn} marketplace '{}' pinned to '{}': HEAD ({}) does not match \
-                 the pinned ref's commit ({}) — run `llmenv plugin-sync` to repair",
-                m.name,
-                pinned_ref,
-                &head[..head.len().min(7)],
-                &pinned_sha[..pinned_sha.len().min(7)],
-            );
-        }
-    }
+    marketplace_pins::report_pinned_marketplaces(&config, &cache_dir, &warn);
 
     report_credential_cache(&cache_dir, &pass, &info, &warn);
 
     eprintln!("{pass} Doctor check complete.");
 
     if gc {
-        cache_gc::run(&cache_dir, &config, &pass, &warn);
+        eprintln!("{}", super::clean::DOCTOR_GC_DEPRECATED);
+        let out = cache_gc::GcOutput {
+            pass: &pass,
+            warn: &warn,
+            dry_run: false,
+        };
+        // #1346: a sweep that could not finish is not a success, as in `llmenv clean`.
+        let failures = cache_gc::run(&cache_dir, &config, out);
+        if failures > 0 {
+            anyhow::bail!(
+                "{failures} sweep entry(ies) or sweep(s) could not be checked or removed — see \
+                 the warnings above"
+            );
+        }
     }
 
     Ok(())

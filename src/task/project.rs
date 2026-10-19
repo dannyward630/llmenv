@@ -60,7 +60,7 @@ fn resolve_project_tag(cwd: &Path, home: Option<&Path>) -> String {
                 home: home.map(Path::to_path_buf),
                 ..crate::scope::matcher::Env::empty()
             };
-            crate::scope::matcher::discover_project(&env).map(|p| (p.root, p.id))
+            crate::scope::marker_file::discover_project(&env).map(|p| (p.root, p.id))
         })
         .unwrap_or_else(|| (cwd.to_path_buf(), basename(cwd)));
 
@@ -98,13 +98,14 @@ fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
     // silent swap orphans open sessions. Warn on it, matching `list_sessions`'
     // tolerate-but-warn policy for corrupt store files, rather than lumping it
     // in with "absent".
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+    let max = crate::scope::marker_file::MAX_MARKER_FILE_BYTES;
+    let content = match llmenv_paths::read_text_bounded(&path, max) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
         Err(e) => {
             warn_tag_change(
                 &format!("could not read {} for the project id: {e}", path.display()),
-                "check the permissions of that file",
+                "correct or remove that file",
             );
             return None;
         }
@@ -202,6 +203,41 @@ mod tests {
         let marker = dir.path().join(".llmenv.yaml").display().to_string();
         assert!(
             notices.contains(&marker) && notices.contains("Fix: quote the `id`"),
+            "{notices}"
+        );
+    }
+
+    #[test]
+    fn a_fifo_marker_fails_at_once_with_a_notice_that_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".llmenv.yaml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&marker)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_eq!(read_llmenv_yaml_id(dir.path()), None);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        let marker = marker.display().to_string();
+        assert!(
+            notices.contains(&marker) && notices.contains("not a regular file"),
+            "{notices}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_marker_is_ignored_with_a_notice_that_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".llmenv.yaml");
+        let max = usize::try_from(crate::scope::marker_file::MAX_MARKER_FILE_BYTES).unwrap();
+        let mut body = b"id: big\n".to_vec();
+        body.resize(max + 1, b'#');
+        std::fs::write(&marker, body).unwrap();
+        assert_eq!(read_llmenv_yaml_id(dir.path()), None);
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        let marker = marker.display().to_string();
+        assert!(
+            notices.contains(&marker) && notices.contains("more than"),
             "{notices}"
         );
     }

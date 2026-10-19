@@ -11,6 +11,9 @@ The config directory is resolved in this order:
 1. `$LLMENV_CONFIG_DIR`, if set.
 2. The platform config dir (`~/.config/llmenv` on Linux/macOS).
 
+(changed in v3.13.0) `config.yaml` must be a regular file of at most 4 MiB.
+A FIFO, a folder, a link to a missing file, or a larger file fails the load at once with an error that names the file.
+
 ## Top-level blocks
 
 | Block | Shape | Purpose |
@@ -66,17 +69,17 @@ cache:
 Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`, `remote_sync` = `true`. Set
 `cache_retention_hours` to `null` to disable age-based GC.
-With `null`, `llmenv doctor --gc` skips the cache, `state/tmp`, and session-log sweeps, and SessionStart shows no stale `state/tmp` hint (fixed in v3.13.0: before, `null` used the 168-hour default).
+With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the cache, `state/tmp`, and session-log sweeps, and SessionStart shows no stale `state/tmp` hint (fixed in v3.13.0: before, `null` used the 168-hour default).
 
 (added in v3.13.0)
 
-`llmenv doctor --gc` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
+`llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
 That check uses `lsof`.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
 (added in v3.13.0) At session start, llmenv adds a one-line hint when `state/tmp` holds entries older than the retention.
-The hint gives the count, the size, and the command `llmenv doctor --gc`.
+The hint gives the count, the size, and the command `llmenv clean` (before v3.13.0's `clean` command, `llmenv doctor --gc`).
 It is shown at most once per UTC day, and not at all when no entry is stale.
 
 (added in v3.13.0) When a session resumes after its prompt cache expired, llmenv shows you a one-line notice if the rewrite is estimated at 0.50 USD or more.
@@ -545,6 +548,11 @@ directory lives at `<config_dir>/bundles/<name>/` and its files are merged
 into the agent config. A bundle's `bundle.yaml` inside its content directory
 may declare `env:` and other `capabilities:` fields.
 
+(changed in v3.13.0) A bundle's `AGENTS.md` and `bundle.yaml` must each be a regular file of at most 1 MiB of UTF-8 text.
+A link to such a file is followed.
+A FIFO, a folder, a link to a missing file, or a larger file fails the merge with an error that names the file.
+The same limit applies to each file under the bundle's `rules/`.
+
 ```yaml
 bundle:
   - name: base
@@ -694,7 +702,7 @@ features:
 | `default_type` | no | Memory type, `episodic`, `semantic`, or `procedural`, that llmenv tags on the memories it stores (added in v3.0.0) |
 | `default_importance` | no | Importance, `low`, `medium`, `high`, or `critical`, that llmenv tags on the memories it stores (added in v3.0.0) |
 | `type_importance` | no | Map from memory type to importance, for a per-type default (added in v3.0.0) |
-| `auto_prune` | no | `true` runs `llmenv memory prune` during `llmenv materialize`; default `false` (added in v3.3.0) |
+| `auto_prune` | no | `true` runs `llmenv memory prune` during `llmenv materialize`; default `false` (added in v3.3.0; changed in v3.13.0: only an entry whose `when` tags are active counts) |
 | `retention` | no | Per-type retention durations for `llmenv memory prune`. While set, prune refuses to run — see [`llmenv memory prune`](commands.md#memory) (changed in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 
@@ -981,6 +989,8 @@ trackers share this one setting:
   already had something to say about the same call — the two aren't
   mutually exclusive, since a model can get stuck retrying a call the other
   feature already denied or warned about.
+  (changed in v3.13.0) Each subagent has its own counter, so parallel
+  subagents that each make the same call one time get no advisory.
 - **Task-tracker Stop reminder**: if `features.task_tracker` is on and the
   task tracker's "you still have a task in progress" reminder fires
   identically `threshold` times in a row, this appends a pointer to
@@ -1016,20 +1026,16 @@ features:
 
 (added in v3.8.0)
 
-Warn-only `PreToolUse` advisory for Bash commands that `cd`, **on by
-default** (opt-*out*, not opt-in — omitting `features.cd_guard` entirely
-resolves the same as `enabled: true`). Claude Code resets the working
-directory after every Bash call, so a `cd` — whether standalone or the
-leading step of a compound command (`cd X && …`) — silently breaks any
-*following* command that assumed the new directory. Prose guidance alone
-("prefer absolute paths") doesn't reliably stop this; the advisory
-mechanizes the reminder instead.
+Warn-only `PreToolUse` advisory for a Bash command that ends with `cd`, **on by default** (opt-*out*, not opt-in: omitting `features.cd_guard` entirely resolves the same as `enabled: true`).
+In the main agent, the Bash tool keeps its working directory between calls, so a command that ends with `cd` changes where the next call runs, and a subagent can start somewhere else.
 
-It splits the command with the same splitter as the task commit gate and flags
-any part whose first word is literally `cd`. A `cd` inside `$( )`, a subshell,
-or a brace group counts (changed in v3.12.2). A command nested more than 32
-levels deep gets no advisory. Never blocks — a deliberate `cd` still runs; the
-model just gets a one-line nudge toward absolute paths.
+(changed in v3.13.0) Only a command whose last part is `cd` gets the advisory.
+A `cd` followed by more commands in the same call (`cd /x && cargo test`), or inside `$( )`, a subshell, or a brace group that is followed by another command, changes nothing after the call and gets none.
+Before v3.13.0 any `cd` got it, and the text said that Claude Code resets the working directory, which is not what the main agent does.
+
+It splits the command with the same splitter as the task commit gate.
+A command nested more than 32 levels deep gets no advisory.
+It never blocks: a deliberate `cd` still runs, and the model gets a one-line note.
 
 ```yaml
 features:
@@ -1121,6 +1127,9 @@ blocking.
 
 (changed in v3.12.0) The cache of a session resets on `/clear` and after a compaction, because the model no longer holds the file contents.
 The same reset applies to the `read_before_edit` record of `features.slippage` and to the `repeat_detect` counter.
+(changed in v3.13.0) Each subagent has its own cache, apart from the main agent and from other subagents, because it does not see the files that the others read.
+The same split applies to the `read_before_edit` record and the counters of `features.slippage`, to the task-tracker nudge and commit-gate state, and to the `repeat_detect` counter.
+A `/clear` resets the state of the main agent only. The state of a subagent is deleted after 7 days.
 
 ```yaml
 features:
@@ -1258,7 +1267,7 @@ session_log:
 The file sink rotates `session-log.jsonl` when it reaches 64 MiB.
 It keeps three rotated files, `session-log.jsonl.1` to `session-log.jsonl.3`, and drops the oldest at each rotation.
 The first line of the new file names the rotated file that holds the older lines.
-`llmenv doctor --gc` removes rotated files older than `cache_retention_hours`.
+`llmenv clean` removes rotated files older than `cache_retention_hours`.
 
 For finer control, `transcript` can be a mapping instead of a boolean:
 
@@ -1678,10 +1687,10 @@ Two consequences worth knowing:
 
 The `claude.ai` connectors are managed by the Claude desktop app rather than
 Claude Code, so they're outside llmenv's scope.
-`llmenv doctor --gc` additionally drops the macOS keychain item belonging to each
+`llmenv clean` additionally drops the macOS keychain item belonging to each
 cache folder it deletes, since that item would otherwise outlive the folder it
 was keyed to. Entries are matched by folder path, so your default `~/.claude`
-login is never touched. This runs only under `--gc`, never on `export`.
+login is never touched. This runs only under `clean` (and the deprecated `doctor --gc`), never on `export`.
 
 ## `marketplace:` and `plugin-collection:`
 
@@ -1771,6 +1780,10 @@ Skills declared here are merged with per-bundle skills from `bundle.yaml`; the
 union is what gets wired up for the active scope. Name collisions are resolved
 by declaration order (first wins).
 
+(changed in v3.13.0) Each file in a skill folder must be at most 64 MiB.
+A larger file fails the skill copy with an error that names the file.
+A FIFO or another special file in a skill folder is not copied.
+
 ## `output_styles:`
 
 (added in v3.10.0)
@@ -1845,6 +1858,10 @@ are reported by `llmenv doctor`, which also flags a `disable_bundles`/
 appearing in both lists. Malformed YAML degrades to defaults derived from the
 folder basename. See [Concepts → Project markers](concepts.md#project-markers)
 for discovery rules.
+
+(changed in v3.13.0) llmenv reads a marker only when it is a regular file of at most 64 KiB.
+A FIFO, a folder, a link to a missing file, or a larger file is not read: llmenv logs the error and uses the defaults from the folder basename.
+The project id of `llmenv task` also shows the error as a notice that names the file.
 
 Disabling a bundle withdraws *everything* it contributes, not just its
 permissions and instruction files. That includes any `features.memory` or

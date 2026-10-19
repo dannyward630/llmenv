@@ -10,6 +10,9 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod clean;
+mod login;
+use login::{import_auth_from_file, run_login, run_login_capture};
 mod plugin_payloads;
 use plugin_payloads::sync_plugin_payloads;
 
@@ -127,7 +130,7 @@ impl ColorChoice {
 enum Command {
     /// Validate adapter wiring and configuration
     Doctor {
-        /// Run cache garbage collection after diagnostics
+        /// Deprecated: use `llmenv clean`. Runs the age-based sweeps after diagnostics
         #[arg(long)]
         gc: bool,
         /// Check all scopes and bundles for orphans, not just the active context
@@ -173,19 +176,7 @@ enum Command {
         repo: Option<String>,
     },
     /// Interactive setup wizard for new llmenv users
-    Setup {
-        /// Directory to set up (defaults to the standard config dir)
-        path: Option<std::path::PathBuf>,
-        /// Repository to store config in (optional)
-        #[arg(long)]
-        repo: Option<String>,
-        /// Skip the AI engine handoff at the end
-        #[arg(long)]
-        no_launch: bool,
-        /// Re-scan existing configs without overwriting config files
-        #[arg(long)]
-        rescan: bool,
-    },
+    Setup(setup::SetupArgs),
     /// Show current environment status
     Status {
         /// Show only a specific section (scopes, tags, bundles, mcps, plugins, marketplaces)
@@ -362,21 +353,11 @@ enum Command {
         #[arg(long)]
         global: bool,
     },
-    /// Clean stale cache folders
-    Prune {
-        /// Remove ALL cache folders unconditionally (next export re-materializes all environments)
-        #[arg(long)]
-        all: bool,
-        /// Remove ONLY current-version cache folders older than this duration (e.g., "14d", "1w")
-        #[arg(long)]
-        older_than: Option<String>,
-        /// Preview deletions without removing (applies to --all, --older-than, and --plugin-cache)
-        #[arg(long)]
-        dry_run: bool,
-        /// Remove the shared plugin cache directory for all adapters (state/<adapter>/state/plugins/)
-        #[arg(long)]
-        plugin_cache: bool,
-    },
+    /// Remove stale cache folders, old state/tmp entries, old session-log rotations, and old
+    /// codebase-memory indexes
+    Clean(clean::CleanArgs),
+    /// Deprecated: use `llmenv clean`
+    Prune(clean::CleanArgs),
     /// Manage the read-once file dedup cache (#318).
     ReadOnce {
         #[command(subcommand)]
@@ -484,6 +465,7 @@ enum TaskCommand {
     /// default to every session's tasks. `--state`/`--hide-done` filter by
     /// lifecycle state; `--current-project` further narrows to the current
     /// project's tasks (composable with either `--session` or `--all`).
+    #[command(visible_alias = "list")]
     Ls {
         #[arg(long, value_enum)]
         format: Option<TaskListFormat>,
@@ -665,6 +647,7 @@ enum TaskSessionCommand {
         format: Option<TaskListFormat>,
     },
     /// List every currently open session, current-project matches first.
+    #[command(visible_alias = "list")]
     Ls,
 }
 
@@ -695,32 +678,12 @@ const MAX_TEXT_FILE_BYTES: u64 = 64 * 1024;
 
 /// Read a text file named by `flag`. It refuses anything but a regular file, because a device
 /// such as `/dev/zero` never ends and a FIFO blocks on open. It refuses a file over
-/// [`MAX_TEXT_FILE_BYTES`].
+/// [`MAX_TEXT_FILE_BYTES`]. The open does not block, so a FIFO swapped in after a check cannot
+/// hang the read.
 fn read_text_file(path: &std::path::Path, flag: &str) -> anyhow::Result<String> {
-    use anyhow::Context as _;
-    use std::io::Read as _;
-    let describe = || format!("cannot read {flag} {}", path.display());
-    let not_regular = || anyhow::anyhow!("{flag} {} is not a regular file", path.display());
-    // Check before `open`: opening a FIFO with no writer blocks.
-    anyhow::ensure!(
-        std::fs::metadata(path).with_context(describe)?.is_file(),
-        not_regular()
-    );
-    let file = std::fs::File::open(path).with_context(describe)?;
-    // Check again on the open handle, in case the path changed after the first check.
-    anyhow::ensure!(
-        file.metadata().with_context(describe)?.is_file(),
-        not_regular()
-    );
-    let mut text = String::new();
-    file.take(MAX_TEXT_FILE_BYTES + 1)
-        .read_to_string(&mut text)
-        .with_context(describe)?;
-    anyhow::ensure!(
-        text.len() as u64 <= MAX_TEXT_FILE_BYTES,
-        "{flag} {} is larger than {MAX_TEXT_FILE_BYTES} bytes",
-        path.display()
-    );
+    let text = llmenv_paths::read_text_bounded(path, MAX_TEXT_FILE_BYTES)
+        .and_then(|text| text.ok_or_else(|| std::io::ErrorKind::NotFound.into()))
+        .map_err(|e| anyhow::anyhow!("cannot read {flag} {}: {e}", path.display()))?;
     Ok(text.trim_end().to_string())
 }
 
@@ -798,6 +761,7 @@ enum MemoryCommand {
     /// Show memory stats (record counts by tag/bundle/type, last-written).
     Stats,
     /// List stored memories for the active scope.
+    #[command(visible_alias = "ls")]
     List,
     /// Show what changed since the last session.
     Diff,
@@ -860,14 +824,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Init { path, repo }) => {
             run_init(path, repo)?;
         }
-        Some(Command::Setup {
-            path,
-            repo,
-            no_launch,
-            rescan,
-        }) => {
-            setup::run_setup(path, repo, no_launch, rescan)?;
-        }
+        Some(Command::Setup(args)) => setup::run_setup_command(args)?,
         Some(Command::Status { section }) => {
             status::run_status(section, use_color)?;
         }
@@ -991,14 +948,8 @@ pub fn run() -> anyhow::Result<()> {
             upgrade::run_upgrade(track, check)?;
         }
         Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
-        Some(Command::Prune {
-            all,
-            older_than,
-            dry_run,
-            plugin_cache,
-        }) => {
-            run_prune(all, older_than, dry_run, plugin_cache)?;
-        }
+        Some(Command::Clean(args)) => clean::run_clean(&args, use_color)?,
+        Some(Command::Prune(args)) => clean::run_prune_alias(&args, use_color)?,
         Some(Command::Validate) => {
             run_validate(use_color)?;
         }
@@ -1078,11 +1029,6 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
     Ok(remote)
 }
 
-fn shell_escape(s: &str) -> String {
-    // For values: use single quotes (prevent all expansions) and escape embedded single quotes
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Reject any var in `vars` whose name isn't a valid shell identifier.
 /// Applied to adapter-returned env vars before they propagate, so the
 /// `export NAME=...` contract holds regardless of which emission path runs.
@@ -1121,7 +1067,7 @@ fn validate_var_name(name: &str) -> anyhow::Result<()> {
 fn validate_var_value(value: &str) -> anyhow::Result<()> {
     // Only NUL is rejected: it can't survive in a C-string env var and would
     // truncate the export. Newlines/CR are safe because every emission path
-    // single-quotes the value (shell_escape), and values like
+    // single-quotes the value (`util::single_quote`), and values like
     // LLMENV_ICM_CONTEXT are legitimately multiline. (#469)
     if value.contains('\0') {
         anyhow::bail!("variable value contains forbidden NUL byte");
@@ -1195,10 +1141,7 @@ fn warn_dead_config(
         None => (&config.capabilities, &config.native),
     };
     warn_dead_native_keys(capabilities, native, prefix);
-    let opencode_active = engine_is_active(config, "opencode").unwrap_or_else(|e| {
-        eprintln!("{prefix} cannot check whether opencode is installed, so it is skipped: {e:#}");
-        false
-    });
+    let opencode_active = engine_is_active(config, "opencode");
     for hit in doctor::claude_only_colon_permission_patterns(capabilities, opencode_active) {
         eprintln!("{prefix} {}", hit.message());
     }
@@ -1216,23 +1159,20 @@ fn warn_dead_config(
 /// engine doesn't duplicate that output. Resolves the binary name through the
 /// registry rather than hardcoding it, so an adapter rename can't silently
 /// desynchronize the two.
-///
-/// # Errors
-/// The PATH check for the engine binary cannot run (#2753).
-fn engine_is_active(config: &Config, engine: &str) -> anyhow::Result<bool> {
+fn engine_is_active(config: &Config, engine: &str) -> bool {
     if config
         .disabled_engines
         .iter()
         .any(|e| e.eq_ignore_ascii_case(engine))
     {
-        return Ok(false);
+        return false;
     }
     for adapter in crate::adapter::registered_adapters() {
         if crate::adapter::engine_id(adapter.as_ref()) == engine {
             return crate::adapter::binary_on_path(adapter.binary_name());
         }
     }
-    Ok(false)
+    false
 }
 
 /// Registered adapters whose binary is present on `PATH` and that aren't
@@ -1247,11 +1187,7 @@ fn engine_is_active(config: &Config, engine: &str) -> anyhow::Result<bool> {
 /// isn't run on every export/regenerate/doctor invocation.
 ///
 /// Empty or whitespace-only entries are silently skipped (#566).
-///
-/// # Errors
-/// The PATH check for an adapter binary cannot run. A failed check must not read as "not
-/// installed", because the adapter would then be skipped with no word (#2753).
-fn installed_adapters(config: &Config) -> anyhow::Result<Vec<Box<dyn AgentAdapter>>> {
+fn installed_adapters(config: &Config) -> Vec<Box<dyn AgentAdapter>> {
     let known_ids = crate::adapter::known_engine_ids();
     for engine in &config.disabled_engines {
         if engine.trim().is_empty() {
@@ -1268,12 +1204,7 @@ fn installed_adapters(config: &Config) -> anyhow::Result<Vec<Box<dyn AgentAdapte
     }
     let mut installed = Vec::new();
     for adapter in crate::adapter::registered_adapters() {
-        let on_path = crate::adapter::binary_on_path(adapter.binary_name()).with_context(|| {
-            format!(
-                "checking whether the {} engine is installed",
-                adapter.name()
-            )
-        })?;
+        let on_path = crate::adapter::binary_on_path(adapter.binary_name());
         if !on_path {
             tracing::debug!(
                 adapter = adapter.name(),
@@ -1297,7 +1228,7 @@ fn installed_adapters(config: &Config) -> anyhow::Result<Vec<Box<dyn AgentAdapte
         }
         installed.push(adapter);
     }
-    Ok(installed)
+    installed
 }
 
 /// What [`ensure_local_memory_proxy`] did.
@@ -1481,7 +1412,7 @@ fn run_export(
 
     let mut failed_adapters: Vec<&str> = Vec::new();
     let mut any_adapter_eligible = false;
-    for adapter in installed_adapters(&config)? {
+    for adapter in installed_adapters(&config) {
         any_adapter_eligible = true;
 
         let result = match &shared_manifest {
@@ -1643,7 +1574,7 @@ fn run_export(
     }
 
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
-    crate::memory::prune::auto_prune_if_enabled(&config);
+    crate::memory::auto_prune::auto_prune_if_enabled(&config, &use_active.tags);
 
     if explain {
         let bundle_list = firing
@@ -1660,14 +1591,14 @@ fn run_export(
             } else {
                 println!("# source: adapter (bundles: {bundle_list})");
             }
-            println!("export {}={}", key, shell_escape(&value));
+            println!("export {}={}", key, crate::util::single_quote(&value));
         }
     } else {
         for (key, value) in vars {
             validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
             validate_var_value(&value)
                 .with_context(|| format!("variable '{key}': invalid value"))?;
-            println!("export {}={}", key, shell_escape(&value));
+            println!("export {}={}", key, crate::util::single_quote(&value));
         }
     }
 
@@ -1768,7 +1699,7 @@ fn run_regenerate() -> anyhow::Result<()> {
 
     let mut materialized_any = false;
     let mut failed_adapters: Vec<&str> = Vec::new();
-    for adapter in installed_adapters(&config)? {
+    for adapter in installed_adapters(&config) {
         let result = match &shared_manifest {
             Some((m, cache_root)) => {
                 let mut cloned = m.clone();
@@ -1847,7 +1778,7 @@ fn run_regenerate() -> anyhow::Result<()> {
     }
 
     // Auto-prune: TTL-based memory retention pass after materialization (#270)
-    crate::memory::prune::auto_prune_if_enabled(&config);
+    crate::memory::auto_prune::auto_prune_if_enabled(&config, &active.tags);
 
     Ok(())
 }
@@ -2514,7 +2445,7 @@ fn build_manifest(
                 tracing::error!("failed to persist bundle-merge cache: {e}");
             }
         }
-        Err(e) => tracing::warn!("failed to compute merge signature for cache: {e}"),
+        Err(e) => tracing::error!("failed to compute merge signature for cache: {e}"),
     }
 
     let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags)
@@ -2752,22 +2683,22 @@ fn run_config_context() {
     let config_path = match paths::config_path() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("llmenv config-context: failed to resolve config path: {e}");
-            emit(
-                "llmenv config-context: could not resolve config path. \
-                 Run `llmenv doctor` to diagnose.",
-            );
+            eprintln!("llmenv config-context: failed to resolve config path: {e:#}");
+            emit(&format!(
+                "llmenv config-context: could not resolve config path ({e:#}). \
+                 Run `llmenv doctor` to diagnose."
+            ));
             return;
         }
     };
     let bundles_dir = match paths::config_dir() {
         Ok(d) => d.join("bundles"),
         Err(e) => {
-            eprintln!("llmenv config-context: failed to resolve config dir: {e}");
-            emit(
-                "llmenv config-context: could not resolve config dir. \
-                 Run `llmenv doctor` to diagnose.",
-            );
+            eprintln!("llmenv config-context: failed to resolve config dir: {e:#}");
+            emit(&format!(
+                "llmenv config-context: could not resolve config dir ({e:#}). \
+                 Run `llmenv doctor` to diagnose."
+            ));
             return;
         }
     };
@@ -2814,10 +2745,10 @@ fn run_config_context() {
                     }
                     Err(e) => {
                         eprintln!(
-                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
+                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e:#}"
                         );
                         text.push_str(&format!(
-                            "\n\nllmenv: the task tracker reminders could not be loaded ({e}). Run \
+                            "\n\nllmenv: the task tracker reminders could not be loaded ({e:#}). Run \
                              `llmenv doctor`."
                         ));
                     }
@@ -2825,7 +2756,16 @@ fn run_config_context() {
             }
         }
         Err(e) => {
-            eprintln!("llmenv config-context: failed to load config for task-tracker reminder: {e}")
+            eprintln!(
+                "llmenv config-context: failed to load config for task-tracker reminder: {e:#}"
+            );
+            // The cause can quote a value from the config, such as a secret, so the agent gets
+            // the place and the fix, and the full chain goes to stderr only (#2923).
+            text.push_str(&format!(
+                "\n\nllmenv: the config at {} could not be loaded, so the task tracker reminders \
+                 are missing. Run `llmenv validate` to see why.",
+                config_path.display()
+            ));
         }
     }
 
@@ -2930,7 +2870,7 @@ fn run_config_guard() {
             return;
         }
     };
-    if is_within_cache(&cache_root, &expanded) {
+    if crate::util::is_within(&cache_root, &expanded) {
         let config_path = paths::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "~/.config/llmenv/config.yaml".to_string());
@@ -4052,6 +3992,7 @@ fn run_task_session_command(
                 (None, false, false) => StartDecision::Auto,
                 _ => unreachable!("clap's conflicts_with_all enforces at most one"),
             };
+            let auto = matches!(decision, StartDecision::Auto);
             let owner = session::EngineIdentity::from_env()?;
             let request = session::StartRequest {
                 name: name.as_deref(),
@@ -4075,6 +4016,11 @@ fn run_task_session_command(
                         .as_deref()
                         .map(|n| format!(" ({n})"))
                         .unwrap_or_default()
+                ),
+                StartOutcome::Resumed(s) if auto => println!(
+                    "Resumed session '{}': it is the one open session of this project that this \
+                     conversation or engine process started. Pass --new for a second session.",
+                    s.id
                 ),
                 StartOutcome::Resumed(s) => println!("Resumed session '{}'", s.id),
                 StartOutcome::Replaced { session, abandoned } => {
@@ -4248,152 +4194,6 @@ fn resolve_session_id(
                 .unwrap_or_default()
         ),
     }
-}
-
-/// `llmenv login [--global]` (#172): capture credentials via `claude auth login`
-/// and store them in the stable auth cache.
-///
-/// Without `--global`: updates only the current materialized folder's auth.
-/// With `--global`: updates the stable cache (inherited by all future folders).
-fn run_login(global: bool) -> anyhow::Result<()> {
-    let config = Config::load(&paths::config_path()?)?;
-    // Intentionally Claude Code-only. Crush does have `crush login`, but it
-    // persists tokens under $CRUSH_GLOBAL_DATA — already llmenv's durable state
-    // dir — so its auth survives a hash change with no help from us (#544).
-    let adapter_root =
-        PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?).join(ClaudeCodeAdapter.name());
-
-    if global {
-        eprintln!("Capturing global auth (will be inherited by all new folders)...");
-        run_login_capture(&adapter_root, None)?;
-    } else {
-        // Only inject into a folder that llmenv manages (i.e. under adapter_root).
-        // Reject CLAUDE_CONFIG_DIR pointing at an arbitrary directory — that would
-        // write auth tokens + a manifest dotfile somewhere unexpected.
-        let current_folder = crate::env_var::utf8_var("CLAUDE_CONFIG_DIR")?
-            .map(PathBuf::from)
-            .filter(|p| p.starts_with(&adapter_root));
-        if current_folder.is_none() {
-            eprintln!(
-                "note: CLAUDE_CONFIG_DIR is not set or not under the llmenv adapter root — \
-                 capturing global auth only. Run `llmenv export` then re-run without \
-                 --global to apply to the current folder."
-            );
-        }
-        run_login_capture(&adapter_root, current_folder.as_deref())?;
-    }
-    Ok(())
-}
-
-/// Launch `claude auth login` in a temp dir, capture the resulting auth, and
-/// save it to the stable cache. Optionally also writes to `current_folder`.
-fn run_login_capture(adapter_root: &Path, current_folder: Option<&Path>) -> anyhow::Result<()> {
-    let tmp = tempfile::TempDir::new()
-        .map_err(|e| anyhow::anyhow!("creating temp dir for login: {e}"))?;
-
-    let status = std::process::Command::new("claude")
-        .args(["auth", "login"])
-        .env("CLAUDE_CONFIG_DIR", tmp.path())
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "running `claude auth login` failed: {e}. \
-             Is the Claude Code CLI installed and on PATH?"
-            )
-        })?;
-
-    if !status.success() {
-        anyhow::bail!("`claude auth login` exited with status {status}");
-    }
-
-    let entry = crate::auth::read_auth_from_dir(tmp.path())?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "`claude auth login` completed but no oauthAccount found in the result. \
-             Try running `claude auth login` directly."
-        )
-    })?;
-
-    crate::auth::save_auth_entry(adapter_root, &entry)?;
-    eprintln!("[llmenv] login: saved auth for {}", entry.email);
-    capture_login_credentials(adapter_root, tmp.path(), current_folder)?;
-
-    if let Some(folder) = current_folder
-        && folder.is_dir()
-    {
-        crate::auth::inject_auth_into_claude_json(folder, &entry)?;
-        // Update manifest auth_status to Explicit.
-        match crate::materialize::manifest::CacheManifest::read(folder) {
-            Ok(Some(mut manifest)) => {
-                manifest.auth_status = crate::materialize::manifest::AuthStatus {
-                    source: crate::materialize::manifest::AuthSource::Explicit,
-                    id: Some(entry.uuid),
-                    email: Some(entry.email),
-                };
-                manifest.write(folder)?;
-            }
-            Ok(None) => {} // no manifest yet — benign
-            Err(e) => tracing::warn!(
-                "failed to read cache manifest in {:?} for auth status update: {e}",
-                folder,
-            ),
-        }
-    }
-    Ok(())
-}
-
-/// Capture the OAuth credential a fresh `claude auth login` produced (#1057).
-///
-/// Overwrites the cache unconditionally — unlike the export path, the user just
-/// authenticated, so the new token always wins. Also writes it straight into
-/// `current_folder` so the session in progress is logged in without re-exporting.
-///
-/// Non-fatal when the login dir yields no credential: `oauthAccount` was already
-/// captured, so identity inheritance still works.
-///
-/// # Errors
-/// Returns an error when the cache or folder write fails.
-fn capture_login_credentials(
-    adapter_root: &Path,
-    login_dir: &Path,
-    current_folder: Option<&Path>,
-) -> anyhow::Result<()> {
-    use crate::auth::credentials;
-    let backend = credentials::Backend::detect();
-    let Some(creds) = credentials::read_backend(backend, login_dir)? else {
-        tracing::debug!("login produced no OAuth credential; only the account identity was cached");
-        return Ok(());
-    };
-    credentials::save_cached(adapter_root, &creds)?;
-    eprintln!("[llmenv] login: saved OAuth credential to durable state");
-    if let Some(folder) = current_folder.filter(|f| f.is_dir()) {
-        credentials::write_backend(backend, folder, &creds)?;
-    }
-    // The login dir is a temp dir about to be removed; on macOS its keychain
-    // item would outlive it, so drop it now that the blob is cached.
-    if let Err(e) = credentials::forget(login_dir) {
-        tracing::debug!("could not drop the login dir's credential entry: {e}");
-    }
-    Ok(())
-}
-
-/// Import auth from an existing `.claude.json` file into the stable cache (#172).
-fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyhow::Result<()> {
-    let bytes = std::fs::read(source).with_context(|| format!("reading {}", source.display()))?;
-    let doc: serde_json::Value =
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", source.display()))?;
-    let entry = crate::auth::extract_auth_entry(&doc).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{} has no oauthAccount block — not logged in. \
-             Try `llmenv login` to authenticate.",
-            source.display()
-        )
-    })?;
-    crate::auth::save_auth_entry(adapter_root, &entry)?;
-    eprintln!("[llmenv] login: imported auth for {}", entry.email);
-    Ok(())
 }
 
 fn run_context(bundle_filter: Option<&str>, why: bool, use_color: bool) -> anyhow::Result<()> {
@@ -5241,164 +5041,6 @@ fn run_completions_install(
 
     eprintln!("Installed {shell} completions to {}", path.display());
     print_activation_instructions(shell, &target_dir);
-    Ok(())
-}
-
-fn run_prune(
-    all: bool,
-    older_than: Option<String>,
-    dry_run: bool,
-    plugin_cache: bool,
-) -> anyhow::Result<()> {
-    use crate::materialize::cache::PruneMode;
-
-    // Validate flag combinations
-    if all && older_than.is_some() {
-        anyhow::bail!("--all and --older-than are mutually exclusive");
-    }
-
-    let mode = if all {
-        PruneMode::All
-    } else if let Some(duration_str) = &older_than {
-        let dur = humantime::parse_duration(duration_str)
-            .with_context(|| format!("failed to parse --older-than duration: {}", duration_str))?;
-        PruneMode::OlderThan(dur)
-    } else {
-        // Default: clean stale (version-mismatched) folders + orphaned *.tmp.
-        PruneMode::StaleOnly
-    };
-
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    let cache_dir = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
-
-    // --plugin-cache: remove shared plugin cache dirs. Independent of other flags.
-    let mut plugin_removed: Vec<std::path::PathBuf> = Vec::new();
-    let mut plugin_failed: Vec<std::path::PathBuf> = Vec::new();
-    if plugin_cache {
-        for adapter in crate::adapter::registered_adapters() {
-            let plugins_dir = cache_dir
-                .join(adapter.name())
-                .join(crate::materialize::state::STATE_DIR_NAME)
-                .join("plugins");
-            if dry_run {
-                // Report as removed but don't actually delete.
-                plugin_removed.push(plugins_dir);
-            } else {
-                match std::fs::remove_dir_all(&plugins_dir) {
-                    Ok(()) => plugin_removed.push(plugins_dir),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // Already gone — not a failure.
-                        plugin_removed.push(plugins_dir);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %plugins_dir.display(),
-                            error = %e,
-                            "failed to remove plugin cache"
-                        );
-                        plugin_failed.push(plugins_dir);
-                    }
-                }
-            }
-        }
-    }
-
-    // In normal mode the current generation dir (e.g. "1.2") has no
-    // `{VERSION_TAG}-` prefix, so StaleOnly must be told its name or it would
-    // sweep the live config dir. Loose mode has no version axis (every shape is
-    // current) and strict mode is identified by the prefix test — both pass None.
-    let current_version = match config.cache.hashing {
-        crate::config::HashingMode::Normal => Some(crate::materialize::cache::version_major()),
-        crate::config::HashingMode::Loose | crate::config::HashingMode::Strict => None,
-    };
-
-    // prune runs per adapter subdirectory: the generation/VERSION_TAG folders
-    // live under `<cache_dir>/<adapter>/`, not directly under `cache_dir`.
-    let mut removed: Vec<std::path::PathBuf> = Vec::new();
-    let mut failed: Vec<std::path::PathBuf> = Vec::new();
-    let mut kept: usize = 0;
-    for adapter in crate::adapter::registered_adapters() {
-        let report = crate::materialize::cache::prune(
-            &cache_dir.join(adapter.name()),
-            mode,
-            config.cache.hashing,
-            current_version.as_deref(),
-            dry_run,
-        )?;
-        removed.extend(report.removed);
-        failed.extend(report.failed);
-        kept += report.kept;
-    }
-
-    let verb = if dry_run { "would remove" } else { "removed" };
-    for p in &removed {
-        eprintln!("  {verb}: {}", p.display());
-    }
-    for p in &failed {
-        eprintln!(
-            "  could not check or remove (cause logged above): {}",
-            p.display()
-        );
-    }
-    eprintln!(
-        "prune complete: {} {} entry(ies), kept {}",
-        verb,
-        removed.len(),
-        kept
-    );
-    if !failed.is_empty() {
-        eprintln!(
-            "  {} entry(ies) could not be checked or removed",
-            failed.len()
-        );
-    }
-    // Drop each removed folder's platform credential entry. `doctor --gc` already
-    // does this; prune deleting folders without it is how orphaned keychain items
-    // accumulate in the first place (#1057).
-    if !dry_run && !removed.is_empty() {
-        let forgotten = doctor::forget_credentials_for(&removed);
-        if forgotten > 0 {
-            eprintln!("  dropped {forgotten} orphaned OAuth credential entry(ies)");
-        }
-    }
-
-    // Report plugin cache results separately (verb is set above).
-    if plugin_cache {
-        for p in &plugin_removed {
-            eprintln!("  {verb} plugin cache: {}", p.display());
-        }
-        for p in &plugin_failed {
-            eprintln!("  failed to remove plugin cache: {}", p.display());
-        }
-        eprintln!(
-            "plugin cache prune: {} {} entry(ies)",
-            verb,
-            plugin_removed.len(),
-        );
-    }
-
-    // #1346: same contract as `regenerate` — a prune that could not remove
-    // everything it was asked to is not a success, even though the per-entry
-    // failures were printed above. Returning `Ok(())` here meant a scripted
-    // `llmenv prune` saw exit 0 and moved on with the cache still occupied.
-    //
-    // #1372: this originally covered only `plugin_failed`, so a cache entry that
-    // couldn't be removed printed "could not be removed" and still exited 0.
-    // Both lists gate the exit status now.
-    if !failed.is_empty() {
-        anyhow::bail!(
-            "{} cache entry(ies) could not be removed — see the failures above",
-            failed.len()
-        );
-    }
-    if plugin_cache && !plugin_failed.is_empty() {
-        anyhow::bail!(
-            "{} plugin cache entry(ies) could not be removed — see the failures above",
-            plugin_failed.len()
-        );
-    }
-
     Ok(())
 }
 
@@ -6395,7 +6037,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).unwrap().len(),
+            installed_adapters(&config).len(),
             0,
             "disabling every known engine id must yield no installed adapters"
         );
@@ -6413,7 +6055,7 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).unwrap().len(),
+            installed_adapters(&config).len(),
             0,
             "disabled_engines with different casing must still disable engines"
         );
@@ -6425,14 +6067,14 @@ mod tests {
         // and must not print confusing "unknown engine" warnings.
         let on_path_count = crate::adapter::registered_adapters()
             .iter()
-            .filter(|a| crate::adapter::binary_on_path(a.binary_name()).unwrap())
+            .filter(|a| crate::adapter::binary_on_path(a.binary_name()))
             .count();
         let config = Config {
             disabled_engines: vec!["".to_string(), "  ".to_string(), "\t".to_string()],
             ..Config::default()
         };
         assert_eq!(
-            installed_adapters(&config).unwrap().len(),
+            installed_adapters(&config).len(),
             on_path_count,
             "empty/whitespace disabled_engine entries should not disable adapters"
         );
@@ -6445,7 +6087,7 @@ mod tests {
             disabled_engines: vec!["  ".to_string(), "\t\t".to_string()],
             ..Config::default()
         };
-        let count = installed_adapters(&config).unwrap().len();
+        let count = installed_adapters(&config).len();
         let _ = count;
     }
 
@@ -6609,14 +6251,14 @@ mod tests {
 
     #[test]
     fn shell_escape_protects_metacharacters() {
-        assert_eq!(shell_escape("normal"), "'normal'");
-        assert_eq!(shell_escape("with'quote"), "'with'\\''quote'");
-        assert_eq!(shell_escape("$var"), "'$var'");
-        assert_eq!(shell_escape("$(cmd)"), "'$(cmd)'");
-        assert_eq!(shell_escape("`cmd`"), "'`cmd`'");
+        assert_eq!(crate::util::single_quote("normal"), "'normal'");
+        assert_eq!(crate::util::single_quote("with'quote"), "'with'\\''quote'");
+        assert_eq!(crate::util::single_quote("$var"), "'$var'");
+        assert_eq!(crate::util::single_quote("$(cmd)"), "'$(cmd)'");
+        assert_eq!(crate::util::single_quote("`cmd`"), "'`cmd`'");
         // Newlines/CR stay inside the single-quoted string — inert at shell source time.
-        assert_eq!(shell_escape("line1\nline2"), "'line1\nline2'");
-        assert_eq!(shell_escape("line1\rline2"), "'line1\rline2'");
+        assert_eq!(crate::util::single_quote("line1\nline2"), "'line1\nline2'");
+        assert_eq!(crate::util::single_quote("line1\rline2"), "'line1\rline2'");
     }
 
     #[test]
@@ -7092,34 +6734,6 @@ mod tests {
     }
 }
 
-/// Lexically normalize a path: resolve `..` and `.` components without touching
-/// the filesystem. This prevents `..`-based traversal bypasses when checking
-/// path prefixes on paths that may not exist yet.
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut out = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Pure path-prefix check: does `expanded_path` lie within `cache_root`?
-///
-/// Normalizes `..` components lexically (no filesystem access) so traversal
-/// paths like `/cache/llmenv/../../../etc/passwd` cannot bypass the check.
-#[must_use]
-fn is_within_cache(cache_root: &std::path::Path, expanded_path: &str) -> bool {
-    let path = normalize_path(std::path::Path::new(expanded_path));
-    path.starts_with(cache_root)
-}
-
 #[cfg(test)]
 mod config_guard_tests {
     use super::*;
@@ -7144,19 +6758,19 @@ mod config_guard_tests {
     #[test]
     fn test_is_within_cache_basic() {
         let cache_root = std::path::Path::new("/home/user/.cache/llmenv");
-        assert!(is_within_cache(
+        assert!(crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv/config"
         ));
-        assert!(is_within_cache(
+        assert!(crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv/data/file.txt"
         ));
-        assert!(!is_within_cache(
+        assert!(!crate::util::is_within(
             cache_root,
             "/home/user/.config/llmenv/config.yaml"
         ));
-        assert!(!is_within_cache(
+        assert!(!crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv-adjacent/file"
         ));
@@ -7165,7 +6779,7 @@ mod config_guard_tests {
     #[test]
     fn test_is_within_cache_empty_path() {
         let cache_root = std::path::Path::new("/cache");
-        assert!(!is_within_cache(cache_root, ""));
+        assert!(!crate::util::is_within(cache_root, ""));
     }
 
     #[test]
@@ -7174,7 +6788,7 @@ mod config_guard_tests {
         // After normalization, /cache/llmenv/../../../etc/passwd → /etc/passwd,
         // which does not start with /cache/llmenv.
         let escaped = "/cache/llmenv/../../../etc/passwd";
-        assert!(!is_within_cache(cache_root, escaped));
+        assert!(!crate::util::is_within(cache_root, escaped));
     }
 
     #[test]
@@ -7222,14 +6836,14 @@ mod config_guard_tests {
         #[test]
         fn prop_within_cache_reflexive(ref cache_root in r"/[a-z/]+") {
             let path = std::path::Path::new(cache_root);
-            prop_assert!(is_within_cache(path, cache_root));
+            prop_assert!(crate::util::is_within(path, cache_root));
         }
 
         #[test]
         fn prop_within_cache_child_paths(ref cache_root in r"/[a-z/]+", ref suffix in r"[a-z0-9]+") {
             let path = std::path::Path::new(cache_root);
             let child = format!("{}/{}", cache_root, suffix);
-            prop_assert!(is_within_cache(path, &child));
+            prop_assert!(crate::util::is_within(path, &child));
         }
 
         #[test]
@@ -7238,7 +6852,7 @@ mod config_guard_tests {
             // Adjacent directory with similar prefix should not match
             if let Some(base) = cache_root.rfind('/') {
                 let sibling = format!("{}{}", &cache_root[..=base], "other");
-                prop_assert!(!is_within_cache(path, &sibling));
+                prop_assert!(!crate::util::is_within(path, &sibling));
             }
         }
 
@@ -7246,7 +6860,7 @@ mod config_guard_tests {
         fn prop_no_panic_on_arbitrary_strings(ref cache_root in r"/[a-z/]*", ref path_str in ".*") {
             let path = std::path::Path::new(cache_root);
             // Should never panic, even on malformed paths
-            let _ = is_within_cache(path, path_str);
+            let _ = crate::util::is_within(path, path_str);
         }
     }
 }

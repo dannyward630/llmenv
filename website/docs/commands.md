@@ -370,6 +370,7 @@ Inspect ICM memory state for the active scope.
 
 - `memory stats` — record counts by tag/bundle/type, last-written.
 - `memory list` — list stored memories for the active scope.
+  `memory ls` is an alias (added in v3.13.0).
   (changed in v3.12.0) It asks ICM for the memories of the project that the current folder belongs to.
   llmenv names the project like ICM does: the `origin` remote's repository name, else the main repository's folder name,
   else the folder name.
@@ -391,25 +392,63 @@ Inspect ICM memory state for the active scope.
   Remove `retention` from that entry to use the importance-based prune.
   A `retention` on an entry that is not active does not block the prune.
 
-## `prune`
+## `clean`
+
+(added in v3.13.0)
 
 ```text
-llmenv prune [--all] [--older-than DUR] [--dry-run]
+llmenv clean [--all] [--older-than DUR] [--dry-run] [--plugin-cache]
 ```
 
-Clean stale cache folders. Exits non-zero if any plugin cache entry could not
-be removed (added in v3.11.0) — the per-entry failures are printed above the
-summary.
+Remove the cache and state files that llmenv no longer needs.
+`clean` is the one cleanup command.
+It replaces `llmenv prune` and `llmenv doctor --gc`, which are deprecated (see [Deprecated commands](#deprecated-commands)).
 
-- (no flags) — remove folders from previous binary versions and orphaned `*.tmp`
-  staging dirs.
-- `--all` — remove **every** cache folder unconditionally (next `export`
-  re-materializes).
-- `--older-than DUR` — remove only current-version folders older than `DUR`
-  (e.g. `14d`, `1w`).
-- `--dry-run` — preview deletions without removing (works with `--all` and
-  `--older-than`).
-- `--plugin-cache` — also remove the shared plugin cache directory.
+`clean` does two things, in this order:
+
+1. It removes stale cache folders.
+   With no flag, these are the folders from previous binary versions and orphaned `*.tmp` staging folders.
+2. It runs the age-based sweeps, with the window set by `cache_retention_hours` (see [Configuration](configuration.md)).
+   A `null` value turns these sweeps off.
+
+The age-based sweeps remove:
+
+- Old cache entries.
+  On macOS this also drops the keychain credential item of each cache folder that it deletes.
+  The match is by folder path, so your default `~/.claude` login is never affected.
+- Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
+  An entry that a process holds open is kept.
+- Old session-log rotations.
+- Old codebase-memory index databases (`*.db`, `*.db-wal`, `*.db-shm`) in `state/codebase-memory`.
+  Since v3.11.1 (#1493) codebase-memory-mcp keeps its indexes in its own cache unless `index_path` is set.
+  So those files are left from an older setup.
+  A folder that a `features.codebase_memory` `index_path` names is never swept.
+  A database and its `-wal` and `-shm` files go together, judged by the newest of them.
+  A database that a process holds open is kept.
+
+Claude Code transcripts under `state/projects` are not swept.
+Claude Code removes them itself after `cleanupPeriodDays` (set it under `native.claude_code`).
+
+Flags:
+
+- `--all` — remove **every** cache folder unconditionally (the next `export` re-materializes).
+- `--older-than DUR` — in the cache-folder step, remove only current-version cache folders older than `DUR`.
+  Examples: `14d`, `1w`.
+  The age-based sweeps still use `cache_retention_hours`.
+  `--all` and `--older-than` cannot be used together.
+  A bad value stops the command before anything is removed.
+- `--dry-run` — list every item that a real run tries to remove, and remove nothing.
+  This covers the cache folders and every age-based sweep.
+  A real run can still fail on an item that the dry run lists, for example a folder without write access.
+- `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
+  A folder that does not exist is not listed.
+
+`clean` exits non-zero when a cache folder, a plugin cache entry, or a sweep item could not be removed.
+It also exits non-zero when an error made it skip a sweep.
+Examples: `lsof` cannot run, or a `bundle.yaml` cannot be read.
+The failures are printed above the summary, and every other removal still runs first.
+The codebase-memory sweep reads the `index_path` of the top-level config and of every bundle.
+A bundle counts whether or not it is active in the current folder.
 
 ## `read-once`
 
@@ -530,7 +569,8 @@ Only when the open session has no match does the search cover the whole project.
 - `task ls [--format json] (--session <id> | --all) [--state <s>]...
   [--hide-done] [--current-project]` — list tasks. **Requires `--session <id>`
   or `--all`** (added in v3.8.0) — no silent default to every session's
-  tasks; pass `--all` to deliberately see everything. The human output groups
+  tasks; pass `--all` to deliberately see everything. `task list` is an alias
+  of `task ls` (added in v3.13.0). The human output groups
   tasks by session (current-project sessions first), indents subtasks under
   their parent, prefixes each row with a state glyph + label
   (`open`/`wip`/`waiting`/`done`), and annotates blocked tasks with their
@@ -634,6 +674,11 @@ project's hook.
   yours when this conversation started it, or when this same engine process
   started it under an earlier conversation id — the state after a `/clear`
   or a compaction — so `--resume` is the safe choice instead of `--new`.
+  (changed in v3.13.0) When exactly one listed session is yours, `session start` with no flag
+  resumes it and prints one line that names it, instead of the error.
+  The error stays when two or more listed sessions are yours, or when none is.
+  A process id can be reused, so a session that only the engine process ties to you counts for this resume only when
+  it was active after that process started.
   Outside an engine (no such variables) nothing is recorded, and resolution
   works as before.
   (changed in v3.12.0) A session id must be a plain name.
@@ -662,6 +707,7 @@ project's hook.
   description), current-project matches first. This is the recovery path
   after a compaction: with one session open for the project there's exactly
   one match to resume.
+  `task session list` is an alias (added in v3.13.0).
 
 When every task in an open session is done, the SessionStart/Stop hook
 reminders (below) nudge the agent to run `task session finish` or add more
@@ -914,6 +960,8 @@ or to re-authenticate.
 
 ```text
 llmenv setup [PATH] [--repo URL] [--no-launch] [--rescan]
+llmenv setup --scan ROOT...
+llmenv setup --tools
 ```
 
 Interactive setup wizard for new llmenv users. Walks through auth setup (login
@@ -922,8 +970,56 @@ import (choose which keys to seed from your global `settings.json` into the
 materialized config). Writes a template `config.yaml` and an agent orientation
 guide, then optionally hands off to the AI engine for further configuration.
 
+(changed in v3.13.0) The setup skill that the wizard hands off to asks which folders hold your repositories.
+It runs `setup --scan` on them, and proposes one bundle per language or practice, each with the files that support it.
+It runs `setup --tools` and recommends ICM memory and codebase-memory-mcp first.
+You accept or reject each suggestion, and the skill writes nothing before you approve the plan.
+
 - `--no-launch` skips the AI engine handoff at the end.
 - `--rescan` re-scans existing configs without overwriting files.
+
+### `setup --scan`
+
+(added in v3.13.0)
+
+`--scan ROOT...` finds the repositories under each root and prints the evidence as JSON for the onboarding skill.
+It writes nothing, and it does not run the wizard.
+A repository is a folder with a `.git` folder or file; a `.git` symlink does not count.
+The walk does not enter a repository, a hidden folder, or `node_modules`, `target`, `vendor`, `dist`, and `build`.
+A repository with one of those names is still reported.
+The walk does not follow a symlink, and it opens each folder and manifest without following one.
+
+For each repository the JSON gives:
+
+- the top-level names (a folder name ends in `/`),
+- the file names under `.github/workflows/`,
+- the `[package]` name, edition, and `rust-version` of `Cargo.toml`, and whether it declares a workspace;
+  a value that a workspace member inherits reads as `"workspace"`,
+- the script names of `package.json` (not the commands), and its `packageManager`,
+- the project name, `requires-python`, build backend, and `[tool.*]` table names of `pyproject.toml`,
+- notes for the facts that could not be read, such as a manifest that does not parse.
+
+The scan never reads a source file and never runs a script of a scanned repository.
+It refuses the home folder and every folder above it, such as `/`; pass a narrower folder, such as `~/git`.
+`HOME` must be set and must resolve, so that the refusal can be checked.
+A root that cannot be read is an error.
+A manifest that is not a regular file, such as a FIFO, is a note.
+Named constants in `src/onboarding/scan.rs` bound the depth, the repository count, and the folders read.
+Others bound the names per listing and the manifest size.
+The `limits` object in the JSON gives their values.
+A scan that passes the repository bound or the folder bound stops with an error that names the constant.
+
+### `setup --tools`
+
+(added in v3.13.0)
+
+`--tools` prints the tools that onboarding can suggest, as JSON.
+Each tool has its purpose, the evidence that makes it relevant, and its install command per package manager.
+It also has `found`: the binary found on `PATH`, or `null`.
+ICM and codebase-memory-mcp come first as the recommended default, each with the `features` key that a yes turns on.
+The report reads only absolute `PATH` folders, makes no network call, and installs nothing.
+A binary counts as found only when the current user can run it.
+A script install downloads the script and prints the command to run it, so you read the script before you run it.
 
 ## `config-context`
 
@@ -1150,19 +1246,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
 
 - `--all` runs the full orphan analysis across the entire config (all bundles and
   scopes, not just active ones).
-- `--gc` runs cache garbage collection after the diagnostics. On macOS this also
-  drops the keychain credential item belonging to each cache folder it deletes
-  (added in v3.8.0); matched by folder path, so your default `~/.claude` login is
-  never affected. It also sweeps the state temp folder and removes old session-log rotations
-  (added in v3.13.0), with the window set by `cache_retention_hours`.
-  It also removes old codebase-memory index databases (`*.db`, `*.db-wal`, `*.db-shm`) from
-  `state/codebase-memory` (added in v3.13.0). Since v3.11.1 (#1493) codebase-memory-mcp keeps
-  its indexes in its own cache unless `index_path` is set, so those files are left from an
-  older setup. A folder that a `features.codebase_memory` `index_path` names is never swept.
-  A database and its `-wal` and `-shm` files go together, judged by the newest of them, and a
-  database that a process holds open is kept.
-  Claude Code transcripts under `state/projects` are not swept: Claude Code removes them
-  itself after `cleanupPeriodDays` (set it under `native.claude_code`).
+- `--gc` (deprecated in v3.13.0; use [`llmenv clean`](#clean)) runs the age-based sweeps of `llmenv clean` after the diagnostics.
+  It does not remove the stale cache folders that `clean` removes first.
+  It prints `llmenv doctor --gc is deprecated; use llmenv clean` before the sweeps.
+  `doctor` without `--gc` removes nothing.
 - `--probe-mcp` (added in v3.12.0) also starts the stdio MCP servers, to measure their text for the
   MCP text limits check. Starting a server can have side effects, so doctor does it only on request.
 - `--restart-memory-proxy` (added in v3.12.0) replaces the checks; see above.
@@ -1181,3 +1268,15 @@ deprecation warning and delegate to `status <subcommand>`. Use the
 | `llmenv mcp-ls` | `llmenv status mcps` |
 | `llmenv marketplace-ls` | `llmenv status marketplaces` |
 | `llmenv plugin-ls` | `llmenv status plugins` |
+
+### `prune`
+
+(deprecated in v3.13.0) Use [`llmenv clean`](#clean).
+`llmenv prune` takes the same flags as `clean` and runs all of `clean`, the age-based sweeps included.
+It prints `llmenv prune is deprecated; use llmenv clean` first.
+
+### `doctor --gc`
+
+(deprecated in v3.13.0) Use [`llmenv clean`](#clean).
+`llmenv doctor --gc` keeps the sweeps it ran before, and prints `llmenv doctor --gc is deprecated; use llmenv clean`.
+Like `clean`, it exits non-zero when a sweep item could not be removed or an error made it skip a sweep.

@@ -128,6 +128,9 @@ Before v3.12.1 any link-local address made the SessionStart health check report 
 MCP HTTP requests ignore proxy environment variables (changed after v3.12.2).
 A proxy resolves the host itself, so it would send a request to a private address outside llmenv's address check.
 An MCP server that is reachable only through a proxy is not supported.
+(added in v3.13.0) When `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` (in either case) is set and llmenv cannot connect to or send to the MCP server, the error names the variable and links here.
+The request and its cause come first, so the cause is not a bare timeout.
+The umans usage fetch of the throttle feature skips proxies too, and its errors carry the same note.
 
 ### Tool search and the ICM tools (added in v3.12.0)
 
@@ -329,10 +332,15 @@ An entry with an unset variable is dropped.
 A relative entry or a `~user` entry is rejected by `llmenv validate`.
 llmenv warns about a configured entry that is not a folder.
 The SessionStart notice and `llmenv doctor` list the recorded roots.
+(changed in v3.13.0) When no root is recorded, `llmenv doctor` says that indexing is unconfined.
 They name each configured root that the server does not cover, with the command to record it.
 They also name a recorded root that no configured root covers.
 A `PreToolUse` guard denies an `index_repository` call whose `repo_path` is outside the recorded roots,
 once any root is recorded.
+(changed in v3.13.0) The guard reads the roots of the `codebase_memory` entry whose `when` tags are active, which is the server of the session.
+When no entry's tags are active, as after a `cd` out of the project, or when the scopes cannot be read, it reads every entry, as before.
+The entries are those of `config.yaml` and of the bundles that fire, as `llmenv export` merges them.
+A `bundle.yaml` that cannot be read denies the call, because its entry may set the roots.
 The deny text asks you to record the folder.
 The guard also denies a call while the recorded roots cannot be read, and denies a relative `repo_path`.
 codebase-memory-mcp has no command to remove a root.
@@ -492,6 +500,9 @@ and deletes the file when it succeeds.
 If the child dies, or ICM is down, the file stays.
 The next session start runs the job again, up to 3 attempts and at most 20 jobs for each start, and `llmenv doctor` lists what is left.
 llmenv deletes a checkpoint after 7 days.
+(changed in v3.13.0) A job runs in the working directory of its first run.
+When that directory is gone, the session start deletes the checkpoint and shows one notice that names the job.
+A failed start of a resumed job uses up one of its 3 attempts.
 Consolidation keeps the model summary in its checkpoint, so a resume never pays for the model twice.
 The index job is not resumed, because every session start runs the indexer anyway.
 See [Background work](troubleshooting.md#background-work-that-did-not-finish).
@@ -648,6 +659,14 @@ It chooses memories from the prompt, the recent tool calls, the newest tool erro
 A compaction or `/clear` resets the state, so the scope-tagged memories go out again.
 Set `features.memory[].adaptive_recall: false` to send the same scope-tagged memories on every prompt.
 See [`memory:`](configuration.md#featuresmemory) and [`hook-run`](commands.md#hook-run).
+
+### Fetched pages (added in v3.2.0)
+
+After a `WebFetch` or `WebSearch` call, a detached child stores the first 1,000 characters of the result in ICM at importance `low`.
+(changed in v3.13.0) The topic is `web-fetch-<project>`, with the project of the session, so only that project's own recall returns the page.
+A recall across all projects leaves out every `web-fetch` topic.
+A page from a session with no known project is stored under `web-fetch`.
+To remove the pages of one project, run `icm_memory_forget_topic` with its `web-fetch-<project>` topic.
 
 ### Post-session consolidation (added in v3.12.0)
 

@@ -28,7 +28,7 @@ const FIX: &str = "fix it in the source bundle, then run llmenv regenerate; Clau
 
 /// One always-loaded piece of instruction text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Contributor {
+struct Contributor {
     pub bundle: String,
     pub file: String,
     pub chars: usize,
@@ -36,7 +36,7 @@ pub(super) struct Contributor {
 
 /// What `measure` finds in a merged manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InstructionSizeReport {
+struct InstructionSizeReport {
     pub total_chars: usize,
     pub claude_md_chars: usize,
     /// Every always-loaded contributor, largest first.

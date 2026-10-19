@@ -65,7 +65,7 @@ impl Importance {
 #[derive(Debug, Default, PartialEq)]
 pub struct PruneResult {
     /// Total records found.
-    total: usize,
+    pub(crate) total: usize,
     /// Critical-importance records (always kept).
     critical: usize,
     /// High-importance records (always kept).
@@ -336,35 +336,6 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
     }
 
     Ok(result)
-}
-
-/// Run an automatic prune pass during materialize if the active config has
-/// `auto_prune: true`. Fail-soft: errors are logged as warnings, never
-/// returned.
-pub(crate) fn auto_prune_if_enabled(config: &crate::config::Config) {
-    let auto = config
-        .features
-        .as_ref()
-        .and_then(|f| f.memory.iter().find(|m| m.auto_prune))
-        .is_some();
-
-    if !auto {
-        return;
-    }
-
-    tracing::info!("auto_prune: running memory prune pass during materialize");
-    match run(false) {
-        Ok(result) => {
-            tracing::info!(
-                "auto_prune: forgot {} record(s) ({} total evaluated)",
-                result.forgotten,
-                result.total
-            );
-        }
-        // `tracing` warnings are off at the default log level, and the user must learn that
-        // the configured prune did not run.
-        Err(e) => eprintln!("warning: auto_prune did not run: {e:#}"),
-    }
 }
 
 #[cfg(test)]

@@ -400,35 +400,16 @@ pub(crate) fn known_engine_ids() -> Vec<String> {
         .collect()
 }
 
-/// Whether `name` resolves to an executable on the current `PATH`.
-///
-/// Uses the platform `which` command so the result matches what a shell would
-/// find. `Ok(false)` when `which` exits non-zero.
-///
-/// Names containing `/` or ASCII whitespace are unconditionally rejected;
-/// they cannot be plain binary names and would produce confusing `which` behaviour.
-///
-/// # Errors
-/// `which` cannot start. The caller must not read that as "not installed" (#2753).
-pub(crate) fn binary_on_path(name: &str) -> anyhow::Result<bool> {
-    binary_on_path_with("which", name)
+/// Whether `name` resolves to an executable in an absolute folder of the current `PATH` (#2932).
+/// A name that holds whitespace or `/` cannot be a plain program name, so it is never found.
+pub(crate) fn binary_on_path(name: &str) -> bool {
+    binary_on_path_in(name, std::env::var_os("PATH").as_deref())
 }
 
-/// [`binary_on_path`] with the lookup program as a parameter, so a test can name one that
-/// cannot start.
-fn binary_on_path_with(which: &str, name: &str) -> anyhow::Result<bool> {
-    if name.contains('/') || name.chars().any(char::is_whitespace) {
-        return Ok(false);
-    }
-    let output = std::process::Command::new(which)
-        .arg(name)
-        .output()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "cannot run `which` to look for `{name}`: {e}. Fix: check that `which` is on PATH"
-            )
-        })?;
-    Ok(output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty())
+/// [`binary_on_path`] with `PATH` passed in, so a test needs no environment change.
+fn binary_on_path_in(name: &str, path_var: Option<&std::ffi::OsStr>) -> bool {
+    !name.chars().any(char::is_whitespace)
+        && crate::path_lookup::find_on_path(name, path_var).is_some()
 }
 
 /// The first line of every injected ICM memory block.
@@ -563,8 +544,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AgentAdapter, SessionStartContext, active_adapter_from, binary_on_path, emit_hook_context,
-        engine_id, known_engine_ids, modeled_key_redirect, overlay_native_json,
+        AgentAdapter, SessionStartContext, active_adapter_from, binary_on_path, binary_on_path_in,
+        emit_hook_context, engine_id, known_engine_ids, modeled_key_redirect, overlay_native_json,
         registered_adapters, remote_transport_type_str, resolve_bundle_relative_paths,
         strip_json_nulls,
     };
@@ -941,45 +922,34 @@ mod tests {
 
     #[test]
     fn binary_on_path_true_for_sh() {
-        assert!(
-            binary_on_path("sh").unwrap(),
-            "sh must be on PATH in any POSIX env"
-        );
-    }
-
-    #[test]
-    fn binary_on_path_is_an_error_when_the_lookup_cannot_start() {
-        let err = super::binary_on_path_with("__llmenv_no_such_which__", "sh").unwrap_err();
-        let text = format!("{err:#}");
-        assert!(text.contains("`sh`") && text.contains("Fix:"), "{text}");
+        assert!(binary_on_path("sh"), "sh must be on PATH in any POSIX env");
     }
 
     #[test]
     fn binary_on_path_false_for_bogus_binary() {
-        assert!(
-            !binary_on_path("__llmenv_no_such_binary_xyzzy__").unwrap(),
-            "bogus binary must not be found on PATH"
-        );
+        assert!(!binary_on_path("__llmenv_no_such_binary_xyzzy__"));
     }
 
     #[test]
-    fn binary_on_path_rejects_slash() {
-        assert!(
-            !binary_on_path("/usr/bin/sh").unwrap(),
-            "path with '/' must be rejected without spawning which"
-        );
+    fn binary_on_path_rejects_slash_and_whitespace() {
+        for name in ["/usr/bin/sh", "sh -c echo", "sh\techo"] {
+            assert!(!binary_on_path(name), "{name:?}");
+        }
     }
 
     #[test]
-    fn binary_on_path_rejects_whitespace() {
-        assert!(
-            !binary_on_path("sh -c echo").unwrap(),
-            "name with whitespace must be rejected without spawning which"
-        );
-        assert!(
-            !binary_on_path("sh\techo").unwrap(),
-            "name with tab must be rejected without spawning which"
-        );
+    fn binary_on_path_skips_a_relative_path_folder() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let tool = dir.path().join("planted-2932");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let relative = std::path::Path::new(".").join(dir.path().file_name().unwrap());
+        let path_var = std::env::join_paths([&relative]).unwrap();
+        assert!(!binary_on_path_in("planted-2932", Some(&path_var)));
+        let absolute = std::fs::canonicalize(dir.path()).unwrap();
+        let path_var = std::env::join_paths([absolute]).unwrap();
+        assert!(binary_on_path_in("planted-2932", Some(&path_var)));
     }
 
     #[test]
