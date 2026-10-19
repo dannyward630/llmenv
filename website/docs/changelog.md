@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `llmenv clean` is the one cleanup command. It removes the stale cache folders that `prune` removed, then runs the age-based sweeps that `doctor --gc` ran, and `--dry-run` lists every item from both. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#clean) (#2917) [feat:cli]
-- `llmenv task list` is an alias of `llmenv task ls` (#2905) [feat:task]
+- `llmenv task list` is an alias of `llmenv task ls`, `llmenv task session list` of `llmenv task session ls`, and `llmenv memory ls` of `llmenv memory list` (#2905) [feat:task]
 - At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv clean` (#2815) [feat:hooks]
 - A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
 

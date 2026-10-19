@@ -370,6 +370,7 @@ Inspect ICM memory state for the active scope.
 
 - `memory stats` — record counts by tag/bundle/type, last-written.
 - `memory list` — list stored memories for the active scope.
+  `memory ls` is an alias (added in v3.13.0).
   (changed in v3.12.0) It asks ICM for the memories of the project that the current folder belongs to.
   llmenv names the project like ICM does: the `origin` remote's repository name, else the main repository's folder name,
   else the folder name.
@@ -692,6 +693,7 @@ project's hook.
   description), current-project matches first. This is the recovery path
   after a compaction: with one session open for the project there's exactly
   one match to resume.
+  `task session list` is an alias (added in v3.13.0).
 
 When every task in an open session is done, the SessionStart/Stop hook
 reminders (below) nudge the agent to run `task session finish` or add more

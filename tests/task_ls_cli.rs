@@ -85,3 +85,18 @@ fn list_is_an_alias_of_ls() {
         .success()
         .stdout(predicates::str::contains("Ship the release"));
 }
+
+// The list-style subcommands accept both spellings, so an agent's guess works (#2905).
+#[test]
+fn every_list_subcommand_accepts_both_spellings() {
+    let dir = TempDir::new().unwrap();
+    start_session(dir.path(), "sprint");
+    llmenv(dir.path())
+        .args(["task", "session", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("sprint"));
+    for args in [["memory", "ls", "--help"], ["memory", "list", "--help"]] {
+        llmenv(dir.path()).args(args).assert().success();
+    }
+}

@@ -657,6 +657,7 @@ enum TaskSessionCommand {
         format: Option<TaskListFormat>,
     },
     /// List every currently open session, current-project matches first.
+    #[command(visible_alias = "list")]
     Ls,
 }
 
@@ -790,6 +791,7 @@ enum MemoryCommand {
     /// Show memory stats (record counts by tag/bundle/type, last-written).
     Stats,
     /// List stored memories for the active scope.
+    #[command(visible_alias = "ls")]
     List,
     /// Show what changed since the last session.
     Diff,
