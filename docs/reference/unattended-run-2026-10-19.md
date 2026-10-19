@@ -91,12 +91,47 @@ All commits were signed again with `resign.sh` before the push.
 | #2946 | Blocked | Symlink policy for a cloned repo's `.llmenv.yaml`. |
 | #2944 | Open | Filed by the last sprint's review; the user stopped feature work first. |
 | #2945 | Open | Filed by the last sprint's review; the user stopped feature work first. |
+| #2950 | Blocked | Whether the main recall should read every project. |
+| #2947 | Open | Filed by the whole-branch review (P1). |
+| #2948 | Open | Filed by the whole-branch review. |
+| #2949 | Open | Filed by the whole-branch review. |
 
 Each blocked issue has a comment with the options and a recommendation.
 
 ## Review of the whole branch
 
-REVIEW-PENDING
+The whole branch was reviewed against `origin/release/3.x` in strict mode, after each sprint's own review.
+
+Analyzers that ran: silent-failure-hunter, security-audit, variant-bug-hunter, property-test-gap-finder,
+and overengineering-reviewer.
+Semgrep `p/rust` ran over the 118 changed Rust files.
+Every analyzer ran; none was skipped.
+
+Counts: 0 P0, 4 P1, and 33 P2, from 37 findings.
+
+Fixed:
+
+- P1: the codebase-memory guard saw only the root config's entries.
+  An entry that only a bundle declares let every path pass.
+- P1: `claude --version` (run by export at each prompt), login, setup, and `lsof` spawned a bare program name.
+- P1: an empty front matter block leaked its fences into the rule text, and `$/x` read as a path under a variable.
+- Error reports: the `doctor --gc` exit code, the plugin cache listing, and the `.llmenv.yaml` read notice.
+- Error text: write errors name the file, causes are logged at error level, and the `ps` and respawn errors name the cause.
+- Path checks in `llmenv login` and `is_within`, and the bounded checkpoint and `--context-file` reads.
+- The install hints that ran a script after a pager.
+- Duplicate helpers: `shell_escape`, the notice truncation, and a public export with no outside caller.
+
+Filed:
+
+- #2947 (P1): `auto_prune` gates on one entry and prunes another backend.
+- #2948: `gh`, `git`, and `icm` still spawn by bare name.
+- #2949: the transcript fold recurses by path.
+- #2950 (blocked): the main recall reads every project; needs an owner decision.
+- #2944 (extended): the health probe and doctor miss bundle-only codebase-memory entries.
+- #2945 already covers the onboarding manifest reader.
+
+Dismissed: none.
+Two variant seeds (per-subagent Stop state, checkpoint cwd) produced no variant.
 
 ## Lessons
 
@@ -116,4 +151,4 @@ REVIEW-PENDING
 1. Answer the open question on each blocked issue in the table above.
 2. Merge this PR into `release/3.x` with a merge commit.
 3. Let the forward-merge workflow carry it to `release/4.x` and `main`, and fix any conflict it opens.
-4. Pick up #2944 and #2945 in the next run.
+4. Pick up #2947 first (P1), then #2944, #2945, #2948, and #2949 in the next run.
