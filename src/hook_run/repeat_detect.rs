@@ -146,20 +146,6 @@ pub(super) fn session_state_path(state_dir: &Path, session_id: &str) -> PathBuf 
     repeat_detect_state_dir(state_dir).join(format!("{session_id}.json"))
 }
 
-/// The state file name for one agent of the session. Parallel subagents share the session id,
-/// so each subagent gets its own counter (#2901). The main agent keeps the bare session id,
-/// which `handle_stop` and the `/clear` reset also use. The agent part is a hash of the session id
-/// and the agent id, so any `agent_id` is safe in a path and no two keys are equal.
-fn state_key(session_id: &str, stdin_payload: &serde_json::Value) -> String {
-    let agent_id = match stdin_payload.get("agent_id") {
-        None | Some(serde_json::Value::Null) => return session_id.to_string(),
-        Some(serde_json::Value::String(id)) => id.clone(),
-        Some(other) => other.to_string(),
-    };
-    let hash = super::record_hash::hash_prefix(format!("{session_id}\0{agent_id}").as_bytes());
-    format!("{session_id}.agent-{hash}")
-}
-
 /// Handle a `PreToolUse` event for the repeat-detect feature.
 ///
 /// Returns an empty string to pass the call through, or a warning naming the
@@ -203,7 +189,7 @@ pub(crate) fn handle_pre_tool_use(
         tracing::error!("tool_name missing or not a string for PreToolUse payload");
         return String::new();
     };
-    let state_key = state_key(session_id, stdin_payload);
+    let state_key = super::session_state::agent_state_key(session_id, stdin_payload);
     let tool_input = stdin_payload
         .get("tool_input")
         .cloned()

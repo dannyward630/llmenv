@@ -111,6 +111,22 @@ fn note_prune_failure(what: &str, path: &Path, err: &std::io::Error) {
     ));
 }
 
+/// The state file name for the agent that fired the hook. Parallel subagents share the session
+/// id, so each subagent gets its own state (#2901, #2936). The main agent keeps the bare session
+/// id, which the Stop handlers and the `/clear` reset also use. The agent part is a hash of the
+/// session id and the agent id, so any `agent_id` is safe in a path and no two keys are equal.
+/// A session id that is not a plain name comes back as it is, so the caller still rejects it.
+pub(crate) fn agent_state_key(session_id: &str, payload: &serde_json::Value) -> String {
+    let agent_id = match payload.get("agent_id") {
+        None | Some(serde_json::Value::Null) => return session_id.to_string(),
+        _ if !crate::paths::is_valid_short_name(session_id) => return session_id.to_string(),
+        Some(serde_json::Value::String(id)) => id.clone(),
+        Some(other) => other.to_string(),
+    };
+    let hash = super::record_hash::hash_prefix(format!("{session_id}\0{agent_id}").as_bytes());
+    format!("{session_id}.agent-{hash}")
+}
+
 /// Whether a `SessionStart` `source` means the model's context was emptied, so
 /// state that records what the model has seen no longer holds (#2381).
 pub(crate) fn context_was_lost(source: Option<&str>) -> bool {

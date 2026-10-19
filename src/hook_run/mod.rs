@@ -44,11 +44,17 @@ mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
+mod stop_reminder;
 pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
 pub(crate) mod transcript;
 mod transcript_link;
+use stop_reminder::resolve_stop_reminder;
 mod web_fetch;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod agent_state_tests;
 
 use std::io::Write;
 use std::str::FromStr;
@@ -920,6 +926,9 @@ fn resolve_pre_tool_text(
     // silently downgrade the deny to an allow.
     // #317 phase 3: checked before the write guard only because both deny and
     // the first deny wins; neither ordering is load-bearing beyond that.
+    // Each subagent keeps its own hook state (#2936). Repeat detection derives the same key.
+    let agent_key = claude_session_id.map(|id| session_state::agent_state_key(id, stdin_payload));
+    let state_id = agent_key.as_deref();
     let scan_deny = crate::hook_run::slippage::handle_transcript_scan(
         config.features.as_ref().and_then(|f| f.slippage.as_ref()),
         stdin_payload,
@@ -931,7 +940,7 @@ fn resolve_pre_tool_text(
     let write_guard = crate::hook_run::slippage::handle_pre_tool_use(
         config.features.as_ref().and_then(|f| f.slippage.as_ref()),
         stdin_payload,
-        claude_session_id,
+        state_id,
         state_dir,
     );
     if !write_guard.is_empty() {
@@ -948,7 +957,7 @@ fn resolve_pre_tool_text(
         let deny = crate::hook_run::task_nudge::handle_pre_tool_use(
             tracker,
             stdin_payload,
-            claude_session_id,
+            state_id,
             state_dir,
         );
         if !deny.is_empty() {
@@ -966,7 +975,7 @@ fn resolve_pre_tool_text(
     {
         let ro_text = crate::hook_run::read_once::handle_pre_tool_use(
             stdin_payload,
-            claude_session_id,
+            state_id,
             read_once,
             state_dir,
         );
@@ -1008,68 +1017,6 @@ fn resolve_pre_tool_text(
         .flatten()
         .collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
-/// The task-tracker's `Stop` reminder, with repeat-detection applied: once
-/// the identical reminder has fired `threshold` times in a row for this
-/// session, `repeat_detect::handle_stop` appends a pointer to `llmenv task
-/// wait` (see #1006 — this is the same on-by-default detector as
-/// `resolve_pre_tool_text`, applied to Stop-event nagging instead of
-/// `PreToolUse` tool-call repetition).
-fn resolve_stop_reminder(
-    state_dir: &std::path::Path,
-    claude_session_id: Option<&str>,
-    config: &crate::config::Config,
-    stop_payload: &serde_json::Value,
-) -> String {
-    // #2511: a stop that a Stop hook caused gets no reminder, so the hook cannot loop the agent.
-    if stop_dedupe::is_hook_continuation(stop_payload) {
-        return String::new();
-    }
-    let mut reminder = crate::task::stop_hook_reminder(state_dir, claude_session_id);
-    // #2456: a turn that ends with a question to the user parks the task that waits for it.
-    if let Some(tracker) = config
-        .features
-        .as_ref()
-        .and_then(|f| f.task_tracker.as_ref())
-    {
-        let waiting = crate::hook_run::task_nudge::handle_stop(tracker, stop_payload, state_dir);
-        if !waiting.is_empty() {
-            if !reminder.is_empty() {
-                reminder.push_str("\n\n");
-            }
-            reminder.push_str(&waiting);
-        }
-    }
-    // #317: appended before repeat-detect wraps the text, so a repeat warning
-    // stays the last thing read — it's about the turn that just happened,
-    // while the checklist is about what to do before ending.
-    let critique = crate::hook_run::slippage::handle_stop(
-        config.features.as_ref().and_then(|f| f.slippage.as_ref()),
-    );
-    if !critique.is_empty() {
-        if !reminder.is_empty() {
-            reminder.push_str("\n\n");
-        }
-        reminder.push_str(&critique);
-    }
-    // #2511: runs before repeat-detect, which counts only the reminders that are emitted.
-    let reminder = stop_dedupe::emit_once(state_dir, claude_session_id, &reminder);
-    let repeat_detect_cfg = config
-        .features
-        .as_ref()
-        .and_then(|f| f.repeat_detect.clone())
-        .unwrap_or_default();
-    if repeat_detect_cfg.enabled {
-        crate::hook_run::repeat_detect::handle_stop(
-            &reminder,
-            claude_session_id,
-            &repeat_detect_cfg,
-            state_dir,
-        )
-    } else {
-        reminder
-    }
 }
 
 /// Build the `LLMENV_TRACE_TIMING` marker payload from whichever phase
@@ -1285,13 +1232,14 @@ fn run_inner(
     // #317: counted here rather than inside the pipeline below, which the
     // #702 early-exit can skip entirely — a metric that only accrues when
     // something else happens to want the event would undercount silently.
+    let agent_key = claude_session_id.map(|id| session_state::agent_state_key(id, stdin_payload));
     if counts_tool_use(event)
         && let Some(state_dir) = state_dir_or_log("slippage counters not updated")
     {
         crate::hook_run::slippage::handle_post_tool_use(
             config.features.as_ref().and_then(|f| f.slippage.as_ref()),
             stdin_payload,
-            claude_session_id,
+            agent_key.as_deref(),
             &state_dir,
         );
     }
@@ -1334,7 +1282,7 @@ fn run_inner(
         let text = crate::hook_run::task_nudge::handle_post_tool_use(
             tracker,
             stdin_payload,
-            claude_session_id,
+            agent_key.as_deref(),
             &state_dir,
         );
         (!text.is_empty()).then_some(text)
