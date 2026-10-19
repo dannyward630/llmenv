@@ -843,7 +843,7 @@ pub(super) fn unknown_neutral_tools(capabilities: &Capabilities) -> Vec<UnknownT
 
 /// A neutral tool whose mapping onto an active engine isn't one-to-one (#1371).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InexactToolMapping {
+struct InexactToolMapping {
     /// The neutral tool name the user wrote.
     pub tool: String,
     /// The engine id whose mapping differs.
@@ -1019,7 +1019,7 @@ const LEGACY_TOOL_REPLACEMENTS: &[(&str, &str)] = &[("grep", "rg"), ("find", "fd
 /// A config `allow` rule for a legacy tool with no matching allow rule for
 /// its recommended replacement (#975).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct LegacyToolRule {
+struct LegacyToolRule {
     pub legacy: &'static str,
     pub replacement: &'static str,
 }

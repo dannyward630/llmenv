@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 719f7f0699bcb2b90773c215856ae1a0cb28613cae9b3189e630f6d88256b37d # shrinks to scopes = [("network", {"b"})], extra = {}, loose = {}

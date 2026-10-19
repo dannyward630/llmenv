@@ -19,6 +19,29 @@ fn needs_escape(c: char) -> bool {
         )
 }
 
+/// `s` in single quotes, with each embedded single quote closed, escaped, and reopened. The
+/// shell expands nothing inside, so the text reaches the command as it is.
+pub(crate) fn single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `path` as one shell word, so a command in a message can be pasted as it is.
+pub(crate) fn shell_word(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@%".contains(c));
+    if plain {
+        text
+    } else if text.is_empty() {
+        // An empty word would vanish from the pasted command, so it is written as a quoted empty.
+        "''".to_string()
+    } else {
+        single_quote(&text)
+    }
+}
+
 /// Escape every C0/C1 control character in `s` (`char::is_control`) so it's
 /// safe to print verbatim to a terminal (#1076). Config-derived strings
 /// (`native_permissions.*` keys, permission tool names and patterns,

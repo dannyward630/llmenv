@@ -231,25 +231,66 @@ mod tests {
     }
 
     proptest! {
+        /// Any text expands or is refused, and never panics.
         #[test]
-        fn expanding_never_panics_and_leaves_no_dollar(
-            entry in "\\PC{0,40}",
-        ) {
+        fn expanding_never_panics(entry in "\\PC{0,40}") {
             let env = |name: &str| Some(format!("/v/{name}"));
-            if let Some(path) = expand_root(&entry, Some(Path::new("/home/u")), &env) {
-                let text = path.to_string_lossy().into_owned();
-                prop_assert!(!text.contains('$'), "{text}");
-            }
+            let _ = expand_root(&entry, Some(Path::new("/home/u")), &env);
         }
 
+        /// `~` and `~/rest` expand against the given home, `~name` is refused, and an entry
+        /// with no `~` and no `$` is the trimmed entry itself (#2924).
         #[test]
-        fn declared_roots_never_repeat(
-            extra in prop::collection::vec("/[a-z]{1,5}(/[a-z]{1,5}){0,2}", 0..5),
+        fn expanding_follows_the_tilde_rules(
+            rest in "(/[a-z]{1,5}){0,3}",
+            name in "[a-z]{1,5}",
+            plain in "/[a-z]{1,5}(/[a-z]{1,5}){0,2}",
         ) {
-            let c = cm(&extra.iter().map(String::as_str).collect::<Vec<_>>());
-            let roots = configured_roots_in(&c, &bases(), &no_env);
-            let unique: std::collections::BTreeSet<_> = roots.iter().collect();
-            prop_assert_eq!(unique.len(), roots.len());
+            let home = Path::new("/home/u");
+            prop_assert_eq!(
+                expand_root(&format!("~{rest}"), Some(home), &no_env),
+                Some(PathBuf::from(format!("/home/u{rest}")))
+            );
+            prop_assert_eq!(expand_root(&format!("~{name}{rest}"), Some(home), &no_env), None);
+            prop_assert_eq!(expand_root(&format!("~{rest}"), None, &no_env), None);
+            prop_assert_eq!(
+                expand_root(&format!("  {plain} "), Some(home), &no_env),
+                Some(PathBuf::from(&plain))
+            );
+            let env = |name: &str| (name == "W").then(|| "/v/W".to_string());
+            prop_assert_eq!(
+                expand_root(&format!("~{rest}/$W"), Some(home), &env),
+                Some(PathBuf::from(format!("/home/u{rest}/v/W")))
+            );
+        }
+
+        /// The roots are the expanded entries in first-seen order, each once, and an entry with
+        /// an unset variable is dropped. The pool makes repeats common, and `$W/x` and `/w/x`
+        /// name one root after expansion.
+        #[test]
+        fn declared_roots_are_the_first_occurrence_of_each_expansion(
+            entries in prop::collection::vec(
+                prop::sample::select(vec!["/a", "/a/b", "$W/x", "/w/x", "$UNSET/y", "/a"]),
+                0..8,
+            ),
+        ) {
+            let env = |name: &str| (name == "W").then(|| "/w".to_string());
+            let c = cm(&entries);
+            let roots = configured_roots_in(&c, &bases(), &env);
+            let mut expected: Vec<PathBuf> = Vec::new();
+            for entry in &entries {
+                let expanded = match *entry {
+                    "$W/x" => Some("/w/x"),
+                    "$UNSET/y" => None,
+                    other => Some(other),
+                };
+                if let Some(path) = expanded.map(PathBuf::from)
+                    && !expected.contains(&path)
+                {
+                    expected.push(path);
+                }
+            }
+            prop_assert_eq!(roots, expected);
         }
     }
 }
