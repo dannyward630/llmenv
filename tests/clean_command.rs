@@ -131,3 +131,35 @@ fn all_and_older_than_are_refused_together() {
     assert!(stderr.contains("--all"), "{stderr}");
     assert!(f.orphan_stage.exists() && f.old_tmp_file.exists());
 }
+
+#[test]
+fn a_failed_sweep_fails_clean_after_the_other_removals() {
+    let f = fixture();
+    let config = "cache:\n  cache_dir: ~/cache\n  cache_retention_hours: 168\nbundle:\n  - name: work\n    when: [work]\n";
+    fs::write(f.dir.path().join("config.yaml"), config).expect("write config");
+    fs::create_dir_all(f.dir.path().join("bundles/work")).expect("mkdir bundle");
+    fs::write(
+        f.dir.path().join("bundles/work/bundle.yaml"),
+        "features: [not, a, mapping]\n",
+    )
+    .expect("write bundle");
+    fs::create_dir_all(f.dir.path().join("codebase-memory")).expect("mkdir cbm");
+
+    let (ok, stderr) = run(f.dir.path(), &["clean"]);
+
+    assert!(!ok, "clean exited 0 with a skipped sweep: {stderr}");
+    assert!(
+        stderr.contains("could not be checked or removed"),
+        "{stderr}"
+    );
+    assert!(!f.orphan_stage.exists() && !f.old_tmp_file.exists());
+}
+
+#[test]
+fn a_bad_older_than_value_removes_nothing() {
+    let f = fixture();
+    let (ok, stderr) = run(f.dir.path(), &["clean", "--older-than", "14dayz"]);
+    assert!(!ok, "clean accepted a bad duration");
+    assert!(stderr.contains("--older-than"), "{stderr}");
+    assert!(f.orphan_stage.exists() && f.old_tmp_file.exists());
+}
