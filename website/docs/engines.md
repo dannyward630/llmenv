@@ -386,7 +386,7 @@ opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns 
 | `AGENTS.md` | the merged rules document opencode loads as project instructions — omitted entirely when that resolves to nothing (added in v3.10.0; earlier versions wrote a 0-byte file) |
 | `rules/*.md` | rule files copied verbatim and listed in `instructions` by absolute path, because opencode 2.x resolves a relative entry from the project folder (changed in v3.13.0) |
 | skills (`SKILL.md`) | first-class and plugin-projected skills, in opencode's claude-compatible format |
-| `command/*.md`, `agent/*.md` | plugin commands and agents translated (agents gain `mode: subagent`) |
+| `command/*.md`, `commands/*.md`, `agents/*.md` | plugin commands go to `command/`; bundle commands are translated in place in `commands/`; plugin and bundle agents go to `agents/` and gain `mode: subagent`. A bundle agent replaces a plugin agent of the same name (changed in v3.13.0: agents were in `command/`, so opencode showed them as slash commands) |
 | `plugin/llmenv.js` | the llmenv plugin for the opencode 2.x plugin API: it runs the hooks of `plugin/llmenv-hooks.json` (changed in v3.13.0) |
 | `plugin/llmenv-hooks.json` | the hook table: each hook's event, matcher, command, and timeout, the opencode-to-Claude tool name map, and the MCP server namespaces (added in v3.13.0) |
 

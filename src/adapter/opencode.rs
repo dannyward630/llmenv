@@ -578,7 +578,10 @@ impl AgentAdapter for OpencodeAdapter {
                     })?;
                     let source = std::fs::read_to_string(&path)?;
                     let translated = translate_agent_md(&source, name)?;
-                    let out_name = format!("command/__plugin_agent_{name}.md");
+                    // opencode 2.x reads agents from `agents/`; a file in `command/` is a slash
+                    // command (#2844).
+                    let out_name = format!("agents/{name}.md");
+                    std::fs::create_dir_all(out.join("agents"))?;
                     crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                     plugin_skill_paths.push(PathBuf::from(&out_name));
                 }
@@ -1071,10 +1074,11 @@ impl AgentAdapter for OpencodeAdapter {
                         rel.display(),
                     )
                 })?;
+                // The bundle copy at `rel` is already in a folder opencode reads, so the
+                // translation replaces it and the command is not listed two times (#2844).
                 let translated = translate_command_md(&source, name)?;
-                let out_name = format!("command/__bundle_{name}.md");
-                crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
-                owned.push(PathBuf::from(&out_name));
+                write_translated(out, rel, &translated)?;
+                owned.push(rel.clone());
             }
             if rel_str.starts_with("agents/") && rel_str.ends_with(".md") {
                 let source = std::fs::read_to_string(abs).map_err(|e| {
@@ -1087,9 +1091,15 @@ impl AgentAdapter for OpencodeAdapter {
                     )
                 })?;
                 let translated = translate_agent_md(&source, name)?;
-                let out_name = format!("command/__bundle_agent_{name}.md");
-                crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
-                owned.push(PathBuf::from(&out_name));
+                if owned.contains(rel) {
+                    eprintln!(
+                        "warning: bundle agent '{}' replaces the plugin agent of the same name \
+                         for opencode. Fix: rename one of the two agents",
+                        rel.display()
+                    );
+                }
+                write_translated(out, rel, &translated)?;
+                owned.push(rel.clone());
             }
         }
 
@@ -1616,11 +1626,22 @@ fn render_opencode_default_models(
     )
 }
 
+/// Write the translation of the bundle file `rel` over its copy in `out`.
+fn write_translated(out: &Path, rel: &Path, translated: &str) -> anyhow::Result<()> {
+    let dest = out.join(rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::paths::write_owner_only(&dest, translated.as_bytes())
+        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", dest.display()))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    mod agents;
     mod hook_table;
     use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
@@ -3477,33 +3498,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_bundle_command_from_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-
-        let src_dir = tempfile::tempdir().unwrap();
-        let cmd_file = src_dir.path().join("test-cmd.md");
-        std::fs::write(
-            &cmd_file,
-            "---\ndescription: A test command\nmodel: claude-sonnet-4-20250514\n---\n\nRun this thing.",
-        )
-        .unwrap();
-
-        manifest
-            .files
-            .insert(PathBuf::from("commands/test-cmd.md"), cmd_file);
-
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-
-        let out_cmd = tmp.path().join("command/__bundle_test-cmd.md");
-        assert!(out_cmd.exists());
-        let content = std::fs::read_to_string(&out_cmd).unwrap();
-        assert!(content.contains("description: A test command"));
-        assert!(!content.contains("model:")); // dropped for commands
-        assert!(content.contains("Run this thing."));
-    }
-
-    #[test]
     fn env_vars_returns_opencode_config_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let vars = OpencodeAdapter.env_vars(tmp.path(), tmp.path()).unwrap();
@@ -3693,33 +3687,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_plugin_commands_and_agents_translated() {
-        let out = tempfile::tempdir().unwrap();
-        let plugin_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(plugin_dir.path().join("commands")).unwrap();
-        std::fs::write(
-            plugin_dir.path().join("commands/greet.md"),
-            "---\ndescription: greet\n---\nhello\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(plugin_dir.path().join("agents")).unwrap();
-        std::fs::write(
-            plugin_dir.path().join("agents/helper.md"),
-            "---\ndescription: helps\n---\nhelp text\n",
-        )
-        .unwrap();
-        let (plugins, marketplaces) = plugin_manifest(plugin_dir.path());
-        let manifest = MergedManifest {
-            plugins,
-            marketplaces,
-            ..Default::default()
-        };
-        OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
-        assert!(out.path().join("command/__plugin_greet.md").exists());
-        assert!(out.path().join("command/__plugin_agent_helper.md").exists());
-    }
-
-    #[test]
     fn materialize_plugin_hooks_parse_error_skips_only_that_plugin() {
         let out = tempfile::tempdir().unwrap();
         let bad_dir = tempfile::tempdir().unwrap();
@@ -3762,27 +3729,6 @@ mod tests {
         // Must succeed overall, and the good plugin's content must still land.
         OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
         assert!(out.path().join("command/__plugin_still-works.md").exists());
-    }
-
-    #[test]
-    fn materialize_bundle_agent_from_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut manifest = MergedManifest::default();
-        let src_dir = tempfile::tempdir().unwrap();
-        let agent_file = src_dir.path().join("test-agent.md");
-        std::fs::write(
-            &agent_file,
-            "---\ndescription: A test agent\n---\n\nDo the thing.",
-        )
-        .unwrap();
-        manifest
-            .files
-            .insert(PathBuf::from("agents/test-agent.md"), agent_file);
-        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
-        let out_agent = tmp.path().join("command/__bundle_agent_test-agent.md");
-        assert!(out_agent.exists());
-        let content = std::fs::read_to_string(&out_agent).unwrap();
-        assert!(content.contains("mode: subagent"));
     }
 
     #[test]
