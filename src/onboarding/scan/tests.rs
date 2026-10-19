@@ -207,7 +207,7 @@ fn a_root_that_is_a_repository_is_reported() {
 fn a_missing_root_is_an_error_that_names_it() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("absent");
-    let error = scan_with(&[missing.clone()], Bounds::DEFAULT).unwrap_err();
+    let error = scan_with(std::slice::from_ref(&missing), Bounds::DEFAULT).unwrap_err();
     assert!(format!("{error:#}").contains("absent"), "{error:#}");
 }
 

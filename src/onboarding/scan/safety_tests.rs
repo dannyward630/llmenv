@@ -68,7 +68,7 @@ fn an_unreadable_root_is_an_error() {
         return;
     }
 
-    let error = scan_with(&[locked.clone()], Bounds::DEFAULT);
+    let error = scan_with(std::slice::from_ref(&locked), Bounds::DEFAULT);
 
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     let error = error.unwrap_err();
@@ -124,7 +124,7 @@ fn the_filesystem_root_home_and_folders_above_home_are_refused() {
     let home = base.path().join("users/me");
     fs::create_dir_all(&home).unwrap();
     for root in [PathBuf::from("/"), home.clone(), base.path().join("users")] {
-        let error = scan(&[root.clone()], &home, Bounds::DEFAULT).unwrap_err();
+        let error = scan(std::slice::from_ref(&root), &home, Bounds::DEFAULT).unwrap_err();
         assert!(
             format!("{error:#}").contains("narrower"),
             "{}: {error:#}",
