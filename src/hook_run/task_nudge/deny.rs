@@ -6,13 +6,20 @@ use std::path::Path;
 use crate::config::TaskTracker;
 use crate::hook_run::shell_split::runs_commit_or_pr;
 
+/// A `__DENY__` text of the gate: what went wrong, and the fix before the retry.
+fn gate_deny(problem: &str, fix: &str) -> String {
+    format!(
+        "__DENY__:llmenv blocked this commit or pull request: {problem}. {fix}, then run the same \
+         command again. To turn this off, set features.task_tracker.enforce_commit to false."
+    )
+}
+
 /// The `__DENY__` text for a commit when the gate cannot check it. The gate denies rather than
 /// passing a commit it could not check (#2630).
 pub(super) fn gate_unavailable_deny(reason: &str) -> String {
-    format!(
-        "__DENY__:llmenv blocked this commit or pull request: the task commit gate cannot check \
-         it, because {reason}. Fix that, then run the same command again. To turn this off, set \
-         features.task_tracker.enforce_commit to false."
+    gate_deny(
+        &format!("the task commit gate cannot check it, because {reason}"),
+        "Fix that",
     )
 }
 
@@ -52,20 +59,20 @@ pub(crate) fn state_dir_deny(
 /// The `__DENY__` text for a commit when the nudge state file cannot be read. The gate cannot
 /// tell whether the commit has a task, so it denies every attempt until the file is readable (#2630).
 pub(super) fn state_unreadable_deny(error: &str) -> String {
-    format!(
-        "__DENY__:llmenv blocked this commit or pull request: the task nudge state cannot be read \
-         ({error}). Fix the file or its permissions, then run the same command again. To turn this \
-         off, set features.task_tracker.enforce_commit to false."
+    gate_deny(
+        &format!("the task nudge state cannot be read ({error})"),
+        "Fix the file or its permissions",
     )
 }
 
 /// The `__DENY__` text for a commit when the task store cannot be read, with the `cause`. The
 /// gate cannot tell whether a task is in progress, so it denies (#2630).
 pub(super) fn store_unreadable_deny(cause: &str) -> String {
-    format!(
-        "__DENY__:llmenv blocked this commit or pull request: the task store cannot be read \
-         ({cause}), so the gate cannot tell whether a task is in progress. Fix the task store \
-         under the state directory, then run the same command again. To turn this off, set \
-         features.task_tracker.enforce_commit to false."
+    gate_deny(
+        &format!(
+            "the task store cannot be read ({cause}), so the gate cannot tell whether a task is \
+             in progress"
+        ),
+        "Fix the task store under the state directory",
     )
 }
