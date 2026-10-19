@@ -9,22 +9,22 @@ use super::matcher::{Env, ResolvedProject, sanitize_tags};
 /// Schema for the body of `.llmenv.yaml` (project marker file).
 /// All fields optional; an empty file is valid.
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct ProjectFile {
+struct ProjectFile {
     #[serde(default)]
-    pub(crate) id: Option<String>,
+    id: Option<String>,
     #[serde(default)]
-    pub(crate) name: Option<String>,
+    name: Option<String>,
     #[serde(default)]
-    pub(crate) description: Option<String>,
+    description: Option<String>,
     #[serde(default)]
-    pub(crate) tags: Vec<String>,
+    tags: Vec<String>,
     #[serde(default)]
-    pub(crate) enable_bundles: Vec<String>,
+    enable_bundles: Vec<String>,
     #[serde(default)]
-    pub(crate) disable_bundles: Vec<String>,
+    disable_bundles: Vec<String>,
     /// Capture unknown fields for warning emission.
     #[serde(flatten)]
-    pub(crate) extra: BTreeMap<String, serde_yaml::Value>,
+    extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 /// Maximum length (in bytes) for the project description. Anything longer
@@ -40,7 +40,7 @@ pub(crate) const MAX_MARKER_FILE_BYTES: u64 = 64 * 1024;
 /// Parse `.llmenv.yaml` file into a `ProjectFile`. Empty file → all defaults.
 /// Malformed YAML → log warning and return defaults. The `description`
 /// field is truncated to `MAX_DESCRIPTION_BYTES` if oversized.
-pub(crate) fn read_project_file(path: &std::path::Path) -> ProjectFile {
+fn read_project_file(path: &std::path::Path) -> ProjectFile {
     let body = match llmenv_paths::read_text_bounded(path, MAX_MARKER_FILE_BYTES) {
         Ok(Some(body)) => body,
         Ok(None) => return ProjectFile::default(),
