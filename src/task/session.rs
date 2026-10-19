@@ -259,7 +259,8 @@ pub enum StartOutcome {
 }
 
 mod checkpoint;
-use checkpoint::{checkpoint_error, only_own_session};
+pub(crate) use checkpoint::idle_display;
+use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
 
 fn sessions_dir(state_dir: &Path) -> PathBuf {
     tasks_dir(state_dir).join("sessions")
@@ -479,7 +480,8 @@ pub(crate) fn start_session_as(
             if existing.is_empty() {
                 return Ok(StartOutcome::Created(create_session(state_dir, request)?));
             }
-            match only_own_session(existing.iter(), request.owner) {
+            let engine_start = request.owner.pid.and_then(engine_start);
+            match only_own_session(existing.iter(), request.owner, engine_start) {
                 Some(own) => Ok(StartOutcome::Resumed(resume(
                     state_dir,
                     own.clone(),
@@ -506,18 +508,6 @@ pub(crate) fn start_session_as(
         }
         StartDecision::New => Ok(StartOutcome::Created(create_session(state_dir, request)?)),
     })
-}
-
-fn resume(
-    state_dir: &Path,
-    mut session: Session,
-    request: &StartRequest<'_>,
-) -> anyhow::Result<Session> {
-    session.last_activity = now_rfc3339();
-    session.claim(request.owner);
-    session.resume.apply(request.resume);
-    save_session(state_dir, &session)?;
-    Ok(session)
 }
 
 /// [`start_session_as`] with no engine identity, for tests that do not
@@ -567,21 +557,6 @@ fn create_session(state_dir: &Path, request: &StartRequest<'_>) -> anyhow::Resul
     session.claim(request.owner);
     save_session(state_dir, &session)?;
     Ok(session)
-}
-
-/// Human-readable idle duration since an RFC3339 `last_activity` timestamp
-/// (e.g. `"2h 5m 3s"`), for `session ls` and the `session start` checkpoint.
-/// `"unknown"` when the timestamp can't be parsed or is in the future.
-#[must_use]
-pub(crate) fn idle_display(last_activity: &str) -> String {
-    let now = std::time::SystemTime::now();
-    humantime::parse_rfc3339(last_activity)
-        .ok()
-        .and_then(|t| now.duration_since(t).ok())
-        .map(|d| {
-            humantime::format_duration(std::time::Duration::from_secs(d.as_secs())).to_string()
-        })
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// [`tasks_in_session`], but a read error on the tasks directory or on any task file is an error
@@ -1503,7 +1478,7 @@ mod tests {
             name,
             description: None,
             project: PROJECT_A,
-            owner: OWNER.get_or_init(|| owner("conv-after-clear", 9)),
+            owner: OWNER.get_or_init(|| owner("conv-after-clear", std::process::id())),
             resume: RESUME.get_or_init(ResumeContext::default),
         }
     }
@@ -1514,7 +1489,7 @@ mod tests {
         let old = start_as(
             dir.path(),
             "old",
-            &owner("conv-before-clear", 9),
+            &owner("conv-before-clear", std::process::id()),
             StartDecision::Auto,
         );
         let outcome = start_session_as(dir.path(), &after_clear(None), StartDecision::Auto)
@@ -1532,7 +1507,7 @@ mod tests {
         let old = start_as(
             dir.path(),
             "old",
-            &owner("conv-before-clear", 9),
+            &owner("conv-before-clear", std::process::id()),
             StartDecision::Auto,
         );
         let other = start_as(
@@ -1552,9 +1527,27 @@ mod tests {
     }
 
     #[test]
+    fn auto_refuses_a_session_of_an_earlier_process_with_the_same_pid() {
+        let dir = TempDir::new().expect("test");
+        let mut old = start_as(
+            dir.path(),
+            "old",
+            &owner("conv-gone", std::process::id()),
+            StartDecision::Auto,
+        );
+        // A session last active before this process started belongs to an earlier process that
+        // had the same pid.
+        old.last_activity = "2000-01-01T00:00:00Z".to_string();
+        save_session(dir.path(), &old).unwrap();
+        let err = start_session_as(dir.path(), &after_clear(None), StartDecision::Auto)
+            .expect_err("a reused pid alone must not resume a session");
+        assert!(err.to_string().contains(&old.id), "{err}");
+    }
+
+    #[test]
     fn checkpoint_offers_replace_only_when_every_session_is_yours() {
         let dir = TempDir::new().expect("test");
-        let me = owner("conv-before-clear", 9);
+        let me = owner("conv-before-clear", std::process::id());
         start_as(dir.path(), "old", &me, StartDecision::Auto);
         start_as(dir.path(), "old-2", &me, StartDecision::New);
         let err = start_session_as(dir.path(), &after_clear(None), StartDecision::Auto)
@@ -1585,7 +1578,7 @@ mod tests {
     #[test]
     fn checkpoint_error_marks_same_process_session_after_clear() {
         let dir = TempDir::new().expect("test");
-        let before = owner("conv-before-clear", 9);
+        let before = owner("conv-before-clear", std::process::id());
         let old = start_as(dir.path(), "old", &before, StartDecision::Auto);
         start_as(dir.path(), "old-2", &before, StartDecision::New);
         start_as(

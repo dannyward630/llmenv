@@ -676,6 +676,8 @@ project's hook.
   (changed in v3.13.0) When exactly one listed session is yours, `session start` with no flag
   resumes it and prints one line that names it, instead of the error.
   The error stays when two or more listed sessions are yours, or when none is.
+  A process id can be reused, so a session that only the engine process ties to you counts for this resume only when
+  it was active after that process started.
   Outside an engine (no such variables) nothing is recorded, and resolution
   works as before.
   (changed in v3.12.0) A session id must be a plain name.
