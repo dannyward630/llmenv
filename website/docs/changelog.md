@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - The `llmenv doctor --gc` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
 - The codebase-memory-mcp floor is now 0.12.0, and `llmenv doctor` warns below it. The docs say a repo indexed from the CLI is not watched, and that 0.12.0 changes the index format from 1 to 2 (#2853) [fix:mcp]
+- llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]
 
 ### Fixed
 
@@ -50,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A non-UTF-8 `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID` stops a `llmenv task` command with an error that names the variable. Before, it was logged and read as unset. See [troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#an-error-says-an-environment-variable-is-not-valid-utf-8) (#2644) [fix:task]
 - A `cargo release` dry run no longer rolls the changelog. `scripts/roll-changelog.sh` exits without changes when `DRY_RUN` is true (#2637) [fix:release]
 - The codebase-memory health notice says the server did not answer yet, and asks for one `list_projects` call before the kill step. Before, it said the graph tools do not work, and the agent skipped them for the session (#2639) [fix:hook]
+- The adaptive recall scope fallback stops at the first failed call, and runs once per session instead of on every turn. The failure log keeps the full error chain (#2897) [fix:hook]
+- A tool failure with no memory-worthy signal, such as exit 127 or a script parse error, runs no recall. The all-projects failure recall is removed, so a typo no longer injects notes from other projects (#2910) [fix:hook]
+- Recall keywords and session metadata include the bundles that a top-level `bundle:` entry fires, and `CLAUDE_CODE_VERSION` is set from `claude --version` at materialize. Before, both were empty for those configs (#2898) [fix:hook]
+- A hook call with no notes no longer writes an error line to the log (#2899) [fix:hook]
 - `llmenv doctor` skips a token-efficiency check that reads a non-UTF-8 variable and says its result is unknown. Before, it could report Pass from the value in `settings.json` (#2643) [fix:doctor]
 - A path that starts with `~` stops with an error that names `HOME` when `HOME` is not UTF-8. Before, the path stayed unexpanded with no message (#2645) [fix:paths]
 - An unknown hook event, or hook input that does not parse, reaches the agent as a notice on stdout. Before, the message went to stderr, which the agent never reads (#2748) [fix:hook]

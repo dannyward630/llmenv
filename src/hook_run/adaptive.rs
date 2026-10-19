@@ -19,11 +19,15 @@ use crate::hook_run::session_state::unix_now;
 use crate::hook_run::transcript;
 
 mod cut;
+mod failure;
+mod outcome;
 mod session_reset;
 mod subagent;
+
 #[cfg(test)]
 use cut::cut_items_notice;
 use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
+use outcome::Outcome;
 use session_reset::{FirstUpdate, first_update_notice, resets_ledger};
 use subagent::agent_key;
 pub(super) use subagent::subagent_start;
@@ -58,45 +62,6 @@ fn query(text: &str, limit: u8) -> RecallQuery {
         keyword: None,
         project: Some(String::new()),
         limit,
-    }
-}
-
-/// What a set of recall calls returned.
-#[derive(Debug, Default)]
-struct Outcome {
-    texts: Vec<String>,
-    calls: usize,
-    failed: usize,
-}
-
-impl Outcome {
-    /// Record one call. `None` means no call ran, so nothing is counted.
-    fn push(&mut self, result: Option<anyhow::Result<String>>) {
-        let Some(result) = result else {
-            return;
-        };
-        self.calls += 1;
-        match result {
-            Ok(text) => self.texts.push(text),
-            Err(e) => {
-                self.failed += 1;
-                tracing::error!("adaptive recall call failed, its records are skipped: {e}");
-                agent_notice::record(format!(
-                    "llmenv: a memory recall call failed, so its records were not sent: {e:#}. \
-                     Fix: run `llmenv doctor` to check the memory server."
-                ));
-            }
-        }
-    }
-
-    fn merge(&mut self, other: Outcome) {
-        self.texts.extend(other.texts);
-        self.calls += other.calls;
-        self.failed += other.failed;
-    }
-
-    fn all_failed(&self) -> bool {
-        self.calls > 0 && self.failed == self.calls
     }
 }
 
@@ -234,10 +199,12 @@ async fn run_scope(
     ctx: &AdaptiveCtx<'_>,
     scope: Vec<Action>,
     budget: &mut RecallBudget,
-) -> Outcome {
+) -> (Outcome, Option<String>) {
     let mut outcome = Outcome::default();
     let mut actions = scope.into_iter();
-    while !budget.is_full() {
+    // A refused or timed-out server would stall each remaining tag for one HOOK_TIMEOUT, so the
+    // first failure ends the fallback for this turn (#2897).
+    while !budget.is_full() && outcome.failed == 0 {
         let Some(action) = actions.next() else {
             break;
         };
@@ -247,10 +214,26 @@ async fn run_scope(
         }
         outcome.texts.clear();
     }
-    if let Some(notice) = scope_cut_notice(actions.len()) {
-        agent_notice::record(notice);
+    let notice = unrun_notice(actions.len(), outcome.failed > 0, budget.is_full());
+    (outcome, notice)
+}
+
+/// The notice for scope recalls that did not run, or `None` when none were skipped. A stop after
+/// a failure is not retried this epoch, so the agent must hear about it (#2897). A cut by the
+/// output budget has its own notice (#2766).
+fn unrun_notice(unrun: usize, failed: bool, budget_full: bool) -> Option<String> {
+    if unrun == 0 {
+        return None;
     }
-    outcome
+    if budget_full {
+        return scope_cut_notice(unrun);
+    }
+    failed.then(|| {
+        format!(
+            "llmenv: {unrun} scope recall action(s) did not run after a memory recall failed. \
+             Fix: run `llmenv doctor` to check the memory server."
+        )
+    })
 }
 
 /// `SessionStart`: reset per `source`, then send the wake-up pack and the scope set.
@@ -305,7 +288,10 @@ pub(super) async fn session_start(
     let wake_bytes = pack_bytes(&wake, &own);
     let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES.saturating_sub(wake_bytes), sent);
     let scope_len = scope.len();
-    let outcome = run_scope(ctx, scope, &mut budget).await;
+    let (outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
+    if let Some(notice) = unrun {
+        agent_notice::record(notice);
+    }
     report("session_start", &outcome, &budget);
     let wake = match wake {
         Ok(text) => text,
@@ -394,9 +380,12 @@ pub(super) async fn turn_start(
     let fallback = !ledger.scope_sent(MAIN_AGENT);
     let mut outcome = Outcome::default();
     if fallback {
-        outcome = run_scope(ctx, scope, &mut budget).await;
+        let (scope_outcome, unrun) = run_scope(ctx, scope, &mut budget).await;
+        if let Some(notice) = unrun {
+            agent_notice::record(notice);
+        }
+        outcome = scope_outcome;
     }
-    let scope_complete = fallback && outcome.failed == 0;
     let tail = ctx.payload["transcript_path"]
         .as_str()
         .and_then(|p| transcript::last_assistant_text(Path::new(p), TAIL_CHARS));
@@ -429,7 +418,9 @@ pub(super) async fn turn_start(
             if main_ok {
                 l.last_query_hash = Some(query_hash);
             }
-            if scope_complete {
+            // The fallback is tried once per session epoch. A failed try is not repeated on
+            // every turn: the outage would repeat it, and the SessionStart pack is the main path.
+            if fallback {
                 l.set_scope_sent(MAIN_AGENT);
             }
         }),
@@ -457,6 +448,10 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super:
         note_skipped();
         return Ok(super::HookText::default());
     };
+    // A generic failure matches memories from every project, so no recall runs (#2910).
+    if failure::is_generic(error) {
+        return Ok(super::HookText::default());
+    }
     let (key, record) = agent_key(ctx.payload);
     let sent = ledger.sent_for(&key);
     let text = relevance::error_query(tool, error);
@@ -464,21 +459,21 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super:
         topic: Some("errors-resolved".to_string()),
         ..query(&text, FANOUT_LIMIT)
     };
-    // The session project comes first, as in `waves`. The all-projects main recall stays
-    // after the shared `errors-resolved` fix, because that topic is meant to cross projects.
+    // The session project comes first, as in `waves`. The shared `errors-resolved` topic is
+    // the only cross-project recall here, because that topic is meant to cross projects. No
+    // all-projects recall runs on a failure (#2910).
     let scoped = ledger.project.as_deref().map(|p| RecallQuery {
         project: Some(p.to_string()),
         ..query(&text, FAILURE_LIMIT)
     });
-    let (own, fixes, main) = tokio::join!(
+    // The all-projects recall is not run here: it injected other projects' notes (#2910).
+    let (own, fixes) = tokio::join!(
         recall(ctx.client, scoped),
         recall(ctx.client, Some(resolved)),
-        recall(ctx.client, Some(query(&text, FAILURE_LIMIT))),
     );
     let mut outcome = Outcome::default();
     outcome.push(own);
     outcome.push(fixes);
-    outcome.push(main);
     let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
     outcome.texts.iter().for_each(|t| budget.add_text(t));
     report("post_tool_use_failure", &outcome, &budget);
@@ -864,7 +859,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_fallback_is_retried_after_every_scope_call_failed() {
+    async fn a_failed_fallback_is_not_retried_on_every_turn() {
         let server = failing_server().await;
         let f = fixture(&server);
         turn_start(&ctx(&f, &json!({"prompt": "hi"})), vec![tag_action("proj")])
@@ -873,13 +868,59 @@ mod tests {
             .text();
         let ledger = f.store.load("s1").unwrap();
         assert!(
-            !ledger.scope_sent(MAIN_AGENT),
-            "a failed fallback must run again"
+            ledger.scope_sent(MAIN_AGENT),
+            "a failed fallback is tried once, not on every turn (#2897)"
         );
         assert_eq!(
             ledger.last_query_hash, None,
             "a failed recall is not a done query"
         );
+    }
+
+    #[test]
+    fn a_failure_with_nothing_unrun_has_no_notice() {
+        assert_eq!(unrun_notice(0, true, false), None);
+        assert_eq!(unrun_notice(0, false, true), None);
+    }
+
+    #[test]
+    fn a_failure_that_leaves_tags_unrun_names_the_count() {
+        let notice = unrun_notice(3, true, false).unwrap();
+        assert!(
+            notice.contains("3 scope recall action(s) did not run"),
+            "{notice}"
+        );
+        assert_eq!(unrun_notice(3, false, false), None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_scope_call_ends_the_fallback_for_this_turn() {
+        let server = failing_server().await;
+        let f = fixture(&server);
+        let mut budget = RecallBudget::new(RECALL_BUDGET_BYTES, std::collections::BTreeSet::new());
+        let (outcome, unrun) = run_scope(
+            &ctx(&f, &json!({"prompt": "hi"})),
+            vec![tag_action("a"), tag_action("b"), tag_action("c")],
+            &mut budget,
+        )
+        .await;
+        assert_eq!(outcome.calls, 1, "{outcome:?}");
+        let notice = unrun.expect("the stop after a failure must be reported");
+        assert!(notice.contains("2 scope recall action(s)"), "{notice}");
+    }
+
+    #[tokio::test]
+    async fn a_typo_failure_sends_no_recall_so_no_other_project_is_injected() {
+        let server = MockServer::start().await;
+        let f = fixture(&server);
+        let payload = json!({
+            "tool_name": "Bash",
+            "error": "Exit code 127\nzsh: command not found: gti"
+        });
+        let text = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
+        assert!(text.is_empty(), "{text}");
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(requests.is_empty(), "{requests:?}");
     }
 
     #[tokio::test]

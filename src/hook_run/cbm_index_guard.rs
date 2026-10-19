@@ -35,16 +35,6 @@ pub(crate) fn handle_roots(
     stdin_payload: &serde_json::Value,
     config: &crate::config::Config,
 ) -> String {
-    // The hook runs in the project folder, as the SessionStart index does.
-    handle_roots_in(stdin_payload, config, std::env::current_dir())
-}
-
-/// [`handle_roots`] with the session folder given, so a test needs no change of the process folder.
-fn handle_roots_in(
-    stdin_payload: &serde_json::Value,
-    config: &crate::config::Config,
-    session_folder: std::io::Result<std::path::PathBuf>,
-) -> String {
     if stdin_payload.get("tool_name").and_then(|v| v.as_str()) != Some(INDEX_REPOSITORY_TOOL) {
         return String::new();
     }
@@ -56,18 +46,7 @@ fn handle_roots_in(
     else {
         return String::new();
     };
-    let project_root = match session_folder {
-        Ok(dir) => dir,
-        // The guard denies a call outside the allowed roots, so a folder that cannot be read
-        // denies too. An allow here would open the guard on the one input it cannot check.
-        Err(e) => {
-            return format!(
-                "__DENY__:cannot check {repo_path} against the codebase-memory allowed roots: \
-                 the session folder cannot be read: {e}"
-            );
-        }
-    };
-    crate::mcp::cbm_roots::guard_decision(repo_path, config, &project_root)
+    crate::mcp::cbm_roots::guard_decision(repo_path, config)
         .map_or_else(String::new, |reason| format!("__DENY__:{reason}"))
 }
 
@@ -250,62 +229,6 @@ mod tests {
         ] {
             assert_eq!(handle_pre_tool_use(&p), "", "{p} should pass through");
         }
-    }
-
-    fn config_with_entry(index_path: &std::path::Path) -> crate::config::Config {
-        crate::config::Config {
-            features: Some(crate::config::Features {
-                codebase_memory: vec![crate::config::CodebaseMemory {
-                    when: vec!["p".into()],
-                    index_path: Some(index_path.display().to_string()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn the_roots_guard_denies_a_folder_outside_the_roots_and_allows_the_project() {
-        let cache = tempfile::tempdir().unwrap();
-        let config = config_with_entry(cache.path());
-        let project = std::env::current_dir().unwrap();
-        let inside = payload(
-            INDEX_REPOSITORY_TOOL,
-            serde_json::json!({ "repo_path": project.display().to_string() }),
-        );
-        assert_eq!(handle_roots(&inside, &config), "");
-        let outside = payload(
-            INDEX_REPOSITORY_TOOL,
-            serde_json::json!({ "repo_path": "/usr" }),
-        );
-        let out = handle_roots(&outside, &config);
-        assert!(out.starts_with("__DENY__:"), "{out:?}");
-        assert!(out.contains("allowed_roots"), "{out:?}");
-        // A blank path is not a repo_path: the server rejects it, the guard does not.
-        let blank = payload(
-            INDEX_REPOSITORY_TOOL,
-            serde_json::json!({ "repo_path": "  " }),
-        );
-        assert_eq!(handle_roots(&blank, &config), "");
-        // Another tool is never guarded.
-        let other = payload("Bash", serde_json::json!({ "repo_path": "/usr" }));
-        assert_eq!(handle_roots(&other, &config), "");
-    }
-
-    #[test]
-    fn the_roots_guard_denies_when_the_session_folder_cannot_be_read() {
-        let cache = tempfile::tempdir().unwrap();
-        let config = config_with_entry(cache.path());
-        let call = payload(
-            INDEX_REPOSITORY_TOOL,
-            serde_json::json!({ "repo_path": "/usr" }),
-        );
-        let unreadable = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
-        let out = handle_roots_in(&call, &config, unreadable);
-        assert!(out.starts_with("__DENY__:"), "{out:?}");
-        assert!(out.contains("cannot be read"), "{out:?}");
     }
 
     #[test]

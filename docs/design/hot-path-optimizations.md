@@ -30,10 +30,12 @@ in the session log — you'd notice a regression but couldn't attribute it.
    the session log's metadata block
 6. `scope_header_content()` includes it in the FTS-searchable session header
 
-**Why this way:** The env var is set once per session by the adapter
-(`src/adapter/claude_code.rs`) when it emits `CLAUDE_CODE_VERSION=<semver>` in
-the hook-run environment. Reading it at the `run()` boundary keeps the
-extraction in one place rather than plumbing it through every adapter.
+**Why this way:** The Claude Code adapter (`src/adapter/claude_code/version.rs`)
+emits `CLAUDE_CODE_VERSION=<semver>` in the hook-run environment. It reads the
+version with `claude --version` once per materialize (#2898). Before #2898 no
+adapter set the variable, so every session recorded an empty version. Reading it
+at the `run()` boundary keeps the extraction in one place rather than plumbing
+it through every adapter.
 
 **Files modified:**
 
