@@ -558,9 +558,8 @@ impl AgentAdapter for OpencodeAdapter {
 
         // Built-in `llmenv` skill: one reference file per enabled first-party
         // feature. No-op when none are enabled.
-        let features = manifest.capabilities.features.clone().unwrap_or_default();
         owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
-            out, &features,
+            out, manifest,
         )?);
 
         // #1130/#1333/#1335: opencode has no native output-style concept —

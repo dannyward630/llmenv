@@ -25,23 +25,40 @@ const CODEBASE_MEMORY_REF: &str = include_str!("../../skills/llmenv/references/c
 /// feature. Writes nothing (returns an empty vec, no directory created) when
 /// none of the 4 features are enabled.
 ///
+/// `servers` names the MCP servers that this scope runs. The memory and codebase-memory
+/// references need their server: the merged features keep the entries of every bundle, and an
+/// entry whose `when` tags are inactive runs no server (#2941).
+///
 /// # Errors
 /// Propagates any I/O error writing the skill files.
 pub(crate) fn materialize_llmenv_skill(
     out: &Path,
+    manifest: &crate::merge::MergedManifest,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let features = manifest.capabilities.features.clone().unwrap_or_default();
+    let servers: Vec<&str> = manifest.mcps.iter().map(|m| m.name.as_str()).collect();
+    materialize_with(out, &features, &servers)
+}
+
+/// [`materialize_llmenv_skill`] with the features and the server names given.
+fn materialize_with(
+    out: &Path,
     features: &Features,
+    servers: &[&str],
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut refs: Vec<(&str, &str)> = Vec::new();
     if features.task_tracker.as_ref().is_some_and(|t| t.enabled) {
         refs.push(("task-tracker.md", TASK_TRACKER_REF));
     }
-    if !features.memory.is_empty() {
+    if !features.memory.is_empty() && servers.contains(&crate::mcp::resolve::MEMORY_MCP_NAME) {
         refs.push(("memory.md", MEMORY_REF));
     }
     if features.context_mode.as_ref().is_some_and(|c| c.enabled) {
         refs.push(("context-mode.md", CONTEXT_MODE_REF));
     }
-    if !features.codebase_memory.is_empty() {
+    if !features.codebase_memory.is_empty()
+        && servers.contains(&crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
+    {
         refs.push(("codebase-memory.md", CODEBASE_MEMORY_REF));
     }
     if refs.is_empty() {
@@ -69,6 +86,30 @@ mod tests {
     use super::*;
     use crate::config::{ContextMode, Features, TaskTracker};
     use tempfile::TempDir;
+
+    const ALL_SERVERS: &[&str] = &[
+        crate::mcp::resolve::MEMORY_MCP_NAME,
+        crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME,
+    ];
+
+    #[test]
+    fn a_memory_entry_with_no_server_in_this_scope_gets_no_reference() {
+        let dir = TempDir::new().expect("test");
+        let owned = materialize_with(dir.path(), &features_with(false, true, false, true), &[])
+            .expect("test");
+        assert!(owned.is_empty(), "{owned:?}");
+        let owned = materialize_with(
+            dir.path(),
+            &features_with(false, true, false, true),
+            &[crate::mcp::resolve::MEMORY_MCP_NAME],
+        )
+        .expect("test");
+        assert!(owned.iter().any(|p| p.ends_with("memory.md")), "{owned:?}");
+        assert!(
+            !owned.iter().any(|p| p.ends_with("codebase-memory.md")),
+            "{owned:?}"
+        );
+    }
 
     fn features_with(
         task_tracker: bool,
@@ -102,9 +143,12 @@ mod tests {
     #[test]
     fn no_features_enabled_materializes_nothing() {
         let dir = TempDir::new().expect("test");
-        let owned =
-            materialize_llmenv_skill(dir.path(), &features_with(false, false, false, false))
-                .expect("test");
+        let owned = materialize_with(
+            dir.path(),
+            &features_with(false, false, false, false),
+            ALL_SERVERS,
+        )
+        .expect("test");
         assert!(owned.is_empty());
         assert!(!dir.path().join("skills/llmenv").exists());
     }
@@ -112,8 +156,12 @@ mod tests {
     #[test]
     fn task_tracker_only_writes_router_and_one_reference() {
         let dir = TempDir::new().expect("test");
-        materialize_llmenv_skill(dir.path(), &features_with(true, false, false, false))
-            .expect("test");
+        materialize_with(
+            dir.path(),
+            &features_with(true, false, false, false),
+            ALL_SERVERS,
+        )
+        .expect("test");
         assert!(dir.path().join("skills/llmenv/SKILL.md").exists());
         assert!(
             dir.path()
@@ -143,8 +191,12 @@ mod tests {
         // engine adapter via the shared materialization. Guard the #932
         // guidance so it can't be silently gutted.
         let dir = TempDir::new().expect("test");
-        materialize_llmenv_skill(dir.path(), &features_with(true, false, false, false))
-            .expect("test");
+        materialize_with(
+            dir.path(),
+            &features_with(true, false, false, false),
+            ALL_SERVERS,
+        )
+        .expect("test");
         let content =
             std::fs::read_to_string(dir.path().join("skills/llmenv/references/task-tracker.md"))
                 .expect("test");
@@ -163,7 +215,12 @@ mod tests {
     #[test]
     fn all_four_features_writes_all_four_references() {
         let dir = TempDir::new().expect("test");
-        materialize_llmenv_skill(dir.path(), &features_with(true, true, true, true)).expect("test");
+        materialize_with(
+            dir.path(),
+            &features_with(true, true, true, true),
+            ALL_SERVERS,
+        )
+        .expect("test");
         for name in ["task-tracker", "memory", "context-mode", "codebase-memory"] {
             assert!(
                 dir.path()
@@ -177,8 +234,12 @@ mod tests {
     #[test]
     fn returned_paths_are_relative_to_out() {
         let dir = TempDir::new().expect("test");
-        let owned = materialize_llmenv_skill(dir.path(), &features_with(true, false, false, false))
-            .expect("test");
+        let owned = materialize_with(
+            dir.path(),
+            &features_with(true, false, false, false),
+            ALL_SERVERS,
+        )
+        .expect("test");
         assert!(
             owned
                 .iter()

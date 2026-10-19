@@ -699,7 +699,7 @@ features:
 | `default_type` | no | Memory type, `episodic`, `semantic`, or `procedural`, that llmenv tags on the memories it stores (added in v3.0.0) |
 | `default_importance` | no | Importance, `low`, `medium`, `high`, or `critical`, that llmenv tags on the memories it stores (added in v3.0.0) |
 | `type_importance` | no | Map from memory type to importance, for a per-type default (added in v3.0.0) |
-| `auto_prune` | no | `true` runs `llmenv memory prune` during `llmenv materialize`; default `false` (added in v3.3.0) |
+| `auto_prune` | no | `true` runs `llmenv memory prune` during `llmenv materialize`; default `false` (added in v3.3.0; changed in v3.13.0: only an entry whose `when` tags are active counts) |
 | `retention` | no | Per-type retention durations for `llmenv memory prune`. While set, prune refuses to run — see [`llmenv memory prune`](commands.md#memory) (changed in v3.12.0) |
 | `consolidation` | no | Post-session memory consolidation — see [Post-session consolidation](#post-session-consolidation) below (added in v3.3.0) |
 

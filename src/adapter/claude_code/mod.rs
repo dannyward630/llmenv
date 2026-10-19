@@ -543,9 +543,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // feature (task tracker, memory, context-mode, codebase-memory),
         // replacing the old task-tracker CLAUDE.md fragment. No-op when none
         // are enabled.
-        let features = manifest.capabilities.features.clone().unwrap_or_default();
         owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
-            out, &features,
+            out, manifest,
         )?);
 
         // #317: write /diagnose skill when slippage is enabled with diagnose_command.
