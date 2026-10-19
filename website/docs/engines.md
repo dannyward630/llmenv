@@ -108,27 +108,26 @@ sets, so their names are translated:
 
 | Neutral tool | opencode key | crush tool | Not one-to-one? |
 | ------------ | ------------ | ---------- | --------------- |
-| `Bash` | `bash` | `bash` | |
+| `Bash` | `shell` | `bash` | |
 | `Read` | `read` | `view` | |
 | `Edit` | `edit` | `edit` | crush's edit tools also create missing files and parent directories, so allowing `Edit` on crush also allows file creation |
 | `Write` | `edit` | `write` | opencode gates every file mutation through the single `edit` key, so a `Write` rule there also covers `Edit` |
 | `MultiEdit` | `edit` | `multiedit` | opencode has no separate multi-edit key; same file-creation caveat as `Edit` on crush |
 | `Glob` | `glob` | `glob` | |
 | `Grep` | `grep` | `grep` | |
-| `LS` | `list` | `ls` | |
+| `LS` | — | `ls` | opencode 2.x has no list tool; the rule is dropped for opencode |
 | `WebFetch` | `webfetch` | `fetch` | crush's more specialized `agentic_fetch` is not used |
 | `WebSearch` | `websearch` | — | crush's `web_search` is more specialized and isn't treated as a direct equivalent; the rule is dropped for crush |
-| `TodoWrite` | `todowrite` | `todos` | |
-| `Task` | `task` | — | dropped for crush |
+| `TodoWrite` | — | `todos` | opencode 2.x has no todo tool; the rule is dropped for opencode |
+| `Task` | `subagent` | — | dropped for crush |
 | `Skill` | `skill` | — | dropped for crush |
 | `NotebookEdit` | — | — | neither engine has an equivalent; the rule takes effect on Claude Code only |
 
 A `—` means that engine has no analog llmenv will map to, so the rule is
 **dropped** for that engine and takes effect on the others. This is deliberate:
-guessing at a lowercase pass-through renders a key opencode's schema rejects
-(which makes it discard the whole config file) or a name crush's exact-match
-allowlist never matches. Use `native_permissions.<engine>` to target that
-engine's own tool directly.
+a guessed name is a rule that never matches a tool call.
+Use `native_permissions.<engine>` to target that engine's own tool directly.
+The opencode column follows opencode 2.x (changed in v3.13.0: `Bash` was `bash`, `Task` was `task`, and `LS` and `TodoWrite` mapped to 1.x tools that 2.x removed).
 
 A tool name that isn't in this table is **not** rejected — Claude Code gains
 tools llmenv has no reason to know about, and its adapter passes the name
@@ -382,7 +381,7 @@ opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns 
 
 | Output | Contents |
 | ------ | -------- |
-| `opencode.json` | `$schema` (points at the `opencode.schema.json` sidecar below), `instructions`, `mcp`, `lsp`, `permission` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
+| `opencode.json` | `$schema` (points at the `opencode.schema.json` sidecar below), `instructions`, `mcp`, `lsp`, `permissions` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
 | `opencode.schema.json` | JSON Schema (draft 2020-12) generated from the same typed structs that render `opencode.json`, so it always matches what llmenv actually writes. Root allows `additionalProperties`, so passthrough/native-overlay keys never fail IDE validation. |
 | `AGENTS.md` | the merged rules document opencode loads as project instructions — omitted entirely when that resolves to nothing (added in v3.10.0; earlier versions wrote a 0-byte file) |
 | `service.json` | `{"disabled":true}`, so each opencode client starts a private server with this environment instead of attaching to the shared background server, which can run with another scope's config (added in v3.13.0) |
@@ -396,7 +395,7 @@ opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns 
 
 | Feature | opencode support | Notes |
 | --------- | ---------------- | ------- |
-| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as per-tool `pattern → action` maps; a bare tool emits a plain action string. `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's own permission key, source-verified against opencode's `permission.ts` schema (`bash`, `read`, `glob`, `grep`, `webfetch`, `websearch`, `todowrite`, `task`, `skill` are a straight lowercase; `Write`/`MultiEdit` both map to `edit`, `LS` maps to `list` — opencode has no separate `write`/`multiedit`/`ls` key). A neutral tool with no confirmed opencode equivalent is dropped rather than guessing at a key (fixed in v3.10.0, [#1326](https://github.com/phaedrus1992/llmenv/issues/1326)), with a `warning:` line naming the tool (fixed in v3.11.0, [#1345](https://github.com/phaedrus1992/llmenv/issues/1345) — before that it went to a log level nothing displayed, so the rule vanished silently). This mapping applies only to `capabilities.permissions`; `native_permissions.opencode` strings are opencode's own vocabulary already (`lsp`, `question`, `doom_loop`, `external_directory`, a bare `*` deny-all, ...) and are lowercased verbatim, never mapped. Because `Write` and `MultiEdit` collapse onto the same `edit` key as `Edit`, rules for any of the three now interact with each other under one shared key — allowing `Write` and denying `Edit` (or vice versa) resolves against the combined `edit` pattern map, not two independent tools. Two rule shapes opencode cannot represent are rejected at regeneration time rather than rendered (fixed in v3.11.0, [#1328](https://github.com/phaedrus1992/llmenv/issues/1328)) — see [Permission rules opencode cannot represent](#permission-rules-opencode-cannot-represent) |
+| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as opencode 2.x's ordered `permissions` list of `{action, resource, effect}` rules; opencode applies the last rule that matches (changed in v3.13.0; earlier versions wrote the 1.x `permission` map). `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's action by the [neutral tool vocabulary](#the-neutral-tool-vocabulary); a tool with no opencode 2.x equivalent is dropped, with a `warning:` line naming the tool (fixed in v3.11.0, [#1345](https://github.com/phaedrus1992/llmenv/issues/1345)). `native_permissions.opencode` strings are opencode's own vocabulary (`lsp`, `question`, `external_directory`, a bare `*` deny-all, ...), lowercased; a 1.x key is renamed as opencode renames it (`bash` to `shell`, `task` to `subagent`, `write` and `patch` to `edit`, added in v3.13.0). Because `Write` and `MultiEdit` collapse onto the same `edit` action as `Edit`, rules for any of the three interact under that one action. A rule pair whose order inverts the user's intent is rejected at regeneration time (fixed in v3.11.0, [#1328](https://github.com/phaedrus1992/llmenv/issues/1328)) — see [Permission rules opencode cannot represent](#permission-rules-opencode-cannot-represent) |
 | Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim |
 | Hooks — other events | **Warned, skipped** | Unsupported events are dropped with an actionable warning rather than a hard error |
 | Hooks — `mcp_tool` kind | **Warned, skipped** | No opencode equivalent; use a `command`-kind handler |
@@ -412,31 +411,13 @@ opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns 
 
 (added in v3.11.0)
 
-Two permission shapes have no faithful rendering in `opencode.json`. Both used
-to be emitted anyway and then silently misbehave, so `llmenv regenerate` now
-fails with an error naming the offending rules instead.
-
-**Scoped rules on an action-only key.** opencode types `todowrite`,
-`question`, `webfetch`, `websearch`, and `doom_loop` as a bare
-`"allow"`/`"ask"`/`"deny"` string — unlike `bash`, `read`, `edit`, and the
-rest, they take no `pattern → action` map. opencode discards the *entire*
-config file when any single key fails to decode, and reports nothing, so one
-scoped rule here used to void every MCP server, LSP entry, and permission rule
-in the file:
-
-```yaml
-capabilities:
-  permissions:
-    allow:
-      - { tool: WebFetch, pattern: "https://example.com/*" }   # rejected
-      - { tool: WebFetch }                                     # fine — covers the whole tool
-```
-
-Drop the `pattern`/`paths` so the rule covers the tool as a whole.
+One permission shape has no faithful rendering in `opencode.json`.
+It used to be emitted anyway and then silently misbehave, so `llmenv regenerate` now fails with an error naming the offending rules instead.
+opencode 2.x takes a pattern on every action, so a scoped `WebFetch` or `WebSearch` rule renders (changed in v3.13.0; the 1.x schema took only a bare action for those keys).
 
 **Two overlapping patterns where the later-sorting one isn't the narrower.**
-opencode applies the *last* matching rule in config key order, and llmenv emits
-each tool's pattern map sorted by pattern. So for any two patterns that can
+opencode applies the *last* matching rule in the `permissions` list, and llmenv emits
+the list sorted by action and then by pattern. So for any two patterns that can
 match the same input, whichever sorts last governs every input they share.
 That's only what you meant if the last one is the more specific of the two:
 
@@ -468,15 +449,15 @@ capabilities:
 
 This comparison spans permission *keys*, not just patterns within one key
 (added in v3.11.0, [#1344](https://github.com/phaedrus1992/llmenv/issues/1344)).
-opencode flattens every key into one ordered rule list and wildcard-matches the
-key against the tool name as well, so a native rule keyed `*` applies to every
-tool and is checked against the concrete keys that sort after it:
+opencode wildcard-matches the action against the tool name as well, so a native
+rule keyed `*` applies to every tool and is checked against the concrete actions
+that sort after it:
 
 ```yaml
 capabilities:
   native_permissions:
     opencode:
-      deny: ["*(git push --force*)"]   # key "*" sorts before "bash"…
+      deny: ["*(git push --force*)"]   # key "*" sorts before "shell"…
   permissions:
     allow:
       - { tool: Bash }                 # …so this allow won for "git push --force"
@@ -493,7 +474,7 @@ capabilities:
       deny: ["*"]        # deny everything by default
   permissions:
     allow:
-      - { tool: Bash }   # …except bash
+      - { tool: Bash }   # …except shell
 ```
 
 ### The `native.opencode` escape hatch
@@ -507,7 +488,7 @@ native:
     theme: opencode
 ```
 
-The modeled keys `instructions`, `mcp`, `lsp`, `permission`, `provider`,
+The modeled keys `instructions`, `mcp`, `lsp`, `permission`, `permissions`, `provider`,
 `model`, and `small_model` are **rejected** in the top-level `native.opencode`
 block — overlaying them last would clobber the security-rendered output. Route
 them through the sibling that merges in the safe direction instead:

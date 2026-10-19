@@ -17,6 +17,7 @@ use crate::merge::MergedManifest;
 pub struct OpencodeAdapter;
 
 mod hook_bridge;
+mod permissions;
 
 const OPENCODE_JSON_FILE: &str = "opencode.json";
 const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
@@ -79,9 +80,9 @@ struct OpencodeConfig {
     /// Paths to instruction files.
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<Vec<String>>,
-    /// Permission rules — per-tool pattern→action maps.
+    /// Permission rules, in the order opencode evaluates them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    permission: Option<BTreeMap<String, PermissionValue>>,
+    permissions: Option<Vec<permissions::Rule>>,
     /// Custom/self-hosted model provider endpoints, keyed by provider id. Kept
     /// as Value because the block goes through a `native_model_providers`
     /// overlay after construction (same reason as `mcp`).
@@ -184,19 +185,6 @@ struct LspServerEntry {
     /// Initialization options (maps to opencode's `initialization` key).
     #[serde(skip_serializing_if = "Option::is_none", rename = "initialization")]
     init_options: Option<serde_json::Value>,
-}
-
-/// A permission value — either a bare action string (when the tool has only
-/// a wildcard pattern covering all inputs) or a pattern→action map (when the
-/// tool has specific input patterns with distinct actions).
-#[derive(serde::Serialize, JsonSchema)]
-#[cfg_attr(test, derive(serde::Deserialize, PartialEq, Debug))]
-#[serde(untagged)]
-enum PermissionValue {
-    /// Single action covering all patterns (e.g. `"allow"`).
-    Simple(String),
-    /// Mapping from input patterns to actions (e.g. `{"echo *": "allow", "rm *": "deny"}`).
-    PatternMap(BTreeMap<String, String>),
 }
 
 /// opencode supports exactly these hook events via its JS plugin API.
@@ -774,177 +762,11 @@ impl AgentAdapter for OpencodeAdapter {
             None
         };
 
-        // 9. Permissions — opencode uses `permission` with per-tool pattern→action maps.
-        //     Format: { "bash": { "otool *": "allow", "rm *": "deny" } }
-        let perms = &manifest.capabilities.permissions;
-        let native_perms = manifest.capabilities.native_permissions.get("opencode");
-
-        let mut permission_map: std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, String>,
-        > = std::collections::BTreeMap::new();
-
-        // Convert a PermissionRule into (opencode_tool, pattern) pairs.
-        // Rules with a pattern use it; rules with paths use each path as a pattern;
-        // bare rules (no pattern, no paths) wildcard-match everything for the tool.
-        // Empty when the tool has no opencode equivalent (see opencode_tool_name).
-        //
-        // #1371: rendering is silent about an unmapped tool. It used to `eprintln!`
-        // here — once per *rule*, so a repeated tool name warned repeatedly, in the
-        // middle of the progress output where it read as though the previous
-        // adapter had failed. The two cases it conflated are reported properly
-        // elsewhere now: a name outside the neutral vocabulary is a config error
-        // that `cli::warn_dead_config` reports once, and a known tool that this
-        // engine has no analog for is an adapter particularity documented in
-        // `website/docs/engines.md` and listed by `doctor` — not something to
-        // reprint on every shell prompt.
-        fn rule_to_patterns(rule: &crate::config::PermissionRule) -> Vec<(String, String)> {
-            let Some(tool) = opencode_tool_name(&rule.tool) else {
-                return Vec::new();
-            };
-            if let Some(pat) = &rule.pattern {
-                vec![(tool.to_string(), pat.clone())]
-            } else if !rule.paths.is_empty() {
-                rule.paths
-                    .iter()
-                    .map(|p| (tool.to_string(), p.clone()))
-                    .collect()
-            } else {
-                vec![(tool.to_string(), "*".to_string())]
-            }
-        }
-
-        // Parse a native string like "bash(otool *)" or bare "bash" back into
-        // (opencode_tool, pattern). A bare tool name wildcard-matches everything.
-        // Anything else missing a balanced, non-empty `(pattern)` is a malformed
-        // rule and must error rather than silently fall back to a wildcard —
-        // a typo like "bash(" would otherwise wildcard-allow all bash commands.
-        //
-        // #1326 (security-audit): unlike `rule_to_patterns`, this does NOT run
-        // the tool portion through `opencode_tool_name`. `native_permissions.
-        // opencode` is the escape hatch for authoring opencode's *own* native
-        // vocabulary directly — its own permission keys (`lsp`, `skill`,
-        // `question`, `external_directory`, `doom_loop`, or a bare `"*"`
-        // deny-all baseline) have no neutral equivalent at all, so routing
-        // them through the neutral-name allowlist silently dropped every
-        // native rule that wasn't one of the twelve mapped PascalCase names
-        // — including a plain lowercase `deny: ["bash(rm -rf *)"]`, turning a
-        // working deny into a prompt. Only lowercase for forgiving case, same
-        // as before this fix.
-        // A permission key with whitespace in it can never match a tool name,
-        // so it would render as a rule that silently does nothing (#1328).
-        fn reject_spaced_tool(tool: &str, rule: &str, action: &str) -> anyhow::Result<()> {
-            anyhow::ensure!(
-                !tool.contains(char::is_whitespace),
-                "native_permissions.opencode.{action}: rule {rule:?} has whitespace inside its \
-                 tool name ({tool:?}) — opencode would never match it against a tool, so the \
-                 rule could not take effect. Write the tool name without spaces."
-            );
-            Ok(())
-        }
-
-        fn parse_native_rule(s: &str, action: &str) -> anyhow::Result<(String, String)> {
-            match (s.find('('), s.rfind(')')) {
-                (None, None) => {
-                    let tool = s.trim().to_ascii_lowercase();
-                    anyhow::ensure!(
-                        !tool.is_empty(),
-                        "native_permissions.opencode.{action}: empty rule string"
-                    );
-                    reject_spaced_tool(&tool, s, action)?;
-                    Ok((tool, "*".to_string()))
-                }
-                (Some(start), Some(end)) if start < end => {
-                    // #1328: an untrimmed name renders a key like `"webfetch "`,
-                    // which opencode's rest-record accepts but never matches
-                    // against the real tool — a permanently inert rule that also
-                    // slips past the action-only check.
-                    let tool = s[..start].trim().to_ascii_lowercase();
-                    let pattern = &s[start + 1..end];
-                    anyhow::ensure!(
-                        !tool.is_empty(),
-                        "native_permissions.opencode.{action}: rule {s:?} has no tool name before '('"
-                    );
-                    reject_spaced_tool(&tool, s, action)?;
-                    anyhow::ensure!(
-                        !pattern.is_empty(),
-                        "native_permissions.opencode.{action}: rule {s:?} has an empty pattern '()'"
-                    );
-                    Ok((tool, pattern.to_string()))
-                }
-                _ => anyhow::bail!(
-                    "native_permissions.opencode.{action}: rule {s:?} has unbalanced parentheses"
-                ),
-            }
-        }
-
-        // Insert (tool, pattern) pairs into the per-tool map.
-        // Deny overrides ask overrides allow for the same tool+pattern
-        // (last-write-wins).
-        fn insert_patterns(
-            map: &mut std::collections::BTreeMap<
-                String,
-                std::collections::BTreeMap<String, String>,
-            >,
-            iter: impl Iterator<Item = (String, String)>,
-            action: &str,
-        ) {
-            for (tool, pattern) in iter {
-                map.entry(tool)
-                    .or_default()
-                    .insert(pattern, action.to_string());
-            }
-        }
-
-        // Insertion order: interleaved by action tier (allow, then ask, then
-        // deny), structured before native within each tier. This guarantees
-        // deny always wins for a given tool+pattern regardless of which
-        // source (structured config or native_permissions) wrote it — the
-        // deny tier is inserted last across both sources. A native wildcard
-        // `*` for a tool still shadows all structured patterns for that tool
-        // within the same tier; use one category (structured OR native) per
-        // tool to avoid that shadowing.
-        for (action, structured, native) in [
-            ("allow", &perms.allow, native_perms.map(|n| &n.allow)),
-            ("ask", &perms.ask, native_perms.map(|n| &n.ask)),
-            ("deny", &perms.deny, native_perms.map(|n| &n.deny)),
-        ] {
-            insert_patterns(
-                &mut permission_map,
-                structured.iter().flat_map(rule_to_patterns),
-                action,
-            );
-            if let Some(n) = native {
-                let native_patterns: Vec<(String, String)> = n
-                    .iter()
-                    .map(|s| parse_native_rule(s, action))
-                    .collect::<anyhow::Result<_>>()?;
-                insert_patterns(&mut permission_map, native_patterns.into_iter(), action);
-            }
-        }
-
-        let config_permission = if !permission_map.is_empty() {
-            check_rule_ordering(&permission_map)?;
-            let mut perm_entries: BTreeMap<String, PermissionValue> = BTreeMap::new();
-            for (tool, patterns) in &permission_map {
-                check_permission_patterns(tool, patterns)?;
-                // Bare tool (single wildcard pattern) -> emit action string directly.
-                // Tool with specific patterns -> emit pattern->action object.
-                if patterns.len() == 1 && patterns.contains_key("*") {
-                    perm_entries
-                        .insert(tool.clone(), PermissionValue::Simple(patterns["*"].clone()));
-                } else {
-                    let mut pmap: BTreeMap<String, String> = BTreeMap::new();
-                    for (pattern, action) in patterns {
-                        pmap.insert(pattern.clone(), action.clone());
-                    }
-                    perm_entries.insert(tool.clone(), PermissionValue::PatternMap(pmap));
-                }
-            }
-            Some(perm_entries)
-        } else {
-            None
-        };
+        // 9. Permissions — an ordered rule list; opencode applies the last rule that matches.
+        let config_permissions = permissions::render(
+            &manifest.capabilities.permissions,
+            manifest.capabilities.native_permissions.get("opencode"),
+        )?;
 
         // 9b. Model providers + default models.
         let config_provider = {
@@ -969,6 +791,7 @@ impl AgentAdapter for OpencodeAdapter {
             "mcp",
             "lsp",
             "permission",
+            "permissions",
             "provider",
             "model",
             "small_model",
@@ -982,7 +805,7 @@ impl AgentAdapter for OpencodeAdapter {
             lsp: config_lsp,
             schema: format!("./{OPENCODE_SCHEMA_FILE}"),
             instructions: config_instructions,
-            permission: config_permission,
+            permissions: config_permissions,
             provider: config_provider,
             model: config_model,
             small_model: config_small_model,
@@ -1133,296 +956,6 @@ impl AgentAdapter for OpencodeAdapter {
             super::SessionStartContext::Accepted,
         )
     }
-}
-
-/// Map a neutral permission-rule tool name (Claude Code's vocabulary —
-/// `Bash`, `Read`, `Write`, ...) to opencode's own permission config key.
-///
-/// #1326: source-verified against opencode's
-/// `packages/core/src/v1/config/permission.ts` schema — the real keys are
-/// `read, edit, glob, grep, list, bash, task, todowrite, webfetch,
-/// websearch, lsp, skill`, not a simple lowercase of the neutral name.
-/// `write`/`patch` are explicitly normalized to `edit`
-/// (`v1/config/migrate.ts`'s `normalizeAction`) — there is no separate
-/// opencode `write` or `multiedit` key — and the list-tool key is `list`,
-/// not `ls`.
-///
-/// Returns `None` for a neutral name with no confirmed opencode equivalent
-/// (e.g. `NotebookEdit`) rather than guessing at a lowercase pass-through —
-/// the design doc's own policy is "best-effort tool-name mapping; unknown
-/// names dropped with warning"
-/// (`docs/superpowers/specs/2026-07-10-opencode-adapter-design.md`), and
-/// silently emitting an unverified name would repeat exactly the mistake
-/// this fix corrects for `Write`/`MultiEdit`/`LS`.
-///
-/// #1371: the mapping itself now lives in [`crate::adapter::tools`] alongside
-/// crush's, because the two hand-written tables had drifted apart — this is the
-/// opencode column of that one table.
-fn opencode_tool_name(neutral: &str) -> Option<&'static str> {
-    crate::adapter::tools::opencode_key(neutral)
-}
-
-/// opencode permission keys typed as a bare `"ask"`/`"allow"`/`"deny"` string
-/// rather than the `Action | {pattern: action}` union every other key accepts.
-/// Rendering a pattern map for one of these fails opencode's schema decode, and
-/// its loader then discards the *entire* config file with no diagnostic (#1328).
-///
-/// Verified against `packages/core/src/v1/config/permission.ts` at opencode
-/// `ab7cbc808f61e062af20d9a9a838ae93ed8f940d` — these are exactly the keys
-/// declared `Schema.optional(Action)`. Listing a key that is no longer
-/// action-only only costs a spurious error; *missing* one brings back the
-/// silent whole-config discard, so re-check this list against that file when
-/// bumping the supported opencode version.
-const ACTION_ONLY_PERMISSION_KEYS: &[&str] = &[
-    "doom_loop",
-    "question",
-    "todowrite",
-    "webfetch",
-    "websearch",
-];
-
-/// Reject a pattern map opencode's schema cannot represent (#1328).
-///
-/// opencode discards the entire config file when any one key fails to decode,
-/// with no diagnostic, so this has to be a hard error rather than a warning.
-fn check_permission_patterns(
-    tool: &str,
-    patterns: &BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    if ACTION_ONLY_PERMISSION_KEYS.contains(&tool) {
-        let scoped: Vec<&str> = patterns
-            .keys()
-            .filter(|p| p.as_str() != "*")
-            .map(String::as_str)
-            .collect();
-        anyhow::ensure!(
-            scoped.is_empty(),
-            "opencode: permission key `{tool}` accepts only a bare \"allow\"/\"ask\"/\"deny\", \
-             not a pattern-scoped rule (got {scoped:?}). opencode discards the entire config \
-             file when any one key fails its schema, so this cannot be rendered. Drop the \
-             pattern/paths so the rule covers the whole tool."
-        );
-    }
-    Ok(())
-}
-
-/// Reject a rule pair whose rendered order inverts the user's intent.
-///
-/// opencode flattens *every* permission key into one ordered rule list, in the
-/// rendered JSON's key order (`v1/config/migrate.ts`'s `permissions()`), then
-/// resolves a request with `findLast` over it — wildcard-matching both the key
-/// against the tool name and the pattern against the resource
-/// (`permission.ts`'s `evaluate`). So the last rule that matches wins, and that
-/// is only what the user meant when it is the *narrower* of the two; otherwise
-/// the earlier rule silently stops applying where they overlap.
-///
-/// llmenv emits keys sorted and each key's patterns sorted, so iterating the
-/// map in order reproduces exactly the list opencode evaluates. Comparing
-/// across keys as well as within them is what makes a wildcard key (`*`,
-/// authored via `native_permissions.opencode`) participate — #1344; a per-key
-/// check never saw it against the concrete keys it shadows.
-///
-/// Only pairs with differing actions matter — when both say `deny`, whichever
-/// wins gives the same answer.
-fn check_rule_ordering(
-    permission_map: &BTreeMap<String, BTreeMap<String, String>>,
-) -> anyhow::Result<()> {
-    // (key, pattern, action) in rendered order — the order opencode sees.
-    let rules: Vec<(&str, &str, &str)> = permission_map
-        .iter()
-        .flat_map(|(tool, patterns)| {
-            patterns
-                .iter()
-                .map(move |(pattern, action)| (tool.as_str(), pattern.as_str(), action.as_str()))
-        })
-        .collect();
-
-    for (i, (early_tool, early_pat, early_action)) in rules.iter().enumerate() {
-        for (late_tool, late_pat, late_action) in rules.iter().skip(i + 1) {
-            let inverts = late_action != early_action
-                && patterns_overlap(early_tool, late_tool)
-                && patterns_overlap(early_pat, late_pat)
-                && !(pattern_subsumes(early_tool, late_tool)
-                    && pattern_subsumes(early_pat, late_pat));
-            if !inverts {
-                continue;
-            }
-            anyhow::bail!(
-                "opencode: permission rules {early} ({early_action}) and {late} ({late_action}) \
-                 both match some tool and input, and {late} sorts last so opencode applies it \
-                 wherever they overlap — {early} would not take effect there. {remedy}",
-                early = render_rule(early_tool, early_pat),
-                late = render_rule(late_tool, late_pat),
-                remedy = ordering_remedy(early_tool, early_pat, late_tool, late_pat),
-            );
-        }
-    }
-    Ok(())
-}
-
-/// How to rewrite an inverted pair so opencode resolves it as intended.
-///
-/// When the two rules sit on *different* permission keys the earlier one is
-/// almost always a wildcard key, and there is no way to narrow the later rule
-/// out of its way — opencode has no exclusion syntax and llmenv sorts the keys,
-/// so the user cannot reorder around it either. The fix that does work is to
-/// restate the earlier rule on the later rule's key, where it sorts after the
-/// broad pattern and wins.
-fn ordering_remedy(early_tool: &str, early_pat: &str, late_tool: &str, late_pat: &str) -> String {
-    if early_tool == late_tool {
-        return format!(
-            "Rewrite {late} so it only covers what {early} does not, or give the two the \
-             same action.",
-            late = render_rule(late_tool, late_pat),
-            early = render_rule(early_tool, early_pat),
-        );
-    }
-    format!(
-        "Move {early} onto the `{late_tool}` key so it sorts after {late} — e.g. \
-         `native_permissions.opencode` rule {moved} — or give the two the same action.",
-        early = render_rule(early_tool, early_pat),
-        late = render_rule(late_tool, late_pat),
-        moved = render_rule(late_tool, early_pat),
-    )
-}
-
-/// A rule in opencode's own `tool(pattern)` syntax.
-///
-/// That is the authoring syntax for `native_permissions.opencode`; a rule that
-/// came from `capabilities.permissions` is shown the same way, since this is
-/// how it lands in the generated config.
-fn render_rule(tool: &str, pattern: &str) -> String {
-    if pattern == "*" {
-        format!("`{tool}`")
-    } else {
-        format!("`{tool}({pattern})`")
-    }
-}
-
-/// True when some input matches both patterns.
-///
-/// Decides `L(a) ∩ L(b) ≠ ∅` exactly for opencode's `*`/`?` globs: `*` stands
-/// for any run of characters and `?` for exactly one, so two patterns share an
-/// input when their symbols can be aligned. A pattern ending in `" *"` also
-/// matches its bare prefix, so each side is tested in both spellings.
-fn patterns_overlap(a: &str, b: &str) -> bool {
-    fn spellings(pattern: &str) -> Vec<String> {
-        let pattern = pattern.replace('\\', "/");
-        match pattern.strip_suffix(" *") {
-            Some(prefix) => vec![prefix.to_string(), pattern.clone()],
-            None => vec![pattern],
-        }
-    }
-    let (a, b) = (spellings(a), spellings(b));
-    a.iter().any(|x| b.iter().any(|y| globs_intersect(x, y)))
-}
-
-/// `L(a) ∩ L(b) ≠ ∅` for two anchored `*`/`?` globs, by dynamic programming
-/// over suffix pairs.
-fn globs_intersect(a: &str, b: &str) -> bool {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    // reachable[i][j] — some string is generated by both `a[i..]` and `b[j..]`.
-    let rest_all_stars = |p: &[char]| p.iter().all(|c| *c == '*');
-    let mut reachable = vec![vec![false; b.len() + 1]; a.len() + 1];
-    for i in (0..=a.len()).rev() {
-        for j in (0..=b.len()).rev() {
-            reachable[i][j] = match (a.get(i), b.get(j)) {
-                (None, None) => true,
-                // One side is exhausted: the other must be able to match "".
-                (None, Some(_)) => rest_all_stars(&b[j..]),
-                (Some(_), None) => rest_all_stars(&a[i..]),
-                // A `*` either matches nothing here, or absorbs one more
-                // character that the other side also has to produce.
-                (Some('*'), _) => reachable[i + 1][j] || reachable[i][j + 1],
-                (_, Some('*')) => reachable[i][j + 1] || reachable[i + 1][j],
-                // Otherwise both sides consume exactly one character, which
-                // must be compatible.
-                (Some(x), Some(y)) => (*x == '?' || *y == '?' || x == y) && reachable[i + 1][j + 1],
-            };
-        }
-    }
-    reachable[0][0]
-}
-
-/// True when `broad` appears to match everything `narrow` matches.
-///
-/// Substitutes a sentinel run for each of `narrow`'s `*` so it can be tested as
-/// a concrete string. One length is not enough: a run of `?` in `broad` can
-/// stand in for a short run, and a `*` in `narrow` also stands for *no*
-/// characters at all, which a `broad` like `"*?"` cannot match. So `broad` has
-/// to match every probe length — zero, one, and past `broad`'s own `?` count.
-///
-/// This is a witness test, not a containment proof. It is used only to *exempt*
-/// a pattern pair from the ordering check, so a false negative just costs a
-/// spurious error while the rendered config stays correct — whereas a false
-/// positive would silently skip a real inversion, which is what the probe
-/// lengths guard against.
-fn pattern_subsumes(broad: &str, narrow: &str) -> bool {
-    // U+0001 can't appear in a shell command or URL, so no literal character in
-    // `broad` can match it.
-    const SENTINEL: char = '\u{1}';
-    let widest = broad.chars().filter(|c| *c == '?').count() + 1;
-    [0, 1, widest].iter().all(|run| {
-        let mut witness = String::new();
-        for c in narrow.chars() {
-            match c {
-                '*' => witness.extend(std::iter::repeat_n(SENTINEL, *run)),
-                '?' => witness.push(SENTINEL),
-                other => witness.push(other),
-            }
-        }
-        wildcard_matches(broad, &witness)
-    })
-}
-
-/// Match `input` against an opencode permission pattern.
-///
-/// Mirrors opencode's `Wildcard.match` (`packages/core/src/util/wildcard.ts`):
-/// `*` spans any run of characters, `?` spans exactly one, backslashes
-/// normalize to `/`, and a pattern ending in `" *"` also matches the bare
-/// prefix (so `"git *"` covers a plain `"git"`).
-fn wildcard_matches(pattern: &str, input: &str) -> bool {
-    let normalized: Vec<char> = input.replace('\\', "/").chars().collect();
-    let pattern = pattern.replace('\\', "/");
-    if let Some(prefix) = pattern.strip_suffix(" *")
-        && glob_matches(prefix, &normalized)
-    {
-        return true;
-    }
-    glob_matches(&pattern, &normalized)
-}
-
-/// Anchored glob match over `*` and `?`, backtracking on the most recent `*`.
-fn glob_matches(pattern: &str, input: &[char]) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let (mut p, mut i) = (0_usize, 0_usize);
-    let (mut star, mut resume) = (None, 0_usize);
-    while i < input.len() {
-        match pat.get(p) {
-            Some('*') => {
-                star = Some(p);
-                resume = i;
-                p += 1;
-            }
-            Some('?') => {
-                p += 1;
-                i += 1;
-            }
-            Some(c) if input.get(i) == Some(c) => {
-                p += 1;
-                i += 1;
-            }
-            _ => match star {
-                Some(s) => {
-                    p = s + 1;
-                    resume += 1;
-                    i = resume;
-                }
-                None => return false,
-            },
-        }
-    }
-    pat.iter().skip(p).all(|c| *c == '*')
 }
 
 /// Split markdown source into optional frontmatter and body.
@@ -1651,10 +1184,40 @@ fn write_translated(out: &Path, rel: &Path, translated: &str) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use super::permissions::{
+        check_rule_ordering, glob_matches, opencode_tool_name, pattern_subsumes, patterns_overlap,
+        wildcard_matches,
+    };
     use super::*;
+
+    /// The `permissions` list of `doc`, folded to a `{action: effect | {resource: effect}}` view
+    /// for assertions that do not test the order. `Null` when the list is absent.
+    fn perm_view(doc: &serde_json::Value) -> serde_json::Value {
+        let Some(rules) = doc.get("permissions").and_then(|v| v.as_array()) else {
+            return serde_json::Value::Null;
+        };
+        let mut view = serde_json::Map::new();
+        for rule in rules {
+            let action = rule["action"].as_str().unwrap().to_string();
+            let entry = view
+                .entry(action)
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            entry[rule["resource"].as_str().unwrap()] = rule["effect"].clone();
+        }
+        for entry in view.values_mut() {
+            let only_wildcard = entry
+                .as_object()
+                .is_some_and(|m| m.len() == 1 && m.contains_key("*"));
+            if only_wildcard {
+                *entry = entry["*"].clone();
+            }
+        }
+        serde_json::Value::Object(view)
+    }
 
     mod agents;
     mod hook_table;
+    mod permission_list;
     mod server;
     use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
@@ -2446,8 +2009,8 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         // Bare tool (no pattern, no paths) -> emitted as action string directly:
-        // doc["permission"]["bash"] = "allow"
-        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
+        // perm_view(&doc)["shell"] = "allow"
+        assert_eq!(perm_view(&doc)["shell"], serde_json::json!("allow"));
     }
 
     #[test]
@@ -2480,9 +2043,9 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        // Old format: doc["permission"]["allow"] as array with "Bash(echo*)"
-        // New format: doc["permission"]["bash"]["echo*"] = "allow"
-        let bash = &doc["permission"]["bash"];
+        // Old format: perm_view(&doc)["allow"] as array with "Bash(echo*)"
+        // New format: perm_view(&doc)["shell"]["echo*"] = "allow"
+        let bash = &perm_view(&doc)["shell"];
         assert_eq!(bash["echo*"], serde_json::json!("allow"));
     }
 
@@ -2516,13 +2079,13 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
-            doc["permission"]["*"],
+            perm_view(&doc)["*"],
             serde_json::json!("deny"),
             "a bare `*` native deny-all rule must survive verbatim, not be dropped as an \
              unmapped neutral tool: {doc}"
         );
         assert_eq!(
-            doc["permission"]["lsp"],
+            perm_view(&doc)["lsp"],
             serde_json::json!("deny"),
             "opencode-only keys like `lsp` (no neutral equivalent) must survive verbatim: {doc}"
         );
@@ -2536,7 +2099,7 @@ mod tests {
     /// `edit` (`migrate.ts`'s `normalizeAction`) — opencode has no separate
     /// `write`/`multiedit` key — and the list-tool key is `list`, not `ls`.
     #[test]
-    fn materialize_permissions_maps_write_multiedit_ls_to_real_opencode_keys() {
+    fn materialize_permissions_map_write_and_multiedit_to_edit_and_drop_ls() {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = crate::config::Capabilities::default();
         for tool in ["Write", "MultiEdit", "LS"] {
@@ -2554,18 +2117,15 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
-            doc["permission"]["edit"],
+            perm_view(&doc)["edit"],
             serde_json::json!("allow"),
             "Write and MultiEdit must both map to opencode's `edit` key, got: {doc}"
         );
-        assert_eq!(
-            doc["permission"]["list"],
-            serde_json::json!("allow"),
-            "LS must map to opencode's `list` key, got: {doc}"
-        );
-        assert!(doc["permission"].get("write").is_none());
-        assert!(doc["permission"].get("multiedit").is_none());
-        assert!(doc["permission"].get("ls").is_none());
+        // opencode 2.x has no list tool, so an LS rule is dropped (#2846).
+        assert!(perm_view(&doc).get("list").is_none(), "got: {doc}");
+        assert!(perm_view(&doc).get("write").is_none());
+        assert!(perm_view(&doc).get("multiedit").is_none());
+        assert!(perm_view(&doc).get("ls").is_none());
     }
 
     /// #1326: a neutral tool with no confirmed opencode equivalent (e.g.
@@ -2632,96 +2192,18 @@ mod tests {
         // Verify per-tool format: each tool key maps patterns to actions
 
         // Bash has specific patterns -> emitted as pattern->action object
-        let bash = &doc["permission"]["bash"];
+        let bash = &perm_view(&doc)["shell"];
         assert_eq!(bash["otool *"], serde_json::json!("allow"));
         assert_eq!(bash["rm *"], serde_json::json!("deny"));
 
         // Bare tools without patterns -> emitted as action string directly
-        assert_eq!(doc["permission"]["read"], serde_json::json!("allow"));
-        assert_eq!(doc["permission"]["edit"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["read"], serde_json::json!("allow"));
+        assert_eq!(perm_view(&doc)["edit"], serde_json::json!("deny"));
 
         // No flat "allow"/"deny"/"ask" arrays at the permission level
-        assert!(doc["permission"].get("allow").is_none());
-        assert!(doc["permission"].get("deny").is_none());
-        assert!(doc["permission"].get("ask").is_none());
-    }
-
-    /// #1328 gap 1: opencode types `todowrite`/`question`/`webfetch`/
-    /// `websearch`/`doom_loop` as a bare action string, not a pattern map.
-    /// Emitting `{pattern: action}` for one makes opencode's loader discard
-    /// the *entire* config file with no diagnostic, so it has to fail here.
-    #[test]
-    fn materialize_pattern_scoped_rule_on_action_only_key_is_rejected() {
-        for (tool, key) in [
-            ("WebFetch", "webfetch"),
-            ("WebSearch", "websearch"),
-            ("TodoWrite", "todowrite"),
-        ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let mut caps = crate::config::Capabilities::default();
-            caps.permissions.allow.push(crate::config::PermissionRule {
-                tool: tool.into(),
-                pattern: Some("https://example.com/*".into()),
-                paths: vec![],
-            });
-            let manifest = MergedManifest {
-                capabilities: caps,
-                ..Default::default()
-            };
-            let err = OpencodeAdapter
-                .materialize(&manifest, tmp.path())
-                .unwrap_err();
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains(key) && msg.contains("https://example.com/*"),
-                "error must name the key and the offending pattern: {msg}"
-            );
-        }
-    }
-
-    /// The `paths` form lowers to the same pattern map, so it has to be
-    /// rejected on an action-only key too.
-    #[test]
-    fn materialize_path_scoped_rule_on_action_only_key_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.permissions.deny.push(crate::config::PermissionRule {
-            tool: "TodoWrite".into(),
-            pattern: None,
-            paths: vec!["./notes.md".into()],
-        });
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("todowrite"));
-    }
-
-    /// Same rejection for a hand-authored native rule — `native_permissions`
-    /// bypasses the neutral-name mapping but lands in the same pattern map.
-    #[test]
-    fn materialize_native_pattern_scoped_rule_on_action_only_key_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut caps = crate::config::Capabilities::default();
-        caps.native_permissions.insert(
-            "opencode".into(),
-            crate::config::NativePermissionRules {
-                allow: vec!["doom_loop(some-pattern)".into()],
-                ask: vec![],
-                deny: vec![],
-            },
-        );
-        let manifest = MergedManifest {
-            capabilities: caps,
-            ..Default::default()
-        };
-        let err = OpencodeAdapter
-            .materialize(&manifest, tmp.path())
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("doom_loop"));
+        assert!(perm_view(&doc).get("allow").is_none());
+        assert!(perm_view(&doc).get("deny").is_none());
+        assert!(perm_view(&doc).get("ask").is_none());
     }
 
     /// The unscoped form is the only legal shape for an action-only key, and
@@ -2742,7 +2224,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["webfetch"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["webfetch"], serde_json::json!("deny"));
     }
 
     /// #1328 gap 2: opencode resolves two patterns that both match a resource
@@ -2814,7 +2296,7 @@ mod tests {
             );
             let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
             let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            let bash = &doc["permission"]["bash"];
+            let bash = &perm_view(&doc)["shell"];
             assert_eq!(bash["*"], serde_json::json!(broad_action));
             assert_eq!(bash["git push*"], serde_json::json!(narrow_action));
         }
@@ -2904,7 +2386,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["lsp"]["foo"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["lsp"]["foo"], serde_json::json!("deny"));
     }
 
     /// #1344: opencode wildcard-matches the permission *key* against the tool
@@ -2936,13 +2418,13 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("git push --force*") && msg.contains("bash"),
+            msg.contains("git push --force*") && msg.contains("shell"),
             "error must name the wildcard rule and the key it shadows: {msg}"
         );
         // Narrowing the allow is not expressible in opencode, so the remedy has
         // to be the one that works: restate the deny on the concrete key.
         assert!(
-            msg.contains("`bash(git push --force*)`"),
+            msg.contains("`shell(git push --force*)`"),
             "error must suggest moving the rule onto the shadowed key: {msg}"
         );
     }
@@ -2973,8 +2455,8 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["*"], serde_json::json!("deny"));
-        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
+        assert_eq!(perm_view(&doc)["*"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["shell"], serde_json::json!("allow"));
     }
 
     /// Two concrete keys are distinct literals, so they never overlap and must
@@ -3000,8 +2482,8 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["bash"], serde_json::json!("allow"));
-        assert_eq!(doc["permission"]["read"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["shell"], serde_json::json!("allow"));
+        assert_eq!(perm_view(&doc)["read"], serde_json::json!("deny"));
     }
 
     /// #1345: opencode has a real `skill` permission key, so a `Skill` rule has
@@ -3022,7 +2504,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["permission"]["skill"], serde_json::json!("deny"));
+        assert_eq!(perm_view(&doc)["skill"], serde_json::json!("deny"));
     }
 
     #[test]
@@ -3265,7 +2747,7 @@ mod tests {
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
-            doc["permission"]["bash"]["rm -rf /"],
+            perm_view(&doc)["shell"]["rm -rf /"],
             serde_json::json!("deny")
         );
     }
@@ -3297,7 +2779,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let bash = &doc["permission"]["bash"];
+        let bash = &perm_view(&doc)["shell"];
         assert_eq!(
             bash["rm *"],
             serde_json::json!("deny"),
@@ -4093,9 +3575,7 @@ mod tests {
         OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        doc.get("permission")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)
+        perm_view(&doc)
     }
 
     fn is_action(s: &str) -> bool {
@@ -4527,8 +4007,8 @@ mod tests {
         assert!(props.contains_key("mcp"), "schema must describe 'mcp'");
         assert!(props.contains_key("lsp"), "schema must describe 'lsp'");
         assert!(
-            props.contains_key("permission"),
-            "schema must describe 'permission'"
+            props.contains_key("permissions"),
+            "schema must describe 'permissions'"
         );
     }
 
@@ -4634,12 +4114,14 @@ mod tests {
         Ok(())
     }
 
-    fn arb_permission_value() -> impl Strategy<Value = PermissionValue> {
-        prop_oneof![
-            "[a-z]{1,8}".prop_map(PermissionValue::Simple),
-            proptest::collection::btree_map("[a-z*]{1,8}", "[a-z]{1,8}", 0..3)
-                .prop_map(PermissionValue::PatternMap),
-        ]
+    fn arb_permission_rule_json() -> impl Strategy<Value = permissions::Rule> {
+        ("[a-z*]{1,8}", "[a-z* ]{1,8}", "allow|ask|deny").prop_map(|(action, resource, effect)| {
+            permissions::Rule {
+                action,
+                resource,
+                effect,
+            }
+        })
     }
 
     /// Arbitrary shallow JSON value for `LspServerEntry::init_options`, which
@@ -4757,23 +4239,19 @@ mod tests {
             )),
             "[a-z0-9./-]{1,20}",
             proptest::option::of(proptest::collection::vec("[a-z/.]{1,10}", 0..3)),
-            proptest::option::of(proptest::collection::btree_map(
-                "[a-z][a-z0-9_-]{0,8}",
-                arb_permission_value(),
-                0..3,
-            )),
+            proptest::option::of(proptest::collection::vec(arb_permission_rule_json(), 0..3)),
             proptest::option::of("[a-z][a-z0-9_/-]{0,15}"),
             proptest::option::of("[a-z][a-z0-9_/-]{0,15}"),
         )
             .prop_map(
-                |(plugin, lsp, schema, instructions, permission, model, small_model)| {
+                |(plugin, lsp, schema, instructions, permissions, model, small_model)| {
                     OpencodeConfig {
                         plugin,
                         mcp: None,
                         lsp,
                         schema,
                         instructions,
-                        permission,
+                        permissions,
                         provider: None,
                         model,
                         small_model,
@@ -4791,12 +4269,9 @@ mod tests {
             assert_json_roundtrip(entry)?;
         }
 
-        /// Untagged enums are easy to get wrong (serde tries variants in
-        /// declaration order) — a roundtrip test is a stronger check than
-        /// most for that reason.
         #[test]
-        fn permission_value_roundtrips_through_json(value in arb_permission_value()) {
-            assert_json_roundtrip(value)?;
+        fn permission_rule_roundtrips_through_json(rule in arb_permission_rule_json()) {
+            assert_json_roundtrip(rule)?;
         }
 
         #[test]
