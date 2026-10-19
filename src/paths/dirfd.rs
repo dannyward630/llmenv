@@ -266,6 +266,20 @@ pub(crate) fn mtime_at(
     ))
 }
 
+/// Whether `name` in `dir` is a regular file, without following a symlink. `false` for a missing
+/// entry.
+///
+/// # Errors
+/// `name` is not a single component, or the entry exists but cannot be read.
+pub(crate) fn is_regular_file_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<bool> {
+    reject_traversal(name)?;
+    match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => Ok(rustix::fs::FileType::from_raw_mode(st.st_mode).is_file()),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Create `name` in `dir` with `mode`, replacing whatever is there — including a
 /// symlink, which is unlinked rather than written through. The file is never briefly more
 /// permissive than `mode`.
