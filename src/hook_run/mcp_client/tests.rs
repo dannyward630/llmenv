@@ -8,6 +8,22 @@ use std::thread;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+impl McpHttpClient {
+    /// Build a client for testing, skipping SSRF validation.
+    pub(crate) fn test_new(url: String, timeout: Duration) -> anyhow::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("failed to build HTTP client")?;
+        Ok(Self {
+            url,
+            client,
+            session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            init_info: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        })
+    }
+}
+
 mod calls;
 mod listing_and_headers;
 mod probe_and_info;
