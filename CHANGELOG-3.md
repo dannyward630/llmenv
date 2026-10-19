@@ -13,21 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv doctor --gc` (#2815) [feat:hooks]
+- `llmenv clean` is the one cleanup command. It removes the stale cache folders that `prune` removed, then runs the age-based sweeps that `doctor --gc` ran, and `--dry-run` lists every item from both. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#clean) (#2917) [feat:cli]
+- `llmenv task list` is an alias of `llmenv task ls` (#2905) [feat:task]
+- At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv clean` (#2815) [feat:hooks]
 - A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
 
 ### Changed
 
-- The `llmenv doctor --gc` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
+- The `llmenv clean` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
 - The codebase-memory-mcp floor is now 0.12.0, and `llmenv doctor` warns below it. The docs say a repo indexed from the CLI is not watched, and that 0.12.0 changes the index format from 1 to 2 (#2853) [fix:mcp]
 - llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]
+
+### Deprecated
+
+- `llmenv prune` and `llmenv doctor --gc`. Use `llmenv clean`. `prune` now runs all of `clean`; `doctor --gc` keeps its own sweeps for now. Both print a deprecation line. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#deprecated-commands) (#2917) [feat:cli]
 
 ### Fixed
 
 - A hook message that went to stderr now reaches the agent as a notice: the deprecated `filePath` key, a session with no ICM transcript, and a subagent start with no usable agent id (#2818) [fix:hook]
 - A notice longer than 1000 characters keeps its `Fix:` line. Only the cause is cut (#2820) [fix:hook]
-- `llmenv doctor --gc` sweeps the state temp folder (`state/tmp`) by age, and skips an entry that a process has open. It stops with a fix when `lsof` cannot run (#2814) [fix:materialize]
-- The session log rotates at 64 MiB and keeps three rotated files. `doctor --gc` removes rotations older than the cache retention (#2816) [fix:hook]
+- `llmenv clean` sweeps the state temp folder (`state/tmp`) by age, and skips an entry that a process has open. It stops with a fix when `lsof` cannot run (#2814) [fix:materialize]
+- The session log rotates at 64 MiB and keeps three rotated files. `llmenv clean` removes rotations older than the cache retention (#2816) [fix:hook]
 - The task-tracking rules say the tracker has no MCP tool, and name the Bash command. Agents stop calling `mcp__llmenv__task_session` (#2827) [fix:task]
 - A stateless recall at the start of a turn, with no session id under adaptive recall, scopes to the session project. Before, it searched every project's memories (#2765) [fix:hook]
 - A scope recall that the output budget cuts short leaves a notice that names the count of skipped recalls, instead of dropping them silently (#2766) [fix:hook]
