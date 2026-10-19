@@ -24,10 +24,13 @@ use crate::hook_run::shell_split::{
 use crate::task::Tracking;
 
 mod deny;
+mod stop;
 pub(crate) use deny::state_dir_deny;
 use deny::{
     gate_unavailable_deny, state_unreadable_deny, store_unreadable_deny, unsaved_state_deny,
 };
+pub(crate) use stop::handle_stop;
+use stop::waiting_reminder;
 
 /// Skills that start a multi-step workflow, when `workflow_skills` is not set.
 const DEFAULT_WORKFLOW_SKILLS: [&str; 5] = [
@@ -328,50 +331,6 @@ fn work_nudge(tracker: &TaskTracker, tracking: &Tracking, state: &mut NudgeState
     )
 }
 
-/// The reminder to park the task that waits for the user's answer.
-fn waiting_reminder(tracking: &Tracking) -> String {
-    match tracking {
-        Tracking::Tracked {
-            wip: Some(slug), ..
-        } => format!(
-            "llmenv task tracker: you asked the user a question while '{slug}' is in progress. If \
-             you wait for the answer, run `llmenv task wait {slug} \"<what you wait for>\"`. After \
-             the user answers, run `llmenv task start {slug}`."
-        ),
-        _ => String::new(),
-    }
-}
-
-/// The addition to the Stop reminder. A question to the user parks the task in progress, and
-/// queued tasks with none in progress name the next start.
-pub(crate) fn handle_stop(
-    tracker: &TaskTracker,
-    payload: &serde_json::Value,
-    state_dir: &Path,
-) -> String {
-    if !tracker.nudges {
-        return String::new();
-    }
-    let asks = payload["last_assistant_message"]
-        .as_str()
-        .is_some_and(|m| m.trim_end().ends_with('?'));
-    let tracking = crate::task::tracking(state_dir);
-    match &tracking {
-        Tracking::Tracked { wip: Some(_), .. } if asks => waiting_reminder(&tracking),
-        Tracking::Tracked { waiting, .. } if asks && !waiting.is_empty() => format!(
-            "llmenv task tracker: waiting on the user: {}. After the user answers, run `llmenv \
-             task start <slug>`.",
-            waiting.join(", ")
-        ),
-        Tracking::Tracked {
-            wip: None,
-            next: Some(slug),
-            ..
-        } => queued_reminder(slug),
-        _ => String::new(),
-    }
-}
-
 /// The `__DENY__` text for the first commit or pull request with no task in progress, or an
 /// empty string. The retry passes, and the marker clears when a task is in progress.
 pub(crate) fn handle_pre_tool_use(
@@ -405,14 +364,18 @@ pub(crate) fn handle_pre_tool_use(
     // Same lock as the post-tool handler, so the two read-change-save cycles cannot interleave (#2678).
     // Without the lock, this check and a post-tool save could overwrite each other's marker,
     // so the commit is denied until the lock can be taken (#2747).
-    let Some(_lock) = path
-        .parent()
-        .and_then(|dir| super::session_state::lock_state_file(dir, id, "task nudge"))
-    else {
-        return gate_unavailable_deny(&format!(
-            "the lock for the task nudge state {} is busy or cannot be taken",
-            path.display()
-        ));
+    let lock = match path.parent() {
+        Some(dir) => super::session_state::lock_state_file_why(dir, id, "task nudge"),
+        None => Err(format!("{} has no parent folder", path.display())),
+    };
+    let _lock = match lock {
+        Ok(lock) => lock,
+        Err(why) => {
+            return gate_unavailable_deny(&format!(
+                "the lock for the task nudge state {} cannot be taken: {why}",
+                path.display()
+            ));
+        }
     };
     let tracking = crate::task::tracking(state_dir);
     let (mut state, reset) = match read_state(&path) {
@@ -433,9 +396,9 @@ pub(crate) fn handle_pre_tool_use(
         _ => false,
     };
     match tracking {
-        Tracking::Unknown => {
-            tracing::error!("task commit gate: the task store cannot be read");
-            store_unreadable_deny()
+        Tracking::Unknown(cause) => {
+            tracing::error!("task commit gate: the task store cannot be read: {cause}");
+            store_unreadable_deny(&cause)
         }
         _ if wip_open => {
             // A marker that stays set would let a later commit with no task pass unchecked, so a

@@ -846,7 +846,8 @@ Nothing turns off the third item.
   names the file and the error. It does not allow the commit on a guess.
 
 When a reminder cannot do its work, the agent is told why (changed in v3.13.0).
-This covers a hook payload with no session id, and a nudge state that cannot be saved.
+This covers a hook payload with no session id, a nudge state that cannot be saved, and a task store that cannot be read.
+The last one is named at the end of each turn, and a commit deny names its cause.
 A corrupt nudge state is reset on disk, and the agent is told one time.
 The commit gate denies a shell call whose `tool_input.command` is missing or not a string, and names the field.
 

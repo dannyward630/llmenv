@@ -200,8 +200,10 @@ fn state_dir_deny_covers_only_a_commit_with_the_gate_on() {
     let edit =
         serde_json::json!({ "tool_name": "Edit", "tool_input": { "command": "git commit" } });
     assert_eq!(state_dir_deny(&on, &edit, &error), None);
+    // A call with no command is denied, as the main path denies it (#2536).
     let no_command = serde_json::json!({ "tool_name": "Bash" });
-    assert_eq!(state_dir_deny(&on, &no_command, &error), None);
+    let deny = state_dir_deny(&on, &no_command, &error).unwrap();
+    assert!(deny.contains("tool_input.command"), "{deny}");
 }
 
 #[test]
@@ -209,17 +211,26 @@ fn an_unreadable_task_store_denies_a_commit_and_skips_the_nudge() {
     let dir = TempDir::new().unwrap();
     // A file where the task store directory belongs: the store cannot be read.
     std::fs::write(dir.path().join("tasks"), "x").unwrap();
-    assert_eq!(crate::task::tracking(dir.path()), Tracking::Unknown);
+    assert!(matches!(
+        crate::task::tracking(dir.path()),
+        Tracking::Unknown(_)
+    ));
     let tracker = TaskTracker {
         nudge_after: Some(1),
         ..TaskTracker::default()
     };
     let deny = handle_pre_tool_use(&tracker, &bash("git commit"), Some("s1"), dir.path());
     assert!(deny.starts_with("__DENY__:"));
-    assert!(deny.contains("task store cannot be read"));
+    assert!(
+        deny.contains("task store cannot be read ("),
+        "names the cause: {deny}"
+    );
     let edit = serde_json::json!({ "tool_name": "Edit" });
     assert_eq!(
         handle_post_tool_use(&tracker, &edit, Some("s1"), dir.path()),
         ""
     );
+    // The end of the turn says why the reminders did not run.
+    let stop = handle_stop(&tracker, &serde_json::json!({}), dir.path());
+    assert!(stop.contains("task reminders did not run"), "{stop}");
 }

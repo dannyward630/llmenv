@@ -18,6 +18,8 @@ pub(crate) mod relation;
 pub(crate) mod reopen;
 mod resolve;
 pub(crate) mod resume;
+mod tracking;
+pub(crate) use tracking::{Tracking, tracking};
 pub mod session;
 pub(crate) use reopen::{reopen_task, reopen_tasks};
 pub(crate) use resolve::resolve_identifier;
@@ -306,9 +308,19 @@ fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<
                     path = %path.display(),
                     "skipping unreadable task file"
                 );
+                // A refused read (a FIFO, a file past the cap, or not UTF-8) is not a permission
+                // problem, so its fix differs.
+                let refused = e
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::InvalidData);
+                let fix = if refused {
+                    "remove the file, or replace it with a task file that llmenv wrote"
+                } else {
+                    "check the file's permissions"
+                };
                 crate::agent_notice::record(format!(
                     "llmenv skipped the unreadable task file {}: {e}. The task is missing from \
-                     task lists and resume. Fix: check the file's permissions.",
+                     task lists and resume. Fix: {fix}.",
                     path.display()
                 ));
             }
@@ -1430,80 +1442,9 @@ fn idle_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) ->
         .join("\n\n")
 }
 
-/// How well the current project's work is tracked right now (#2456).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Tracking {
-    /// The project cannot be resolved, so no statement is possible.
-    Unknown,
-    /// No session is open for the project.
-    NoSession,
-    /// A session is open, but none of its tasks is unfinished.
-    NoTasks,
-    /// A session has unfinished tasks. `wip` is the slug of one task in progress, if any,
-    /// `waiting` lists the slugs of the tasks that wait on the user, and `next` is the first
-    /// task still `open`, the one to start next.
-    Tracked {
-        wip: Option<String>,
-        waiting: Vec<String>,
-        next: Option<String>,
-    },
-}
-
-/// The tracking state of the current project, over every open session of the project: a task in
-/// progress in any of them counts. A read error is [`Tracking::Unknown`], so a hook never nudges
-/// on a guess.
-pub(crate) fn tracking(state_dir: &Path) -> Tracking {
-    let project = match project::current_tag() {
-        Ok(project) => project,
-        Err(e) => {
-            tracing::error!("project::current_tag failed, so tracking is unknown: {e:#}");
-            return Tracking::Unknown;
-        }
-    };
-    // A store that cannot be read is unknown, not empty: a hook never nudges or denies on a guess.
-    let (sessions, tasks) = match (
-        session::open_sessions_strict(state_dir, &project),
-        list_tasks_strict(state_dir),
-    ) {
-        (Ok(sessions), Ok(tasks)) => (sessions, tasks),
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::error!("task store cannot be read, so tracking is unknown: {e:#}");
-            return Tracking::Unknown;
-        }
-    };
-    let ids: Vec<String> = sessions.into_iter().map(|s| s.id).collect();
-    if ids.is_empty() {
-        return Tracking::NoSession;
-    }
-    let unfinished: Vec<&Task> = tasks
-        .iter()
-        .filter(|t| t.state != TaskState::Done)
-        .filter(|t| t.session.as_ref().is_some_and(|s| ids.contains(s)))
-        .collect();
-    if unfinished.is_empty() {
-        return Tracking::NoTasks;
-    }
-    let wip = unfinished
-        .iter()
-        .find(|t| t.state == TaskState::Wip)
-        .map(|t| t.slug.clone());
-    let waiting = unfinished
-        .iter()
-        .filter(|t| t.state == TaskState::Waiting)
-        .map(|t| t.slug.clone())
-        .collect();
-    // The queue runs in creation order, so the next task is the earliest open one.
-    let next = unfinished
-        .iter()
-        .filter(|t| t.state == TaskState::Open)
-        .min_by(|a, b| queue_order(a, b))
-        .map(|t| t.slug.clone());
-    Tracking::Tracked { wip, waiting, next }
-}
-
 /// The queue order of two tasks: creation time, then slug for a tie. The tree listing and the
 /// next-task lookup both use it, so they cannot disagree about which task is next.
-fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
+pub(super) fn queue_order(a: &Task, b: &Task) -> std::cmp::Ordering {
     a.created_at
         .cmp(&b.created_at)
         .then_with(|| a.slug.cmp(&b.slug))

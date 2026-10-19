@@ -32,11 +32,16 @@ pub(crate) fn state_dir_deny(
     payload: &serde_json::Value,
     error: &anyhow::Error,
 ) -> Option<String> {
-    let command = payload["tool_input"]["command"].as_str()?;
-    if !tracker.enforce_commit
-        || payload["tool_name"].as_str() != Some("Bash")
-        || !runs_commit_or_pr(command)
-    {
+    if !tracker.enforce_commit || payload["tool_name"].as_str() != Some("Bash") {
+        return None;
+    }
+    // A call with no command is denied, as the main path denies it (#2536).
+    let Some(command) = payload["tool_input"]["command"].as_str() else {
+        return Some(gate_unavailable_deny(
+            "the Bash call has no string `tool_input.command`",
+        ));
+    };
+    if !runs_commit_or_pr(command) {
         return None;
     }
     Some(gate_unavailable_deny(&format!(
@@ -54,12 +59,13 @@ pub(super) fn state_unreadable_deny(error: &str) -> String {
     )
 }
 
-/// The `__DENY__` text for a commit when the task store cannot be read. The gate cannot tell
-/// whether a task is in progress, so it denies (#2630).
-pub(super) fn store_unreadable_deny() -> String {
-    "__DENY__:llmenv blocked this commit or pull request: the task store cannot be read, so the \
-     gate cannot tell whether a task is in progress. Fix the task store under the state directory, \
-     then run the same command again. To turn this off, set features.task_tracker.enforce_commit \
-     to false."
-        .to_owned()
+/// The `__DENY__` text for a commit when the task store cannot be read, with the `cause`. The
+/// gate cannot tell whether a task is in progress, so it denies (#2630).
+pub(super) fn store_unreadable_deny(cause: &str) -> String {
+    format!(
+        "__DENY__:llmenv blocked this commit or pull request: the task store cannot be read \
+         ({cause}), so the gate cannot tell whether a task is in progress. Fix the task store \
+         under the state directory, then run the same command again. To turn this off, set \
+         features.task_tracker.enforce_commit to false."
+    )
 }
