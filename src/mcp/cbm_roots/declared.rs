@@ -242,6 +242,27 @@ mod tests {
             }
         }
 
+        /// `~` and `~/rest` expand against the given home, `~name` is refused, and an entry
+        /// with no `~` and no `$` is the trimmed entry itself (#2924).
+        #[test]
+        fn expanding_follows_the_tilde_rules(
+            rest in "(/[a-z]{1,5}){0,3}",
+            name in "[a-z]{1,5}",
+            plain in "/[a-z]{1,5}(/[a-z]{1,5}){0,2}",
+        ) {
+            let home = Path::new("/home/u");
+            prop_assert_eq!(
+                expand_root(&format!("~{rest}"), Some(home), &no_env),
+                Some(PathBuf::from(format!("/home/u{rest}")))
+            );
+            prop_assert_eq!(expand_root(&format!("~{name}{rest}"), Some(home), &no_env), None);
+            prop_assert_eq!(expand_root(&format!("~{rest}"), None, &no_env), None);
+            prop_assert_eq!(
+                expand_root(&format!("  {plain} "), Some(home), &no_env),
+                Some(PathBuf::from(&plain))
+            );
+        }
+
         #[test]
         fn declared_roots_never_repeat(
             extra in prop::collection::vec("/[a-z]{1,5}(/[a-z]{1,5}){0,2}", 0..5),
