@@ -956,7 +956,8 @@ fn session_start_is_silent_when_codebase_memory_answers() {
         .stdout(predicate::str::contains("MCP health check failed").not());
 }
 
-/// A fake server that records each `allow-root <path>` call in `log` and lists no roots.
+/// A fake server that records each `allow-root <path>` call in `log` and lists no roots. An
+/// empty record is unconfined, so the session has nothing to report.
 #[cfg(unix)]
 fn recording_cbm(log: &std::path::Path, add_status: i32) -> String {
     format!(
@@ -971,11 +972,19 @@ fn recording_cbm(log: &std::path::Path, add_status: i32) -> String {
     )
 }
 
-// #2406: SessionStart records the project folder as an allowed root through the server's own
-// command.
+/// A fake server that lists one recorded root and answers the MCP handshake.
+#[cfg(unix)]
+fn listing_cbm(root: &str) -> String {
+    format!(
+        "if [ \"$1\" = allow-root ]; then echo 'allowed roots:'; echo '{root}'; exit 0; fi\n\
+         read line\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}'"
+    )
+}
+
+// #2916: SessionStart only reads the server's roots. It never records one.
 #[cfg(unix)]
 #[test]
-fn session_start_records_the_project_folder_as_an_allowed_root() {
+fn session_start_never_runs_allow_root() {
     let (dir, config_path) = setup_config(&config_with_codebase_memory());
     let bin = TempDir::new().unwrap();
     let log = bin.path().join("roots.log");
@@ -986,35 +995,61 @@ fn session_start_records_the_project_folder_as_an_allowed_root() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cannot index").not());
-    let recorded = fs::read_to_string(&log).unwrap();
-    let name = dir
-        .path()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
     assert!(
-        recorded.contains(&name),
-        "the project folder is recorded: {recorded}"
+        !log.exists(),
+        "SessionStart ran allow-root: {:?}",
+        fs::read_to_string(&log)
     );
 }
 
-// #2406: a root the server refuses is named on stdout with the config fix.
+// #2916: a declared root that the server lacks is named on stdout, with the command for the user.
 #[cfg(unix)]
 #[test]
-fn session_start_names_a_root_the_server_refuses() {
-    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+fn session_start_names_a_declared_root_the_server_lacks() {
+    let declared = std::env::temp_dir();
+    let config = config_with_codebase_memory().replace(
+        "    - when: [test]",
+        &format!(
+            "    - when: [test]\n      allowed_roots: [\"{}\"]",
+            declared.display()
+        ),
+    );
+    let (dir, config_path) = setup_config(&config);
     let bin = TempDir::new().unwrap();
-    let log = bin.path().join("roots.log");
     let mut cmd = hook_cmd(dir.path(), &config_path, "session_start");
     cmd.current_dir(dir.path());
-    with_fake_cbm(&mut cmd, bin.path(), &recording_cbm(&log, 1));
+    with_fake_cbm(&mut cmd, bin.path(), &listing_cbm("/nonexistent-root-2916"));
     cmd.timeout(Duration::from_secs(20))
         .assert()
         .success()
         .stdout(predicate::str::contains("cannot index"))
-        .stdout(predicate::str::contains("refused by the fake server"))
-        .stdout(predicate::str::contains("allowed_roots"));
+        .stdout(predicate::str::contains("allow-root"))
+        .stdout(predicate::str::contains("llmenv never runs"));
+}
+
+// #2916: an index_repository call outside the recorded roots is denied, and the reason names the
+// command the user runs.
+#[cfg(unix)]
+#[test]
+fn pre_tool_use_denies_an_index_outside_the_recorded_roots() {
+    let (dir, config_path) = setup_config(&config_with_codebase_memory());
+    let bin = TempDir::new().unwrap();
+    let mut cmd = hook_cmd(dir.path(), &config_path, "pre_tool_use");
+    cmd.current_dir(dir.path());
+    with_fake_cbm(
+        &mut cmd,
+        bin.path(),
+        &listing_cbm(&std::env::temp_dir().display().to_string()),
+    );
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__codebase-memory-mcp__index_repository","tool_input":{"repo_path":"/usr"}}"#;
+    cmd.timeout(Duration::from_secs(20))
+        .write_stdin(payload)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "outside the codebase-memory allowed roots",
+        ))
+        .stdout(predicate::str::contains("allow-root"));
 }
 
 /// A config whose host scope matches `hostname`, so this host owns the ICM server.

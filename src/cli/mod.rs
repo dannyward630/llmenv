@@ -2376,6 +2376,10 @@ fn materialize_from_manifest(
     // plugin/env-var relocation vars (#632 / #175 / #490).
     let state_dir = crate::materialize::state::state_dir(&adapter_root);
     let mut env_vars = adapter.env_vars(&cache_path, &state_dir)?;
+    // Claude Code does not export its version to the hooks, so llmenv passes it (#2898).
+    if adapter.name() == "claude-code" {
+        env_vars.extend(crate::adapter::claude_code::version::env_vars());
+    }
 
     // Collect env vars from merged bundle Capabilities. Later contributors override
     // earlier ones (enforced by the merge_capabilities function via precedence).

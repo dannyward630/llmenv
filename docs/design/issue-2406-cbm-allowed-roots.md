@@ -53,9 +53,35 @@ If roots are an env list: llmenv sets it in both launch paths (decision 3).
 | `$NBL_DIAG_CACHE` is referenced nowhere in the repo; the nbl-diag plugin defaults it to `~/.cache/nbl-diag` | none |
 | Docs: `configuration.md` `### features.codebase_memory:`, `mcp.md` "Codebase memory", "The `index_repository` name guard", "Session-start health check" | docs |
 
+## Revision (#2916): llmenv never grants a root
+
+The first design had llmenv run `allow-root` at every SessionStart for a set of defaults.
+That confined the server by llmenv's own choice.
+An empty grant store is unconfined, the first recorded root confines it, and cbm has no command that removes a root.
+Upstream says enrollment is a command that a person types.
+So this revision replaces the grant step:
+
+1. Roots come only from `features.codebase_memory[].allowed_roots`.
+   No default is a root: not the session folder, not an llmenv directory, not the nbl-diag cache.
+2. llmenv never runs `allow-root <path>` from a hook.
+   SessionStart and doctor only read `allow-root --list`.
+3. An empty record means unconfined.
+   Doctor prints no warning, and the `index_repository` guard lets the call through to the server.
+4. A non-empty record confines the server.
+   A declared root is covered when a recorded root equals it or contains it, after links resolve.
+   A declared root that is not covered is named with the command `CBM_CACHE_DIR=<cache> codebase-memory-mcp allow-root <path>`.
+   The user runs that command.
+5. When the record is not empty, the guard denies a path that no recorded root contains.
+   The denial asks the user to record the folder, and tells the agent not to run the command.
+6. Doctor names a recorded root that no declared root covers.
+   It names the file to delete (`<cache>/allowed_roots`) to return to unconfined indexing, or to edit to keep some roots.
+
+Superseded parts of the first design: decision 1 (defaults), decision 2 (command at SessionStart), and the guard and SessionStart steps in "As built".
+
 ## Decisions
 
 1. **`allowed_roots` is a list on `features.codebase_memory[]`**, and llmenv always adds a default set.
+   (Superseded by #2916: no default is a root.)
    Defaults: the project root (cwd at session start), `~/.config/llmenv`, the llmenv cache dir, the llmenv state dir, and `${NBL_DIAG_CACHE:-~/.cache/nbl-diag}/repos`.
    User entries are appended.
    Entries expand `~` and `$VAR` at resolve time; an entry whose variable is unset is dropped with a debug log, not an error.
@@ -159,6 +185,6 @@ Differences from the plan:
 1. `src/mcp/cbm_roots.rs` holds the resolver, the command runner, the report, and the guard decision.
    The resolver is `resolve_allowed_roots(cm, &RootBases)` there, not `resolve_allowed_roots(cm, project_root, env)` in `src/mcp/resolve.rs`; `RootBases` carries the project root, config dir, cache dir, state dir and home.
    The `Design` sections above that name `src/mcp/resolve.rs` and `src/hook_run/mcp_health.rs` for this logic are superseded by that module.
-2. The guard allows the configured roots of every `codebase_memory` entry plus the roots that `allow-root --list` prints, not the active entry only. This avoids scope evaluation in a hook.
+2. (Superseded by #2916: the guard allows only the recorded roots, and an empty record passes.) The guard allows the configured roots of every `codebase_memory` entry plus the roots that `allow-root --list` prints, not the active entry only. This avoids scope evaluation in a hook.
 3. llmenv cannot detect a cache-dir mismatch, because the server has no query for its cache dir. The notice and doctor print the expected cache dir (`index_path`, or the server default) instead.
-4. The SessionStart step runs `allow-root` only for roots that `--list` lacks, and skips a root that does not exist.
+4. (Superseded by #2916: SessionStart only reads `--list`.) The SessionStart step runs `allow-root` only for roots that `--list` lacks, and skips a root that does not exist.
