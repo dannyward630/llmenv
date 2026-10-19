@@ -174,19 +174,7 @@ enum Command {
         repo: Option<String>,
     },
     /// Interactive setup wizard for new llmenv users
-    Setup {
-        /// Directory to set up (defaults to the standard config dir)
-        path: Option<std::path::PathBuf>,
-        /// Repository to store config in (optional)
-        #[arg(long)]
-        repo: Option<String>,
-        /// Skip the AI engine handoff at the end
-        #[arg(long)]
-        no_launch: bool,
-        /// Re-scan existing configs without overwriting config files
-        #[arg(long)]
-        rescan: bool,
-    },
+    Setup(setup::SetupArgs),
     /// Show current environment status
     Status {
         /// Show only a specific section (scopes, tags, bundles, mcps, plugins, marketplaces)
@@ -854,14 +842,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::Init { path, repo }) => {
             run_init(path, repo)?;
         }
-        Some(Command::Setup {
-            path,
-            repo,
-            no_launch,
-            rescan,
-        }) => {
-            setup::run_setup(path, repo, no_launch, rescan)?;
-        }
+        Some(Command::Setup(args)) => setup::run_setup_command(args)?,
         Some(Command::Status { section }) => {
             status::run_status(section, use_color)?;
         }
