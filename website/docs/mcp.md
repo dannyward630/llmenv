@@ -635,7 +635,9 @@ neutral events:
   hook output above about 10 KB to a file and shows the model only a 2 KB
   preview, so without the cap the most specific memories could be cut off.
 - **SessionEnd** — `hook-run session_end` stores the active scope context
-  (`icm_memory_store`) when the session closes
+  (`icm_memory_store`) when the session closes, under the topic `llmenv-scope-context`.
+  A recall across all projects leaves these records out, because each one describes the project that stored it
+  (changed in v3.13.0).
 
 The Claude Code adapter registers `SessionStart`, `SessionEnd`, and (added in v3.12.0)
 `PostModelSwitch` unconditionally —

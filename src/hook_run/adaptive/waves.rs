@@ -106,4 +106,22 @@ mod tests {
         assert!(!all.contains("https://other.example"), "{all}");
         assert!(!all.contains("https://old.example"), "{all}");
     }
+
+    #[tokio::test]
+    async fn a_scope_record_of_another_project_is_not_recalled() {
+        let server = MockServer::start().await;
+        mount(&server, "initialize", "").await;
+        mount(
+            &server,
+            r#""project":"""#,
+            "[llmenv-scope-context] tags: lang-go, bundles: go-dev\n[context-proj-a] a fact",
+        )
+        .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let (outcome, main_ok) = waves(&client, "q", &[], None).await;
+        assert!(main_ok);
+        let all = outcome.texts.join("\n");
+        assert!(all.contains("a fact"), "{all}");
+        assert!(!all.contains("lang-go"), "{all}");
+    }
 }
