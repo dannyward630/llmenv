@@ -1048,8 +1048,7 @@ fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
 }
 
 fn shell_escape(s: &str) -> String {
-    // For values: use single quotes (prevent all expansions) and escape embedded single quotes
-    format!("'{}'", s.replace('\'', "'\\''"))
+    crate::util::single_quote(s)
 }
 
 /// Reject any var in `vars` whose name isn't a valid shell identifier.

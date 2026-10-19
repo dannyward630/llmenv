@@ -211,29 +211,12 @@ pub(crate) fn check_roots(
     })
 }
 
-/// `path` as one shell word, so a command in a message can be pasted as it is.
-fn shell_word(path: &Path) -> String {
-    let text = path.display().to_string();
-    let plain = !text.is_empty()
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@%".contains(c));
-    if plain {
-        text
-    } else if text.is_empty() {
-        // An empty word would vanish from the pasted command, so it is written as a quoted empty.
-        "''".to_string()
-    } else {
-        format!("'{}'", text.replace('\'', "'\\''"))
-    }
-}
-
 /// The command that the user runs to record `root` with the server of `cache_dir`.
 fn allow_root_command(cache_dir: &Path, root: &Path) -> String {
     format!(
         "CBM_CACHE_DIR={} codebase-memory-mcp allow-root {}",
-        shell_word(cache_dir),
-        shell_word(root)
+        crate::util::shell_word(cache_dir),
+        crate::util::shell_word(root)
     )
 }
 
@@ -421,6 +404,9 @@ fn decide(repo_path: &str, listed: Vec<PathBuf>) -> Option<String> {
 }
 
 #[cfg(test)]
+mod set_props;
+
+#[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
@@ -560,10 +546,13 @@ mod tests {
 
     #[test]
     fn a_path_with_spaces_is_quoted_for_the_shell() {
-        assert_eq!(shell_word(Path::new("/plain/path")), "/plain/path");
-        assert_eq!(shell_word(Path::new("/a b")), "'/a b'");
-        assert_eq!(shell_word(Path::new("/it's")), "'/it'\\''s'");
-        assert_eq!(shell_word(Path::new("")), "''");
+        assert_eq!(
+            crate::util::shell_word(Path::new("/plain/path")),
+            "/plain/path"
+        );
+        assert_eq!(crate::util::shell_word(Path::new("/a b")), "'/a b'");
+        assert_eq!(crate::util::shell_word(Path::new("/it's")), "'/it'\\''s'");
+        assert_eq!(crate::util::shell_word(Path::new("")), "''");
     }
 
     #[test]
@@ -717,7 +706,7 @@ mod tests {
 
         #[test]
         fn a_shell_word_is_never_empty(path in "\\PC{0,40}") {
-            prop_assert!(!shell_word(Path::new(&path)).is_empty());
+            prop_assert!(!crate::util::shell_word(Path::new(&path)).is_empty());
         }
 
         #[test]
