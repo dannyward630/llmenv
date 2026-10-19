@@ -289,7 +289,7 @@ fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 
 fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
-    let content = std::fs::read_to_string(session_path(state_dir, id))?;
+    let content = crate::paths::bounded::state_text_io(&session_path(state_dir, id))?;
     Ok(serde_json::from_str(&content)?)
 }
 
@@ -299,7 +299,7 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 pub(crate) fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
     let path = session_path(state_dir, id);
-    let content = match std::fs::read_to_string(&path) {
+    let content = match crate::paths::bounded::state_text_io(&path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             anyhow::bail!("no session '{id}' found");
@@ -340,7 +340,7 @@ pub(crate) fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Sessi
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let content = std::fs::read_to_string(&path)
+        let content = crate::paths::bounded::state_text_io(&path)
             .with_context(|| format!("reading session file {}", path.display()))?;
         let session: Session = serde_json::from_str(&content).with_context(|| {
             format!(

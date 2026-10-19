@@ -930,7 +930,7 @@ fn merge_mcp_into_claude_json(
 /// Returns an empty set when the file is absent or corrupt — a bad companion
 /// file must never prevent `.claude.json` from being written.
 fn read_owned_servers(path: &Path) -> std::collections::BTreeSet<String> {
-    let s = match std::fs::read_to_string(path) {
+    let s = match crate::paths::bounded::state_text_io(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return std::collections::BTreeSet::new();

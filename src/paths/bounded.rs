@@ -99,6 +99,26 @@ pub(crate) fn state_text(path: &Path) -> anyhow::Result<String> {
     read_text(path, MAX_STATE_BYTES)
 }
 
+/// A state file of llmenv, capped at [`MAX_STATE_BYTES`], with the I/O error kept: a drop-in
+/// for `std::fs::read` where the caller already handles `NotFound` and names the path.
+///
+/// # Errors
+/// The errors of [`llmenv_paths::read_file_bounded`], and a missing file.
+pub(crate) fn state_bytes_io(path: &Path) -> std::io::Result<Vec<u8>> {
+    llmenv_paths::read_file_bounded(path, MAX_STATE_BYTES)?
+        .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+}
+
+/// [`state_bytes_io`] capped at [`MAX_ASSET_BYTES`], for a file of the engine such as
+/// `.claude.json`, which Claude Code lets grow past the state cap.
+///
+/// # Errors
+/// The errors of [`llmenv_paths::read_file_bounded`], and a missing file.
+pub(crate) fn large_bytes_io(path: &Path) -> std::io::Result<Vec<u8>> {
+    llmenv_paths::read_file_bounded(path, MAX_ASSET_BYTES)?
+        .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+}
+
 /// [`state_text`] with the I/O error kept, for a caller that tells a read failure from bad
 /// content. A missing file is a `NotFound` error.
 ///

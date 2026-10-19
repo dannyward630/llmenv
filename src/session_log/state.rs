@@ -55,7 +55,7 @@ fn load_at(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
 
 /// Read the map text at `path`. `None` means the file is missing.
 fn read_map_text(path: &Path) -> anyhow::Result<Option<String>> {
-    match std::fs::read_to_string(path) {
+    match crate::paths::bounded::state_text_io(path) {
         Ok(s) => Ok(Some(s)),
         // A missing file is the normal first run, so it is not a warning.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

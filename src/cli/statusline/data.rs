@@ -94,7 +94,7 @@ impl StatusData {
     /// filter shows, so an unreadable status file does not pass as no data (#2712).
     #[must_use]
     pub fn load(path: &std::path::Path) -> Self {
-        match std::fs::read(path) {
+        match crate::paths::bounded::state_bytes_io(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 tracing::error!("status file {} is not valid JSON: {e}", path.display());
                 Self::unreadable()

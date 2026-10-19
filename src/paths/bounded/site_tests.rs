@@ -115,3 +115,19 @@ fn a_fifo_marketplace_manifest_is_refused_with_its_path() {
         "{err:#}"
     );
 }
+
+#[test]
+fn a_fifo_status_file_reads_as_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let status = fifo(&dir.path().join("status.json"));
+    let data = crate::cli::statusline::data::StatusData::load(&status);
+    assert!(data.unreadable);
+}
+
+#[test]
+fn a_fifo_claude_json_is_an_error_not_a_hang() {
+    let dir = tempfile::tempdir().unwrap();
+    fifo(&dir.path().join(".claude.json"));
+    let err = crate::auth::read_auth_from_dir(dir.path()).unwrap_err();
+    assert!(format!("{err:#}").contains(".claude.json"), "{err:#}");
+}

@@ -222,7 +222,7 @@ pub(crate) fn cache_path(adapter_root: &Path) -> PathBuf {
 /// Returns an error only when the file exists but cannot be read.
 pub(crate) fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credentials>> {
     let path = cache_path(adapter_root);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match crate::paths::bounded::state_bytes_io(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),

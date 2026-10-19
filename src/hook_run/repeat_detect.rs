@@ -87,7 +87,7 @@ impl SessionState {
 
     fn load(state_dir: &Path, session_id: &str) -> Self {
         let path = session_state_path(state_dir, session_id);
-        match std::fs::read_to_string(&path) {
+        match crate::paths::bounded::state_text_io(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
                 tracing::error!(
                     "failed to parse repeat-detect state {}, starting fresh: {e}",

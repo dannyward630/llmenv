@@ -683,7 +683,7 @@ struct PrCacheEntry {
 /// expired entry; each falls through to a fresh `gh` call in [`derive_pr`]. A read
 /// error other than a missing file is logged (#2821).
 fn read_pr_cache(path: &Path, now: i64) -> Option<PrLookup> {
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match crate::paths::bounded::state_text_io(path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {

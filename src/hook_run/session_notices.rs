@@ -58,7 +58,7 @@ pub(super) fn session_start_notices(
 fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<String> {
     let day = utc_day(now);
     let marker = state_dir.join(HINT_MARKER);
-    match std::fs::read_to_string(&marker) {
+    match crate::paths::bounded::state_text_io(&marker) {
         Ok(text) if text.trim() == day.to_string() => return None,
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
