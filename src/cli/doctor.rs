@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 mod autocompact;
 mod background;
-mod cache_gc;
+pub(super) mod cache_gc;
 mod cbm_index;
 mod cleartext;
 mod instruction_size;
@@ -1093,29 +1093,6 @@ fn legacy_tools_missing_replacement(capabilities: &Capabilities) -> Vec<LegacyTo
         .collect()
 }
 
-/// Drop the platform credential entry belonging to each cache folder GC just
-/// deleted, and report how many went (#1057).
-///
-/// Keyed by folder path, so this only ever touches entries llmenv's own folders
-/// owned — never the user's default `~/.claude` login. Deliberately confined to
-/// the explicit `doctor --gc` path: removing credential entries as a side effect
-/// of `export` would be the wrong default.
-pub(crate) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
-    removed
-        .iter()
-        .filter(|path| {
-            crate::auth::credentials::forget(path)
-                .inspect_err(|e| {
-                    tracing::debug!(
-                        "could not drop credential entry for {}: {e}",
-                        path.display()
-                    );
-                })
-                .unwrap_or(false)
-        })
-        .count()
-}
-
 /// Report the durable OAuth credential cache (#1057): present or not, and
 /// whether the cached token is still usable.
 fn report_credential_cache(cache_dir: &Path, pass: &str, info: &str, warn: &str) {
@@ -1916,7 +1893,13 @@ pub(super) fn run_doctor(
     eprintln!("{pass} Doctor check complete.");
 
     if gc {
-        cache_gc::run(&cache_dir, &config, &pass, &warn);
+        eprintln!("{}", super::clean::DOCTOR_GC_DEPRECATED);
+        let out = cache_gc::GcOutput {
+            pass: &pass,
+            warn: &warn,
+            dry_run: false,
+        };
+        cache_gc::run(&cache_dir, &config, out);
     }
 
     Ok(())

@@ -187,7 +187,7 @@ pub(crate) fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyho
 /// Handles both layouts: `<root>/<shape>/projects` (loose, strict) and
 /// `<root>/<version>/<shape>/projects` (normal) — the old code only ever scanned
 /// the flat one, which is why transcripts piled up unmigrated. The now-empty
-/// source directories are left for `llmenv prune` to reclaim.
+/// source directories are left for `llmenv clean` to reclaim.
 ///
 /// # Errors
 /// Returns an error when a tree cannot be folded into the durable store.

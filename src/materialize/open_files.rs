@@ -24,7 +24,8 @@ pub fn open_paths() -> anyhow::Result<Vec<PathBuf>> {
 
 /// The longest wait for `lsof`. A full list takes a few seconds on a busy host, and a hung
 /// network or SMB mount blocks lsof with no end (#2832). The value is fixed, because the sweep
-/// runs only from `llmenv doctor --gc`, and a minute is a clear sign of a hung mount.
+/// runs only from `llmenv clean` and `llmenv doctor --gc`. A minute is a clear sign of a hung
+/// mount.
 #[cfg(unix)]
 const DEFAULT_LSOF_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -51,14 +52,14 @@ fn lsof_paths(program: &str, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> 
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => anyhow::bail!(
             "`{program}` gave no answer within {} s, so it was stopped; the state/tmp sweep \
              stopped. A hung network or SMB mount can block lsof. Fix: run `mount` to find the \
-             hung network mount, unmount or reconnect it, then run `llmenv doctor --gc` again",
+             hung network mount, unmount or reconnect it, then run `llmenv clean` again",
             timeout.as_secs()
         ),
         Err(e) => {
             return Err(e).with_context(|| {
                 format!(
                     "running `{program}` to find entries in use; the state/tmp sweep stopped. \
-                     Fix: install lsof, then run `llmenv doctor --gc` again"
+                     Fix: install lsof, then run `llmenv clean` again"
                 )
             });
         }
@@ -69,7 +70,7 @@ fn lsof_paths(program: &str, timeout: Duration) -> anyhow::Result<Vec<PathBuf>> 
     if output.status.code() != Some(0) {
         anyhow::bail!(
             "`{program}` exited with {}: {stderr}; the state/tmp sweep stopped. \
-             Fix: resolve the lsof error above, then run `llmenv doctor --gc` again",
+             Fix: resolve the lsof error above, then run `llmenv clean` again",
             output.status
         );
     }

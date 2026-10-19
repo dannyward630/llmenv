@@ -31,14 +31,17 @@ fn database_of(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
 /// open. Other files, such as the index log and the index results, are kept. A file that cannot
 /// be judged or removed is recorded in the report, and the sweep goes on.
 ///
+/// With `dry_run`, the report lists the same files and nothing is removed (#2917).
+///
 /// # Errors
 /// `dir` exists but cannot be read.
 pub(crate) fn sweep_legacy_indexes(
     dir: &Path,
     older_than: Duration,
     in_use: &[PathBuf],
+    dry_run: bool,
 ) -> anyhow::Result<GcReport> {
-    let mut report = GcReport::default();
+    let mut report = GcReport::new(dry_run);
     let Some(entries) = crate::paths::read_dir_optional(dir)? else {
         return Ok(report);
     };
@@ -93,6 +96,25 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_lists_the_old_database_files_and_removes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_db = dir.path().join("Users-x-repo.db");
+        let old_wal = dir.path().join("Users-x-repo.db-wal");
+        for p in [&old_db, &old_wal] {
+            std::fs::write(p, "x").unwrap();
+            backdate(p);
+        }
+
+        let week = Duration::from_secs(7 * 86_400);
+        let report = sweep_legacy_indexes(dir.path(), week, &[], true).unwrap();
+
+        let mut listed = report.removed.clone();
+        listed.sort();
+        assert_eq!(listed, vec![old_db.clone(), old_wal.clone()]);
+        assert!(old_db.exists() && old_wal.exists());
+    }
+
+    #[test]
     fn only_old_database_files_go() {
         let dir = tempfile::tempdir().unwrap();
         let old_db = dir.path().join("Users-x-repo.db");
@@ -108,7 +130,7 @@ mod tests {
         }
 
         let week = Duration::from_secs(7 * 86_400);
-        let report = sweep_legacy_indexes(dir.path(), week, &[]).unwrap();
+        let report = sweep_legacy_indexes(dir.path(), week, &[], false).unwrap();
 
         assert_eq!(report.removed.len(), 2, "{report:?}");
         assert!(!old_db.exists() && !old_wal.exists());
@@ -132,7 +154,8 @@ mod tests {
         backdate(&open);
 
         let week = Duration::from_secs(7 * 86_400);
-        let report = sweep_legacy_indexes(dir.path(), week, std::slice::from_ref(&open)).unwrap();
+        let report =
+            sweep_legacy_indexes(dir.path(), week, std::slice::from_ref(&open), false).unwrap();
 
         assert!(report.removed.is_empty(), "{report:?}");
         assert!(db.exists() && wal.exists() && open.exists());
@@ -152,7 +175,8 @@ mod tests {
     #[test]
     fn a_missing_folder_is_an_empty_report() {
         let dir = tempfile::tempdir().unwrap();
-        let report = sweep_legacy_indexes(&dir.path().join("absent"), Duration::ZERO, &[]).unwrap();
+        let report =
+            sweep_legacy_indexes(&dir.path().join("absent"), Duration::ZERO, &[], false).unwrap();
         assert!(report.removed.is_empty() && report.failed.is_empty());
     }
 }

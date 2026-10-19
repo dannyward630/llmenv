@@ -113,22 +113,27 @@ fn ignore_missing(result: std::io::Result<()>) -> std::io::Result<()> {
 }
 
 /// Remove the rotated files of `path` that were last written more than `older_than` ago. The
-/// active file is never removed. Returns how many files were removed (#2816).
+/// active file is never removed. Returns the files that were removed (#2816). With `dry_run`, it
+/// returns the files that a real run removes, and removes none (#2917).
 ///
 /// A file that cannot be removed does not stop the pass. The error names every file that failed,
 /// with the count of files that were removed.
 ///
 /// # Errors
 /// Fails when the directory cannot be read, or when any rotated file could not be removed.
-pub(crate) fn prune_rotations(path: &Path, older_than: Duration) -> anyhow::Result<usize> {
+pub(crate) fn prune_rotations(
+    path: &Path,
+    older_than: Duration,
+    dry_run: bool,
+) -> anyhow::Result<Vec<PathBuf>> {
     let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
-        return Ok(0);
+        return Ok(Vec::new());
     };
     let Some(entries) = crate::paths::read_dir_optional(dir)? else {
-        return Ok(0);
+        return Ok(Vec::new());
     };
     let now = SystemTime::now();
-    let mut removed = 0;
+    let mut removed = Vec::new();
     let mut failures = Vec::new();
     for entry in entries {
         let entry = match entry {
@@ -152,16 +157,21 @@ pub(crate) fn prune_rotations(path: &Path, older_than: Duration) -> anyhow::Resu
         if !is_expired(now, modified, older_than) {
             continue;
         }
+        if dry_run {
+            removed.push(entry_path);
+            continue;
+        }
         match std::fs::remove_file(&entry_path) {
-            Ok(()) => removed += 1,
+            Ok(()) => removed.push(entry_path),
             Err(e) => failures.push(format!("{}: {e}", entry_path.display())),
         }
     }
     if !failures.is_empty() {
         anyhow::bail!(
-            "{} rotated session-log file(s) could not be checked or removed, {removed} removed: {}. \
+            "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
              Fix: check the permissions of the state directory",
             failures.len(),
+            removed.len(),
             failures.join("; ")
         );
     }
@@ -298,9 +308,9 @@ mod tests {
             .set_modified(old_time)
             .unwrap();
 
-        let removed = prune_rotations(&path, Duration::from_secs(7 * 86_400)).unwrap();
+        let removed = prune_rotations(&path, Duration::from_secs(7 * 86_400), false).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(removed, vec![old_rotation.clone()]);
         assert!(!old_rotation.exists());
         assert!(path.exists());
         assert!(
@@ -310,13 +320,33 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_lists_an_old_rotation_and_removes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        let old_rotation = rotation_path(&path, 1);
+        write_bytes(&old_rotation, 3);
+        File::options()
+            .write(true)
+            .open(&old_rotation)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
+            .unwrap();
+
+        let listed = prune_rotations(&path, Duration::from_secs(7 * 86_400), true).unwrap();
+
+        assert_eq!(listed, vec![old_rotation.clone()]);
+        assert!(old_rotation.exists());
+    }
+
+    #[test]
     fn prune_keeps_a_recent_rotation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-log.jsonl");
         write_bytes(&rotation_path(&path, 1), 3);
-        assert_eq!(
-            prune_rotations(&path, Duration::from_secs(7 * 86_400)).unwrap(),
-            0
+        assert!(
+            prune_rotations(&path, Duration::from_secs(7 * 86_400), false)
+                .unwrap()
+                .is_empty()
         );
         assert!(rotation_path(&path, 1).exists());
     }
@@ -325,7 +355,11 @@ mod tests {
     fn prune_in_a_missing_directory_removes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("absent").join("session-log.jsonl");
-        assert_eq!(prune_rotations(&path, Duration::ZERO).unwrap(), 0);
+        assert!(
+            prune_rotations(&path, Duration::ZERO, false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

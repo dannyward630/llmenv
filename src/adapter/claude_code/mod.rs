@@ -429,7 +429,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         //
         // Lives in the durable state dir, not the per-hash cache folder (#1379).
         // It used to be `cache_dir.join("tmp")`, which put it inside a directory
-        // that both `llmenv prune` and an ordinary config edit are allowed to
+        // that both `llmenv clean` and an ordinary config edit are allowed to
         // delete — pruning a stale generation, or minting a new shape hash by
         // editing config.yaml, left every already-running shell with TMPDIR
         // pointing at nothing. The breakage was silent until something needed a

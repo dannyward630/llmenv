@@ -66,17 +66,17 @@ cache:
 Defaults: `cache_dir` = `~/.cache/llmenv`, `sync_interval_minutes` = `15`,
 `cache_retention_hours` = `168`, `remote_sync` = `true`. Set
 `cache_retention_hours` to `null` to disable age-based GC.
-With `null`, `llmenv doctor --gc` skips the cache, `state/tmp`, and session-log sweeps, and SessionStart shows no stale `state/tmp` hint (fixed in v3.13.0: before, `null` used the 168-hour default).
+With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the cache, `state/tmp`, and session-log sweeps, and SessionStart shows no stale `state/tmp` hint (fixed in v3.13.0: before, `null` used the 168-hour default).
 
 (added in v3.13.0)
 
-`llmenv doctor --gc` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
+`llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
 That check uses `lsof`.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
 (added in v3.13.0) At session start, llmenv adds a one-line hint when `state/tmp` holds entries older than the retention.
-The hint gives the count, the size, and the command `llmenv doctor --gc`.
+The hint gives the count, the size, and the command `llmenv clean` (before v3.13.0's `clean` command, `llmenv doctor --gc`).
 It is shown at most once per UTC day, and not at all when no entry is stale.
 
 (added in v3.13.0) When a session resumes after its prompt cache expired, llmenv shows you a one-line notice if the rewrite is estimated at 0.50 USD or more.
@@ -1258,7 +1258,7 @@ session_log:
 The file sink rotates `session-log.jsonl` when it reaches 64 MiB.
 It keeps three rotated files, `session-log.jsonl.1` to `session-log.jsonl.3`, and drops the oldest at each rotation.
 The first line of the new file names the rotated file that holds the older lines.
-`llmenv doctor --gc` removes rotated files older than `cache_retention_hours`.
+`llmenv clean` removes rotated files older than `cache_retention_hours`.
 
 For finer control, `transcript` can be a mapping instead of a boolean:
 
@@ -1678,10 +1678,10 @@ Two consequences worth knowing:
 
 The `claude.ai` connectors are managed by the Claude desktop app rather than
 Claude Code, so they're outside llmenv's scope.
-`llmenv doctor --gc` additionally drops the macOS keychain item belonging to each
+`llmenv clean` additionally drops the macOS keychain item belonging to each
 cache folder it deletes, since that item would otherwise outlive the folder it
 was keyed to. Entries are matched by folder path, so your default `~/.claude`
-login is never touched. This runs only under `--gc`, never on `export`.
+login is never touched. This runs only under `clean` (and the deprecated `doctor --gc`), never on `export`.
 
 ## `marketplace:` and `plugin-collection:`
 

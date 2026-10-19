@@ -1,19 +1,64 @@
-//! The sweeps behind `llmenv doctor --gc`: the hashed cache, then `state/tmp`, then session-log
-//! rotations (#2814, #2816).
+//! The sweeps behind `llmenv clean` and the deprecated `llmenv doctor --gc`: the hashed cache,
+//! then `state/tmp`, then session-log rotations, then old codebase-memory indexes (#2814, #2816,
+//! #2917).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::materialize::cache::GcReport;
 use crate::materialize::{cache, tmp_sweep};
 use crate::paths;
 use crate::session_log;
 
-use super::forget_credentials_for;
+/// How the sweeps print their result, and whether they remove anything.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::cli) struct GcOutput<'a> {
+    pub(in crate::cli) pass: &'a str,
+    pub(in crate::cli) warn: &'a str,
+    /// List what a real run removes, and remove nothing (#2917).
+    pub(in crate::cli) dry_run: bool,
+}
 
-/// Run the sweeps for `doctor --gc`. All three use `cache.cache_retention_hours` (default 168).
-/// A `null` value turns all three off (#2829).
-pub(super) fn run(cache_dir: &Path, config: &Config, pass: &str, warn: &str) {
+impl GcOutput<'_> {
+    fn verb(&self) -> &'static str {
+        if self.dry_run {
+            "would remove"
+        } else {
+            "removed"
+        }
+    }
+
+    /// Print each entry of a dry run, so the preview names every item (#2917).
+    fn list(&self, removed: &[PathBuf]) {
+        if self.dry_run {
+            for p in removed {
+                eprintln!("  would remove: {}", p.display());
+            }
+        }
+    }
+
+    /// Print the summary line, the dry-run list, and each failure of one sweep.
+    fn report(&self, what: &str, report: &GcReport) {
+        let (pass, warn) = (self.pass, self.warn);
+        eprintln!(
+            "{pass} GC complete{what}: {} {} entries, kept {}",
+            self.verb(),
+            report.removed.len(),
+            report.kept
+        );
+        self.list(&report.removed);
+        // #1372: a removal failure does not abort the walk, so the skipped entries are named here.
+        for p in &report.failed {
+            eprintln!("{warn} GC: could not process {}", p.display());
+        }
+    }
+}
+
+/// Run every sweep. All of them use `cache.cache_retention_hours` (default 168). A `null` value
+/// turns all of them off (#2829).
+pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) {
+    let (pass, warn) = (out.pass, out.warn);
     eprintln!("Running garbage collection...");
     let Some(retention) = config.cache.gc_retention() else {
         eprintln!(
@@ -26,13 +71,13 @@ pub(super) fn run(cache_dir: &Path, config: &Config, pass: &str, warn: &str) {
         Ok(meta) if meta.permissions().readonly() => {
             eprintln!("{warn} GC of the cache skipped: cache directory is read-only");
         }
-        Ok(_) => sweep_cache(cache_dir, config, retention, pass, warn),
+        Ok(_) => sweep_cache(cache_dir, config, retention, out),
         Err(e) => eprintln!("{warn} GC of the cache skipped: cannot stat cache directory: {e:#}"),
     }
     match paths::state_dir() {
         Ok(state_dir) => {
-            sweep_state(&state_dir, retention, pass, warn);
-            sweep_cbm_indexes(&state_dir, config, retention, pass, warn);
+            sweep_state(&state_dir, retention, out);
+            sweep_cbm_indexes(&state_dir, config, retention, out);
         }
         Err(e) => eprintln!(
             "{warn} GC of state/tmp and session-log rotations skipped: cannot resolve the state \
@@ -42,64 +87,43 @@ pub(super) fn run(cache_dir: &Path, config: &Config, pass: &str, warn: &str) {
 }
 
 /// Sweep the hashed cache under `cache_dir`.
-fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, pass: &str, warn: &str) {
-    match cache::gc(cache_dir, retention, config.cache.hashing) {
+fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) {
+    match cache::gc(cache_dir, retention, config.cache.hashing, out.dry_run) {
         Ok(report) => {
-            eprintln!(
-                "{pass} GC complete: removed {} entries, kept {}",
-                report.removed.len(),
-                report.kept
-            );
-            // #1372: a removal failure no longer aborts the walk,
-            // so the entries it skipped have to be reported here
-            // or they'd vanish from the summary entirely.
-            for p in &report.failed {
-                eprintln!("{warn} GC: could not process {}", p.display());
+            out.report("", &report);
+            if out.dry_run {
+                return;
             }
             let forgotten = forget_credentials_for(&report.removed);
             if forgotten > 0 {
                 eprintln!(
-                    "{pass} GC: dropped {forgotten} orphaned OAuth credential \
-                     entries"
+                    "{} GC: dropped {forgotten} orphaned OAuth credential entries",
+                    out.pass
                 );
             }
         }
-        Err(e) => eprintln!("{warn} GC failed: {e:#}"),
+        Err(e) => eprintln!("{} GC failed: {e:#}", out.warn),
     }
 }
 
 /// Sweep the folders under `state_dir`: `state/tmp`, then the session-log rotations.
-fn sweep_state(state_dir: &Path, retention: Duration, pass: &str, warn: &str) {
-    sweep_state_tmp(state_dir, retention, pass, warn);
-    prune_session_log(state_dir, retention, pass, warn);
+fn sweep_state(state_dir: &Path, retention: Duration, out: GcOutput<'_>) {
+    sweep_state_tmp(state_dir, retention, out);
+    prune_session_log(state_dir, retention, out);
 }
 
 /// Sweep `state/tmp`, which `TMPDIR` points at, with the same retention as the cache (#2814).
-fn sweep_state_tmp(state_dir: &Path, retention: Duration, pass: &str, warn: &str) {
-    match tmp_sweep::sweep_state_tmp(state_dir, retention) {
-        Ok(report) => {
-            eprintln!(
-                "{pass} GC complete for state/tmp: removed {} entries, kept {}",
-                report.removed.len(),
-                report.kept
-            );
-            for p in &report.failed {
-                eprintln!("{warn} GC: could not process {}", p.display());
-            }
-        }
-        Err(e) => eprintln!("{warn} GC of state/tmp skipped: {e:#}"),
+fn sweep_state_tmp(state_dir: &Path, retention: Duration, out: GcOutput<'_>) {
+    match tmp_sweep::sweep_state_tmp(state_dir, retention, out.dry_run) {
+        Ok(report) => out.report(" for state/tmp", &report),
+        Err(e) => eprintln!("{} GC of state/tmp skipped: {e:#}", out.warn),
     }
 }
 
 /// Remove old index databases from `state/codebase-memory`, unless a configured `index_path`
 /// names that folder as the live cache (#2817). A database that a process holds open is kept.
-fn sweep_cbm_indexes(
-    state_dir: &Path,
-    config: &Config,
-    retention: Duration,
-    pass: &str,
-    warn: &str,
-) {
+fn sweep_cbm_indexes(state_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) {
+    let (pass, warn) = (out.pass, out.warn);
     let dir = state_dir.join("codebase-memory");
     match cache_use(config, &dir) {
         CacheUse::Unused => {}
@@ -124,19 +148,39 @@ fn sweep_cbm_indexes(
     };
     // lsof reports resolved paths, so the folder is resolved too before the paths are compared.
     let resolved = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-    match crate::materialize::cbm_sweep::sweep_legacy_indexes(&resolved, retention, &in_use) {
-        Ok(report) => {
-            eprintln!(
-                "{pass} GC complete for old codebase-memory indexes: removed {} files, kept {}",
-                report.removed.len(),
-                report.kept
-            );
-            for p in &report.failed {
-                eprintln!("{warn} GC: could not process {}", p.display());
-            }
-        }
+    let swept = crate::materialize::cbm_sweep::sweep_legacy_indexes(
+        &resolved,
+        retention,
+        &in_use,
+        out.dry_run,
+    );
+    match swept {
+        Ok(report) => out.report(" for old codebase-memory indexes", &report),
         Err(e) => eprintln!("{warn} GC of old codebase-memory indexes skipped: {e:#}"),
     }
+}
+
+/// Drop the platform credential entry belonging to each cache folder GC just
+/// deleted, and report how many went (#1057).
+///
+/// Keyed by folder path, so this only ever touches entries llmenv's own folders
+/// owned — never the user's default `~/.claude` login. Deliberately confined to
+/// the explicit `llmenv clean` path: removing credential entries as a side effect
+/// of `export` would be the wrong default.
+pub(in crate::cli) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
+    removed
+        .iter()
+        .filter(|path| {
+            crate::auth::credentials::forget(path)
+                .inspect_err(|e| {
+                    tracing::debug!(
+                        "could not drop credential entry for {}: {e}",
+                        path.display()
+                    );
+                })
+                .unwrap_or(false)
+        })
+        .count()
 }
 
 /// Whether a configured `index_path` names the codebase-memory folder.
@@ -170,11 +214,19 @@ fn cache_use(config: &Config, dir: &Path) -> CacheUse {
 }
 
 /// Remove session-log rotations older than the retention (#2816). The active file is kept.
-fn prune_session_log(state_dir: &Path, retention: Duration, pass: &str, warn: &str) {
+fn prune_session_log(state_dir: &Path, retention: Duration, out: GcOutput<'_>) {
     let path = session_log::file_sink::file_path_in(state_dir);
-    match session_log::rotation::prune_rotations(&path, retention) {
-        Ok(count) => eprintln!("{pass} GC: removed {count} rotated session-log file(s)"),
-        Err(e) => eprintln!("{warn} GC of session-log rotations failed: {e:#}"),
+    match session_log::rotation::prune_rotations(&path, retention, out.dry_run) {
+        Ok(removed) => {
+            eprintln!(
+                "{} GC: {} {} rotated session-log file(s)",
+                out.pass,
+                out.verb(),
+                removed.len()
+            );
+            out.list(&removed);
+        }
+        Err(e) => eprintln!("{} GC of session-log rotations failed: {e:#}", out.warn),
     }
 }
 
@@ -184,10 +236,15 @@ mod tests {
     use std::fs::File;
     use std::time::{Duration, SystemTime};
 
-    use super::{sweep_cache, sweep_state};
+    use super::{GcOutput, sweep_cache, sweep_state};
     use crate::config::Config;
 
     const DAY: Duration = Duration::from_secs(86_400);
+    const OUT: GcOutput<'static> = GcOutput {
+        pass: "ok",
+        warn: "warn",
+        dry_run: false,
+    };
 
     #[test]
     fn a_configured_index_path_marks_the_folder_live() {
@@ -223,16 +280,37 @@ mod tests {
             .set_modified(SystemTime::now() - 30 * DAY)
             .unwrap();
 
-        sweep_state(state.path(), DAY * 7, "ok", "warn");
+        sweep_state(state.path(), DAY * 7, OUT);
 
         assert!(!rotated.exists(), "the old rotation was kept");
         assert!(active.exists(), "the active log was removed");
     }
 
     #[test]
+    fn a_dry_run_of_the_state_sweep_keeps_an_old_rotation() {
+        let state = tempfile::tempdir().unwrap();
+        let rotated = state.path().join("session-log.jsonl.1");
+        std::fs::write(&rotated, b"{}").unwrap();
+        File::options()
+            .write(true)
+            .open(&rotated)
+            .unwrap()
+            .set_modified(SystemTime::now() - 30 * DAY)
+            .unwrap();
+
+        let preview = GcOutput {
+            dry_run: true,
+            ..OUT
+        };
+        sweep_state(state.path(), DAY * 7, preview);
+
+        assert!(rotated.exists(), "a dry run removed an old rotation");
+    }
+
+    #[test]
     fn the_state_sweep_with_no_tmp_folder_and_no_log_changes_nothing() {
         let state = tempfile::tempdir().unwrap();
-        sweep_state(state.path(), DAY * 7, "ok", "warn");
+        sweep_state(state.path(), DAY * 7, OUT);
         assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
     }
 
@@ -241,7 +319,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let entry = cache.path().join("fresh");
         std::fs::create_dir(&entry).unwrap();
-        sweep_cache(cache.path(), &Config::default(), DAY * 7, "ok", "warn");
+        sweep_cache(cache.path(), &Config::default(), DAY * 7, OUT);
         assert!(entry.exists(), "a fresh cache entry was removed");
     }
 
@@ -250,7 +328,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let not_a_dir = dir.path().join("file");
         std::fs::write(&not_a_dir, b"x").unwrap();
-        sweep_cache(&not_a_dir, &Config::default(), DAY * 7, "ok", "warn");
+        sweep_cache(&not_a_dir, &Config::default(), DAY * 7, OUT);
         assert!(not_a_dir.exists());
     }
 }

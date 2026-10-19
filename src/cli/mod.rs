@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod clean;
 mod plugin_payloads;
 use plugin_payloads::sync_plugin_payloads;
 
@@ -127,7 +128,7 @@ impl ColorChoice {
 enum Command {
     /// Validate adapter wiring and configuration
     Doctor {
-        /// Run cache garbage collection after diagnostics
+        /// Deprecated: use `llmenv clean`. Runs the age-based sweeps after diagnostics
         #[arg(long)]
         gc: bool,
         /// Check all scopes and bundles for orphans, not just the active context
@@ -362,21 +363,11 @@ enum Command {
         #[arg(long)]
         global: bool,
     },
-    /// Clean stale cache folders
-    Prune {
-        /// Remove ALL cache folders unconditionally (next export re-materializes all environments)
-        #[arg(long)]
-        all: bool,
-        /// Remove ONLY current-version cache folders older than this duration (e.g., "14d", "1w")
-        #[arg(long)]
-        older_than: Option<String>,
-        /// Preview deletions without removing (applies to --all, --older-than, and --plugin-cache)
-        #[arg(long)]
-        dry_run: bool,
-        /// Remove the shared plugin cache directory for all adapters (state/<adapter>/state/plugins/)
-        #[arg(long)]
-        plugin_cache: bool,
-    },
+    /// Remove stale cache folders, old state/tmp entries, old session-log rotations, and old
+    /// codebase-memory indexes
+    Clean(clean::CleanArgs),
+    /// Deprecated: use `llmenv clean`
+    Prune(clean::CleanArgs),
     /// Manage the read-once file dedup cache (#318).
     ReadOnce {
         #[command(subcommand)]
@@ -992,14 +983,8 @@ pub fn run() -> anyhow::Result<()> {
             upgrade::run_upgrade(track, check)?;
         }
         Some(Command::Task { command }) => run_task_command(*command, cli.color.to_mode())?,
-        Some(Command::Prune {
-            all,
-            older_than,
-            dry_run,
-            plugin_cache,
-        }) => {
-            run_prune(all, older_than, dry_run, plugin_cache)?;
-        }
+        Some(Command::Clean(args)) => clean::run_clean(&args, use_color)?,
+        Some(Command::Prune(args)) => clean::run_prune_alias(&args, use_color)?,
         Some(Command::Validate) => {
             run_validate(use_color)?;
         }
@@ -5242,164 +5227,6 @@ fn run_completions_install(
 
     eprintln!("Installed {shell} completions to {}", path.display());
     print_activation_instructions(shell, &target_dir);
-    Ok(())
-}
-
-fn run_prune(
-    all: bool,
-    older_than: Option<String>,
-    dry_run: bool,
-    plugin_cache: bool,
-) -> anyhow::Result<()> {
-    use crate::materialize::cache::PruneMode;
-
-    // Validate flag combinations
-    if all && older_than.is_some() {
-        anyhow::bail!("--all and --older-than are mutually exclusive");
-    }
-
-    let mode = if all {
-        PruneMode::All
-    } else if let Some(duration_str) = &older_than {
-        let dur = humantime::parse_duration(duration_str)
-            .with_context(|| format!("failed to parse --older-than duration: {}", duration_str))?;
-        PruneMode::OlderThan(dur)
-    } else {
-        // Default: clean stale (version-mismatched) folders + orphaned *.tmp.
-        PruneMode::StaleOnly
-    };
-
-    let config_path = paths::config_path()?;
-    let config = Config::load(&config_path)?;
-    let cache_dir = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?);
-
-    // --plugin-cache: remove shared plugin cache dirs. Independent of other flags.
-    let mut plugin_removed: Vec<std::path::PathBuf> = Vec::new();
-    let mut plugin_failed: Vec<std::path::PathBuf> = Vec::new();
-    if plugin_cache {
-        for adapter in crate::adapter::registered_adapters() {
-            let plugins_dir = cache_dir
-                .join(adapter.name())
-                .join(crate::materialize::state::STATE_DIR_NAME)
-                .join("plugins");
-            if dry_run {
-                // Report as removed but don't actually delete.
-                plugin_removed.push(plugins_dir);
-            } else {
-                match std::fs::remove_dir_all(&plugins_dir) {
-                    Ok(()) => plugin_removed.push(plugins_dir),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // Already gone — not a failure.
-                        plugin_removed.push(plugins_dir);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %plugins_dir.display(),
-                            error = %e,
-                            "failed to remove plugin cache"
-                        );
-                        plugin_failed.push(plugins_dir);
-                    }
-                }
-            }
-        }
-    }
-
-    // In normal mode the current generation dir (e.g. "1.2") has no
-    // `{VERSION_TAG}-` prefix, so StaleOnly must be told its name or it would
-    // sweep the live config dir. Loose mode has no version axis (every shape is
-    // current) and strict mode is identified by the prefix test — both pass None.
-    let current_version = match config.cache.hashing {
-        crate::config::HashingMode::Normal => Some(crate::materialize::cache::version_major()),
-        crate::config::HashingMode::Loose | crate::config::HashingMode::Strict => None,
-    };
-
-    // prune runs per adapter subdirectory: the generation/VERSION_TAG folders
-    // live under `<cache_dir>/<adapter>/`, not directly under `cache_dir`.
-    let mut removed: Vec<std::path::PathBuf> = Vec::new();
-    let mut failed: Vec<std::path::PathBuf> = Vec::new();
-    let mut kept: usize = 0;
-    for adapter in crate::adapter::registered_adapters() {
-        let report = crate::materialize::cache::prune(
-            &cache_dir.join(adapter.name()),
-            mode,
-            config.cache.hashing,
-            current_version.as_deref(),
-            dry_run,
-        )?;
-        removed.extend(report.removed);
-        failed.extend(report.failed);
-        kept += report.kept;
-    }
-
-    let verb = if dry_run { "would remove" } else { "removed" };
-    for p in &removed {
-        eprintln!("  {verb}: {}", p.display());
-    }
-    for p in &failed {
-        eprintln!(
-            "  could not check or remove (cause logged above): {}",
-            p.display()
-        );
-    }
-    eprintln!(
-        "prune complete: {} {} entry(ies), kept {}",
-        verb,
-        removed.len(),
-        kept
-    );
-    if !failed.is_empty() {
-        eprintln!(
-            "  {} entry(ies) could not be checked or removed",
-            failed.len()
-        );
-    }
-    // Drop each removed folder's platform credential entry. `doctor --gc` already
-    // does this; prune deleting folders without it is how orphaned keychain items
-    // accumulate in the first place (#1057).
-    if !dry_run && !removed.is_empty() {
-        let forgotten = doctor::forget_credentials_for(&removed);
-        if forgotten > 0 {
-            eprintln!("  dropped {forgotten} orphaned OAuth credential entry(ies)");
-        }
-    }
-
-    // Report plugin cache results separately (verb is set above).
-    if plugin_cache {
-        for p in &plugin_removed {
-            eprintln!("  {verb} plugin cache: {}", p.display());
-        }
-        for p in &plugin_failed {
-            eprintln!("  failed to remove plugin cache: {}", p.display());
-        }
-        eprintln!(
-            "plugin cache prune: {} {} entry(ies)",
-            verb,
-            plugin_removed.len(),
-        );
-    }
-
-    // #1346: same contract as `regenerate` — a prune that could not remove
-    // everything it was asked to is not a success, even though the per-entry
-    // failures were printed above. Returning `Ok(())` here meant a scripted
-    // `llmenv prune` saw exit 0 and moved on with the cache still occupied.
-    //
-    // #1372: this originally covered only `plugin_failed`, so a cache entry that
-    // couldn't be removed printed "could not be removed" and still exited 0.
-    // Both lists gate the exit status now.
-    if !failed.is_empty() {
-        anyhow::bail!(
-            "{} cache entry(ies) could not be removed — see the failures above",
-            failed.len()
-        );
-    }
-    if plugin_cache && !plugin_failed.is_empty() {
-        anyhow::bail!(
-            "{} plugin cache entry(ies) could not be removed — see the failures above",
-            plugin_failed.len()
-        );
-    }
-
     Ok(())
 }
 
