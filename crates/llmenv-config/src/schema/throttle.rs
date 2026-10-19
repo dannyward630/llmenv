@@ -33,3 +33,18 @@ pub struct Throttle {
     #[serde(default = "default_throttle_soft_threshold")]
     pub soft_threshold: u64,
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_with_only_a_backend_gets_the_default_limits() {
+        let throttle: Throttle = serde_yaml::from_str("backend: umans\n").unwrap();
+        assert_eq!(throttle.cache_ttl, 30);
+        assert_eq!(throttle.max_wait, 300);
+        assert_eq!(throttle.soft_threshold, 20);
+        assert!(throttle.when.is_empty());
+    }
+}

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+mod memory_defaults;
 mod throttle;
 
+use memory_defaults::{default_adaptive_recall, default_global_topics};
 pub use throttle::Throttle;
 
 /// Settings pre-seeded during `llmenv init` for newly-materialized folders.
@@ -1446,43 +1448,6 @@ pub struct Memory {
     /// to restore deferral.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_load: Option<bool>,
-}
-
-/// The topics that hold facts for every project, as the ICM memory conventions name them.
-fn default_global_topics() -> Vec<String> {
-    vec!["preferences".to_string(), "errors-resolved".to_string()]
-}
-
-fn default_adaptive_recall() -> bool {
-    true
-}
-
-/// Manual, not derived (#1044): `listen_host`'s real default is
-/// `default_listen_host()` (`"127.0.0.1"`), not `String::default()`
-/// (`""`) — a bare `#[derive(Default)]` would silently diverge from the
-/// `#[serde(default = "default_listen_host")]` value every other
-/// construction path (deserialization) actually uses.
-impl Default for Memory {
-    fn default() -> Self {
-        Self {
-            server_host: String::new(),
-            port: 0,
-            listen_host: default_listen_host(),
-            when: Vec::new(),
-            default_topics: Vec::new(),
-            global_topics: default_global_topics(),
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            consolidation: None,
-            retention: None,
-            auto_prune: false,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: default_adaptive_recall(),
-            always_load: None,
-        }
-    }
 }
 
 /// Valid range for [`Memory::wakeup_max_tokens`] — the range icm's own MCP
