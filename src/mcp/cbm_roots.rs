@@ -64,7 +64,7 @@ fn cache_dir(cm: &CodebaseMemory, home: Option<&Path>) -> anyhow::Result<PathBuf
 /// # Errors
 /// `index_path` cannot be expanded, for example a leading `~` with `HOME` unset.
 fn cbm_command(cm: &CodebaseMemory, args: &[&str]) -> anyhow::Result<Command> {
-    let mut cmd = Command::new("codebase-memory-mcp");
+    let mut cmd = Command::new(crate::path_lookup::resolve_program("codebase-memory-mcp")?);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

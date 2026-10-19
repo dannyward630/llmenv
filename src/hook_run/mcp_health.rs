@@ -27,27 +27,10 @@ use crate::mcp::resolve::{
 /// Probes run in parallel, so this is also the worst-case delay a session start pays.
 pub(crate) const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The most characters of a failure reason that the notice carries. A server controls part of
-/// the text, such as an HTTP error body, and the notice goes into the agent's context.
-const MAX_REASON_CHARS: usize = 300;
-
-/// Make `text` safe to put in the notice: one line, no control, bidirectional, or zero-width
-/// characters, and at most [`MAX_REASON_CHARS`] characters.
-pub(crate) fn tidy_reason(text: &str) -> String {
-    let spaced: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let one_line = crate::util::strip_unsafe_chars(&spaced)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if one_line.chars().count() <= MAX_REASON_CHARS {
-        return one_line;
-    }
-    let kept: String = one_line.chars().take(MAX_REASON_CHARS - 1).collect();
-    format!("{kept}…")
-}
+mod tidy;
+#[cfg(test)]
+use tidy::MAX_REASON_CHARS;
+pub(crate) use tidy::tidy_reason;
 
 /// A managed server that failed its probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +55,9 @@ async fn probe_stdio(
     env: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let mut child = Command::new(command)
+    let program = crate::path_lookup::resolve_program(command)
+        .with_context(|| format!("cannot start `{command}`"))?;
+    let mut child = Command::new(program)
         .args(args)
         .envs(env)
         .stdin(Stdio::piped())

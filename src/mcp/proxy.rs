@@ -1002,33 +1002,10 @@ fn sanitize_log_line(line: &str) -> String {
         .collect()
 }
 
-/// Builds the `mcp-proxy` invocation, preferring a `mcp-proxy` already on
-/// `PATH` and falling back to `uvx mcp-proxy` when it isn't installed. Returns
-/// the program plus its leading args; the caller appends `--port`/target.
-///
-/// # Errors
-/// Returns an error when neither `mcp-proxy` nor `uvx` is on `PATH` — the
-/// memory backend can't be exposed on the network without one of them.
-fn mcp_proxy_command() -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
-    mcp_proxy_command_in(std::env::var_os("PATH").as_deref())
-}
-
-/// [`mcp_proxy_command`] with `PATH` passed in. The program is the absolute path that the lookup
-/// found, so the spawn cannot pick another file of that name from a relative `PATH` folder (#2932).
-fn mcp_proxy_command_in(
-    path_var: Option<&std::ffi::OsStr>,
-) -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
-    if let Some(program) = crate::path_lookup::find_on_path("mcp-proxy", path_var) {
-        Ok((program, vec![]))
-    } else if let Some(program) = crate::path_lookup::find_on_path("uvx", path_var) {
-        Ok((program, vec!["mcp-proxy"]))
-    } else {
-        Err(anyhow::anyhow!(
-            "neither `mcp-proxy` nor `uvx` found on PATH; install one to run the \
-             memory server, or disable the `memory` config block"
-        ))
-    }
-}
+mod launcher;
+use launcher::mcp_proxy_command;
+#[cfg(test)]
+use launcher::mcp_proxy_command_in;
 
 /// Parses a `host:port` bind string into a socket address.
 ///
