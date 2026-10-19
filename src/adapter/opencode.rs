@@ -420,7 +420,10 @@ impl AgentAdapter for OpencodeAdapter {
             owned.push(PathBuf::from("AGENTS.md"));
         }
 
-        // 2. rules/*.md — written verbatim; paths collected for instructions[]
+        // 2. rules/*.md — written verbatim; paths collected for instructions[].
+        // opencode 2.x looks for a relative entry upward from the session folder, not in the
+        // config folder, so each entry is an absolute path (#2842).
+        let out_abs = std::path::absolute(out)?;
         let mut instructions: Vec<String> = Vec::new();
         for r in &manifest.rules {
             if crate::paths::is_unsafe_join_target(r.rel.to_string_lossy().as_ref()) {
@@ -432,7 +435,7 @@ impl AgentAdapter for OpencodeAdapter {
                 std::fs::create_dir_all(parent)?;
             }
             crate::paths::write_owner_only(&dest, r.raw.as_bytes())?;
-            instructions.push(r.rel.to_string_lossy().into_owned());
+            instructions.push(out_abs.join(&r.rel).to_string_lossy().into_owned());
             owned.push(r.rel.clone());
         }
 
@@ -1715,14 +1718,20 @@ mod tests {
         );
         let json_raw = std::fs::read_to_string(tmp.path().join(OPENCODE_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&json_raw).unwrap();
-        let instr = doc["instructions"].as_array().unwrap();
+        let instr: Vec<&str> = doc["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let root = std::path::absolute(tmp.path()).unwrap();
+        for rel in ["rules/security.md", "rules/style.md"] {
+            let want = root.join(rel).to_string_lossy().into_owned();
+            assert!(instr.contains(&want.as_str()), "{want} missing: {instr:?}");
+        }
         assert!(
-            instr.contains(&serde_json::json!("rules/security.md")),
-            "instructions must include rules/security.md"
-        );
-        assert!(
-            instr.contains(&serde_json::json!("rules/style.md")),
-            "instructions must include rules/style.md"
+            instr.iter().all(|i| std::path::Path::new(i).is_absolute()),
+            "opencode finds a relative entry from the session folder: {instr:?}"
         );
     }
 
