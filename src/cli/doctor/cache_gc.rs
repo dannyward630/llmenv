@@ -55,6 +55,9 @@ impl GcOutput<'_> {
     }
 }
 
+mod index_use;
+use index_use::{CacheUse, bundles_dir, cache_use};
+
 /// Run every sweep, and return how many entries or sweeps failed. All of them use
 /// `cache.cache_retention_hours` (default 168). A `null` value turns all of them off (#2829).
 ///
@@ -184,7 +187,14 @@ fn sweep_cbm_indexes(
             return 1;
         }
     };
-    match cache_use(config, &bundles_dir(), &dir) {
+    let used = match bundles_dir() {
+        Ok(bundles) => cache_use(config, &bundles, &dir),
+        Err(e) if !config.bundle.is_empty() => CacheUse::Unknown(format!(
+            "cannot resolve the config folder, so the index_path of each bundle is unknown: {e:#}"
+        )),
+        Err(_) => cache_use(config, Path::new(""), &dir),
+    };
+    match used {
         CacheUse::Unused => {}
         CacheUse::Live => {
             eprintln!(
@@ -219,12 +229,6 @@ fn sweep_cbm_indexes(
     }
 }
 
-/// The folder of the bundles. An unresolved config folder gives a path with no bundles in it, and
-/// [`cache_use`] then reads only the top-level entries.
-fn bundles_dir() -> PathBuf {
-    paths::config_dir().map_or_else(|_| PathBuf::new(), |dir| dir.join("bundles"))
-}
-
 /// Drop the platform credential entry belonging to each cache folder GC just
 /// deleted, and report how many went (#1057).
 ///
@@ -238,7 +242,7 @@ pub(in crate::cli) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
         .filter(|path| {
             crate::auth::credentials::forget(path)
                 .inspect_err(|e| {
-                    tracing::warn!(
+                    tracing::error!(
                         "could not drop credential entry for {}: {e}",
                         path.display()
                     );
@@ -246,56 +250,6 @@ pub(in crate::cli) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
                 .unwrap_or(false)
         })
         .count()
-}
-
-/// Whether a configured `index_path` names the codebase-memory folder.
-#[derive(Debug, PartialEq, Eq)]
-enum CacheUse {
-    Unused,
-    Live,
-    /// An `index_path` or a bundle cannot be read, so the answer is not known.
-    Unknown(String),
-}
-
-/// Check every `features.codebase_memory` `index_path`: the top-level entries and the entries of
-/// every configured bundle, active here or not. A bundle can be active in another folder, and its
-/// server then uses the folder (#2929).
-fn cache_use(config: &Config, bundles_dir: &Path, dir: &Path) -> CacheUse {
-    let raws = match configured_index_paths(config, bundles_dir) {
-        Ok(raws) => raws,
-        Err(cause) => return CacheUse::Unknown(cause),
-    };
-    let canonical_dir = std::fs::canonicalize(dir).ok();
-    for raw in raws {
-        let expanded = match paths::expand_tilde(&raw) {
-            Ok(expanded) => PathBuf::from(expanded),
-            Err(e) => return CacheUse::Unknown(format!("cannot expand index_path {raw}: {e:#}")),
-        };
-        let same = expanded == dir
-            || (canonical_dir.is_some() && std::fs::canonicalize(&expanded).ok() == canonical_dir);
-        if same {
-            return CacheUse::Live;
-        }
-    }
-    CacheUse::Unused
-}
-
-/// The raw `index_path` values of the top-level config and of each bundle's `bundle.yaml`.
-fn configured_index_paths(config: &Config, bundles_dir: &Path) -> Result<Vec<String>, String> {
-    let index_paths = |features: Option<&crate::config::Features>| -> Vec<String> {
-        features
-            .iter()
-            .flat_map(|f| &f.codebase_memory)
-            .filter_map(|cm| cm.index_path.clone())
-            .collect()
-    };
-    let mut raws = index_paths(config.features.as_ref());
-    for bundle in &config.bundle {
-        let caps = crate::merge::read_bundle_yaml(&bundles_dir.join(&bundle.name), &bundle.name)
-            .map_err(|e| format!("cannot read the index_path of a bundle: {e:#}"))?;
-        raws.extend(index_paths(caps.as_ref().and_then(|c| c.features.as_ref())));
-    }
-    Ok(raws)
 }
 
 /// Remove session-log rotations older than the retention (#2816). The active file is kept.

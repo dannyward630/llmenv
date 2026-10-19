@@ -45,11 +45,12 @@ fn read_project_file(path: &std::path::Path) -> ProjectFile {
         Ok(Some(body)) => body,
         Ok(None) => return ProjectFile::default(),
         Err(e) => {
-            tracing::error!(
-                path = %path.display(),
-                error = %e,
-                "failed to read project marker file; using defaults"
-            );
+            // Hook stderr is dropped, so the agent notice is the one place the user sees this.
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot read {}, so its tags and bundles are off: {e}. Fix: correct or \
+                 remove that file",
+                path.display()
+            ));
             return ProjectFile::default();
         }
     };

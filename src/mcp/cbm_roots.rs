@@ -166,7 +166,7 @@ fn is_folder(path: &Path) -> bool {
         Ok(meta) => meta.is_dir(),
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("cannot read the declared root {}: {e}", path.display());
+                tracing::error!("cannot read the declared root {}: {e}", path.display());
             }
             false
         }
@@ -180,7 +180,7 @@ fn undeclared_roots(listed: &[PathBuf], wanted: &[PathBuf]) -> Vec<PathBuf> {
         .iter()
         .filter(|root| {
             if canonical(root).is_none() {
-                tracing::warn!(
+                tracing::error!(
                     "recorded root {} does not resolve, so it is not reported",
                     root.display()
                 );

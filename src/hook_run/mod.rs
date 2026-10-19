@@ -37,6 +37,7 @@ mod recall;
 mod record_hash;
 mod relevance;
 pub(crate) mod repeat_detect;
+mod respawn;
 mod resume_cache;
 mod session_ledger;
 mod session_notices;
@@ -54,6 +55,9 @@ pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
 pub(crate) mod transcript;
 mod transcript_link;
+use respawn::respawn_job;
+#[cfg(test)]
+use respawn::{respawn_job_with_exe, spawn_detached};
 use stop_reminder::resolve_stop_reminder;
 mod web_fetch;
 
@@ -3152,67 +3156,6 @@ fn resume_checkpoints_with(
     let resumed = checkpoint::resume_pending(state_dir, checkpoint::now_secs(), spawn);
     tracing::debug!("resumed {resumed} unfinished background job(s)");
     resumed
-}
-
-/// Start the child for one stale checkpoint, with the inputs and the working directory of the
-/// first run. The memory backend and the project come from that directory, so a checkpoint whose
-/// directory is gone is not run: it would store into the project of the session that resumes it.
-fn respawn_job(cp: &checkpoint::Checkpoint, path: &std::path::Path) -> anyhow::Result<()> {
-    respawn_job_with_exe(cp, path, std::env::current_exe)
-}
-
-/// [`respawn_job`] with the image lookup passed in, so a test can make it fail.
-fn respawn_job_with_exe(
-    cp: &checkpoint::Checkpoint,
-    path: &std::path::Path,
-    current_exe: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
-) -> anyhow::Result<()> {
-    use checkpoint::JobKind;
-    let cwd = cp
-        .cwd
-        .as_deref()
-        .map(std::path::Path::new)
-        .filter(|d| d.is_dir())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "the working directory of the first run ({}) is gone",
-                cp.cwd.as_deref().unwrap_or("not recorded")
-            )
-        })?;
-    // Spawns this same binary as a detached child. The path is this process's own image, not input.
-    // nosemgrep: rust.lang.security.current-exe.current-exe
-    let exe = current_exe().context("cannot resolve current_exe")?;
-    let stdin = cp.inputs.to_string();
-    match cp.kind {
-        JobKind::IcmStore => spawn_detached(icm_store_command(exe, Some(path)), Some(&stdin), cwd),
-        JobKind::SessionLogRecord => spawn_detached(
-            crate::session_log::detached::record_command(exe, Some(path)),
-            Some(&stdin),
-            cwd,
-        ),
-        JobKind::Consolidation => {
-            spawn_detached(consolidation_run_command(exe, Some(path)), None, cwd)
-        }
-        // Not resumable: `resume_pending` skips it, because `SessionStart` starts the indexer.
-        JobKind::CbmIndex => Ok(()),
-    }
-}
-
-/// Spawn `cmd` as a detached child in `cwd` with the shared bounded stderr log, and write `stdin`
-/// to it. Not waited on.
-fn spawn_detached(
-    mut cmd: std::process::Command,
-    stdin: Option<&str>,
-    cwd: &std::path::Path,
-) -> anyhow::Result<()> {
-    cmd.current_dir(cwd);
-    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
-    crate::mcp::proxy::detach_process_group(&mut cmd);
-    let mut child = cmd.spawn()?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text.as_bytes())?;
-    }
-    Ok(())
 }
 
 /// True for the event that ends a session and so starts consolidation.

@@ -223,16 +223,17 @@ fn remove_plugin_caches(cache_dir: &Path, dry_run: bool) -> Removals {
             .join(adapter.name())
             .join(crate::materialize::state::STATE_DIR_NAME)
             .join("plugins");
+        // A folder that is not there is neither removed nor a failure.
         let result = if dry_run {
-            Ok(())
+            std::fs::symlink_metadata(&plugins_dir).map(|_| ())
         } else {
             std::fs::remove_dir_all(&plugins_dir)
         };
         match result {
             Ok(()) => out.removed.push(plugins_dir),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => out.removed.push(plugins_dir),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     path = %plugins_dir.display(),
                     error = %e,
                     "failed to remove plugin cache"

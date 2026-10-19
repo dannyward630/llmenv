@@ -1,7 +1,6 @@
 use crate::adapter::AgentAdapter;
 use crate::config::{Bundle, Capabilities, Config};
 use crate::paths;
-use crate::plugins::cache;
 use anyhow::Context;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -12,6 +11,7 @@ pub(super) mod cache_gc;
 mod cbm_index;
 mod cleartext;
 mod instruction_size;
+mod marketplace_pins;
 mod mcp_text;
 mod network;
 mod task_text;
@@ -1742,50 +1742,7 @@ pub(super) fn run_doctor(
         }
     }
 
-    // Verify pinned marketplaces: when a marketplace source includes a `#ref`
-    // pin, the checked-out HEAD should match that pinned ref. Use `^{commit}`
-    // dereferencing so annotated tags don't false-positive (#695).
-    for m in &config.marketplace {
-        let (_, pinned_ref) = cache::split_source_ref(&m.source);
-        let Some(pinned_ref) = pinned_ref else {
-            continue;
-        };
-        let mkt_path = cache::marketplace_path(&cache_dir, &m.name);
-        if !mkt_path.join(".git").exists() {
-            continue;
-        }
-        let head = match cache::git_head(&mkt_path) {
-            Ok(head) => head,
-            Err(e) => {
-                eprintln!(
-                    "{warn} marketplace '{}': cannot read HEAD in its local clone: {e}",
-                    m.name,
-                );
-                continue;
-            }
-        };
-        let pinned_sha = match cache::git_peeled_ref(&mkt_path, pinned_ref) {
-            Ok(sha) => sha,
-            Err(e) => {
-                eprintln!(
-                    "{warn} marketplace '{}' pinned to '{}' cannot be resolved in the local \
-                     clone: {e} — run `llmenv plugin-sync` to repair",
-                    m.name, pinned_ref,
-                );
-                continue;
-            }
-        };
-        if head != pinned_sha {
-            eprintln!(
-                "{warn} marketplace '{}' pinned to '{}': HEAD ({}) does not match \
-                 the pinned ref's commit ({}) — run `llmenv plugin-sync` to repair",
-                m.name,
-                pinned_ref,
-                &head[..head.len().min(7)],
-                &pinned_sha[..pinned_sha.len().min(7)],
-            );
-        }
-    }
+    marketplace_pins::report_pinned_marketplaces(&config, &cache_dir, &warn);
 
     report_credential_cache(&cache_dir, &pass, &info, &warn);
 
@@ -1798,7 +1755,14 @@ pub(super) fn run_doctor(
             warn: &warn,
             dry_run: false,
         };
-        cache_gc::run(&cache_dir, &config, out);
+        // #1346: a sweep that could not finish is not a success, as in `llmenv clean`.
+        let failures = cache_gc::run(&cache_dir, &config, out);
+        if failures > 0 {
+            anyhow::bail!(
+                "{failures} sweep entry(ies) or sweep(s) could not be checked or removed — see \
+                 the warnings above"
+            );
+        }
     }
 
     Ok(())

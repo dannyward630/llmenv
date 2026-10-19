@@ -152,7 +152,7 @@ pub(crate) fn copy_file_at(
     io::copy(&mut src, &mut dst).inspect_err(|_| {
         // A partial copy under the final name would look complete to the next reader.
         if let Err(e) = remove_file_at(dst_dir, name) {
-            tracing::warn!(
+            tracing::error!(
                 "could not remove the partial copy of {}: {e}",
                 name.to_string_lossy()
             );

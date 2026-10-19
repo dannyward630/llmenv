@@ -49,6 +49,11 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
 /// target (#2686). Only the final component is checked. A symlink in a parent directory is still
 /// followed, so the parent must already be a directory the user controls.
 pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    write_owner_only_unnamed(path, content)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("cannot write {}: {e}", path.display())))
+}
+
+fn write_owner_only_unnamed(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     {
@@ -150,10 +155,15 @@ mod tests {
         std::fs::write(&target, b"keep").expect("seed target");
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         let err = write_owner_only(&link, b"attacker").expect_err("symlink must be refused");
+        let eloop = std::io::Error::from_raw_os_error(rustix::io::Errno::LOOP.raw_os_error());
         assert_eq!(
-            err.raw_os_error(),
-            Some(rustix::io::Errno::LOOP.raw_os_error()),
+            err.kind(),
+            eloop.kind(),
             "a symlink at the final component must fail with ELOOP: {err}"
+        );
+        assert!(
+            err.to_string().contains(&link.display().to_string()),
+            "{err}"
         );
         assert_eq!(std::fs::read(&target).expect("read target"), b"keep");
     }

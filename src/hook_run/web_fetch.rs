@@ -198,7 +198,7 @@ fn session_project(payload: &serde_json::Value) -> Option<String> {
         .inspect_err(|e| {
             crate::agent_notice::record_logged(format!(
                 "llmenv: a fetched page was stored with no project, so no project recall \
-                 returns it: {e:#}"
+                 returns it: {e:#}. Fix: run the session inside the project folder"
             ));
         })
         .ok()

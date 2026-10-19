@@ -95,7 +95,7 @@ pub(super) fn result_stdout(path: &std::path::Path) -> std::process::Stdio {
     match create_result_file(path) {
         Ok(file) => std::process::Stdio::from(file),
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 "cannot create the index result file {}, so doctor cannot report the result: {e}",
                 path.display()
             );

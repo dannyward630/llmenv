@@ -38,11 +38,22 @@ pub(super) fn engine_start(pid: u32) -> Option<SystemTime> {
     let mut cmd = std::process::Command::new("/bin/ps");
     cmd.args(["-o", "etime=", "-p", &pid.to_string()])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
     let out = match crate::process::run_with_timeout(cmd, PS_TIMEOUT) {
         Ok(out) if out.status.success() => out,
+        // `ps -p` exits 1 with no output for a pid that does not exist (#2923).
+        Ok(out)
+            if out.status.code() == Some(1) && out.stdout.is_empty() && out.stderr.is_empty() =>
+        {
+            tracing::error!("ps found no engine process {pid}");
+            return None;
+        }
         Ok(out) => {
-            tracing::error!("ps found no engine process {pid} ({})", out.status);
+            tracing::error!(
+                "/bin/ps failed to read the age of engine process {pid} ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
             return None;
         }
         Err(e) => {
