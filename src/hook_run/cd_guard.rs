@@ -46,6 +46,24 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
     }
 }
 
+/// The words that close a brace group or a compound command. The group runs in the current
+/// shell, so a `cd` just before the closer still outlives the call.
+const CLOSERS: [&str; 4] = ["}", "fi", "done", "esac"];
+
+/// The words that open a branch or a loop body ahead of the command they run.
+const OPENERS: [&str; 3] = ["then", "do", "else"];
+
+/// Whether `words` runs `cd` in the shell of the call. A `cd` in a `( ... )` subshell ends with the
+/// subshell, so it does not count.
+fn runs_cd_in_this_shell(words: &[String]) -> bool {
+    if words.first().is_some_and(|w| w.starts_with('(')) {
+        return false;
+    }
+    let program = program_words(words);
+    let start = program.iter().take_while(|w| OPENERS.contains(w)).count();
+    program.get(start) == Some(&"cd")
+}
+
 /// Whether the last command of `command` is `cd`, so the change of directory outlives the call.
 ///
 /// The parts come from the shared splitter that the commit gate uses (#2619). It puts each
@@ -55,8 +73,10 @@ pub fn handle_pre_tool_use(stdin_payload: &serde_json::Value, cfg: &CdGuard) -> 
 fn command_ends_with_cd(command: &str) -> bool {
     match shell_segments(command) {
         Ok(segments) => segments
-            .last()
-            .is_some_and(|words| program_words(words).first() == Some(&"cd")),
+            .iter()
+            .rev()
+            .find(|words| !words.first().is_some_and(|w| CLOSERS.contains(&w.as_str())))
+            .is_some_and(|words| runs_cd_in_this_shell(words)),
         Err(NestingTooDeep) => {
             tracing::error!("cd guard: command nests too deep to check for cd; no advisory");
             false
@@ -121,6 +141,25 @@ mod tests {
     #[test]
     fn a_cd_inside_a_brace_group_followed_by_a_command_gets_no_advisory() {
         assert!(!command_ends_with_cd("{ cd /tmp; ls; }"));
+    }
+
+    #[test]
+    fn a_trailing_cd_in_a_subshell_gets_no_advisory() {
+        assert!(!command_ends_with_cd("ls && (cd /tmp)"));
+        assert!(!command_ends_with_cd("(cd /tmp)"));
+    }
+
+    #[test]
+    fn a_trailing_cd_in_a_group_or_compound_command_gets_the_advisory() {
+        for command in [
+            "{ cd /tmp; }",
+            "ls; { cd /tmp; }",
+            "if true; then cd /x; fi",
+            "for d in /x; do cd $d; done",
+            "if false; then ls; else cd /x; fi",
+        ] {
+            assert!(command_ends_with_cd(command), "{command}");
+        }
     }
 
     #[test]
