@@ -497,6 +497,7 @@ The next session start runs the job again, up to 3 attempts and at most 20 jobs 
 llmenv deletes a checkpoint after 7 days.
 (changed in v3.13.0) A job runs in the working directory of its first run.
 When that directory is gone, the session start deletes the checkpoint and shows one notice that names the job.
+A failed start of a resumed job uses up one of its 3 attempts.
 Consolidation keeps the model summary in its checkpoint, so a resume never pays for the model twice.
 The index job is not resumed, because every session start runs the indexer anyway.
 See [Background work](troubleshooting.md#background-work-that-did-not-finish).
