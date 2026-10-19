@@ -225,7 +225,54 @@ mod tests {
         assert!(start <= SystemTime::now());
     }
 
+    fn session(id: usize, conversation: Option<u8>, pid: Option<u32>) -> Session {
+        Session {
+            id: format!("s{id}"),
+            name: None,
+            project: "p".into(),
+            description: None,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            last_activity: "2026-01-01T00:00:00Z".into(),
+            finished_at: None,
+            abandoned_at: None,
+            owner_session: conversation.map(|c| format!("c{c}")),
+            owner_pid: pid,
+            resume: super::super::ResumeContext::default(),
+        }
+    }
+
     proptest! {
+        #[test]
+        fn only_one_own_session_is_picked_in_any_order(
+            owners in proptest::collection::vec(
+                (proptest::option::of(0u8..3), proptest::option::of(1u32..4)),
+                0..6,
+            ),
+            shift in 0usize..6,
+        ) {
+            let me = EngineIdentity { session_id: Some("c0".into()), pid: Some(1) };
+            let sessions: Vec<Session> = owners
+                .iter()
+                .enumerate()
+                .map(|(i, (c, p))| session(i, *c, *p))
+                .collect();
+            let own: Vec<&str> = owners
+                .iter()
+                .zip(&sessions)
+                .filter(|((c, p), _)| *c == Some(0) || *p == Some(1))
+                .map(|(_, s)| s.id.as_str())
+                .collect();
+            let expected = (own.len() == 1).then(|| own[0]);
+            let mut rotated = sessions.clone();
+            let len = rotated.len();
+            rotated.rotate_left(shift.min(len));
+            let since = Some(SystemTime::UNIX_EPOCH);
+            for list in [&sessions, &rotated] {
+                let picked = only_own_session(list.iter(), &me, since).map(|s| s.id.as_str());
+                prop_assert_eq!(picked, expected);
+            }
+        }
+
         #[test]
         fn etime_round_trips(days in 0u64..400, h in 0u64..24, m in 0u64..60, s in 0u64..60) {
             let text = if days > 0 {
