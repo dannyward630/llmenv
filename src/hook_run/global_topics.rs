@@ -10,10 +10,10 @@ use crate::hook_run::action::{Action, RecallQuery};
 use crate::hook_run::mcp_client::McpHttpClient;
 
 /// The records that one global topic recall returns at most, as the main recall of a turn.
-pub(crate) const TOPIC_LIMIT: u8 = 10;
+const TOPIC_LIMIT: u8 = 10;
 
 /// The recall of each global topic for `text`, across every project.
-pub(crate) fn topic_queries(text: &str, topics: &[String], limit: u8) -> Vec<RecallQuery> {
+fn topic_queries(text: &str, topics: &[String], limit: u8) -> Vec<RecallQuery> {
     topics
         .iter()
         .map(|t| t.trim())

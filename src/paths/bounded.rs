@@ -11,13 +11,13 @@ pub(crate) const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The largest state file that llmenv writes for itself, such as a task, the merge cache, or the
 /// throttle state. Each one holds a small JSON document.
-pub(crate) const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Read the regular file at `path` of at most `max_bytes` bytes, or `None` when there is none.
 ///
 /// # Errors
 /// The file cannot be read, is not a regular file, or is too large. The message names the path.
-pub(crate) fn read_optional(path: &Path, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
+fn read_optional(path: &Path, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
     llmenv_paths::read_file_bounded(path, max_bytes)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))
 }
@@ -26,7 +26,7 @@ pub(crate) fn read_optional(path: &Path, max_bytes: u64) -> anyhow::Result<Optio
 ///
 /// # Errors
 /// The errors of [`read_optional`], and a missing file.
-pub(crate) fn read(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+fn read(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
     read_optional(path, max_bytes)?
         .ok_or_else(|| anyhow::anyhow!("cannot read {}: it does not exist", path.display()))
 }
@@ -35,7 +35,7 @@ pub(crate) fn read(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
 ///
 /// # Errors
 /// The errors of [`read`], and a file that is not UTF-8.
-pub(crate) fn read_text(path: &Path, max_bytes: u64) -> anyhow::Result<String> {
+fn read_text(path: &Path, max_bytes: u64) -> anyhow::Result<String> {
     read_utf8(path, read(path, max_bytes)?)
 }
 

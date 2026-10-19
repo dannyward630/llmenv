@@ -9,7 +9,7 @@ pub mod opencode;
 pub(crate) mod output_styles;
 pub(crate) use json_nulls::strip_json_nulls;
 pub(crate) mod skills;
-pub(crate) mod temp_dir;
+mod temp_dir;
 pub(crate) mod tools;
 
 pub(crate) use hook_command::resolve_bundle_relative_paths;

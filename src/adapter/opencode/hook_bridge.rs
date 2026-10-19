@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 /// The plugin module. It reads `llmenv-hooks.json` from its own folder.
-pub(super) const PLUGIN_JS: &str = include_str!("plugin.js");
+const PLUGIN_JS: &str = include_str!("plugin.js");
 
 /// The longest that one user hook may run, in milliseconds, as the 1.x shim allowed.
 const USER_HOOK_TIMEOUT_MS: u64 = 30_000;

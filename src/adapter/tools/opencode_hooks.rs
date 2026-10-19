@@ -10,14 +10,14 @@
 /// that differ.
 #[derive(Debug)]
 pub(crate) struct HookTool {
-    pub(crate) opencode: &'static str,
-    pub(crate) claude: &'static str,
-    pub(crate) args: &'static [(&'static str, &'static str)],
+    opencode: &'static str,
+    claude: &'static str,
+    args: &'static [(&'static str, &'static str)],
 }
 
 /// The opencode tools that have a Claude Code equivalent. `patch` has none: its one argument is
 /// a patch text, not a file path, so it keeps its own name.
-pub(crate) const HOOK_TOOLS: &[HookTool] = &[
+const HOOK_TOOLS: &[HookTool] = &[
     HookTool {
         opencode: "shell",
         claude: "Bash",

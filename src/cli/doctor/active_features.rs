@@ -12,7 +12,7 @@ use crate::scope::ActiveScopes;
 #[derive(Debug, Default)]
 pub(super) struct ActiveFeatures {
     pub(super) memory: Vec<Memory>,
-    pub(super) host: BTreeMap<String, HostEntry>,
+    host: BTreeMap<String, HostEntry>,
     pub(super) codebase_memory: Vec<CodebaseMemory>,
 }
 
