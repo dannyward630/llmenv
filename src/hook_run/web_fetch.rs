@@ -46,7 +46,7 @@ fn web_fetch_topic(project: Option<&str>) -> String {
 /// `None`) and importance `low`, so it decays quickly and can be bulk-cleared via
 /// `icm_memory_forget_topic`.
 #[must_use]
-pub(super) fn web_fetch_store_args(
+fn web_fetch_store_args(
     payload: &serde_json::Value,
     project: Option<&str>,
 ) -> Option<serde_json::Value> {
