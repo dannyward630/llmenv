@@ -133,8 +133,8 @@ pub(crate) fn prune_rotations(
         return Ok(Vec::new());
     };
     let now = SystemTime::now();
-    let mut removed = Vec::new();
     let mut failures = Vec::new();
+    let mut expired = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -146,26 +146,17 @@ pub(crate) fn prune_rotations(
         if !is_rotation_of(&entry.file_name(), base) {
             continue;
         }
-        let entry_path = entry.path();
-        let modified = match entry.metadata().and_then(|meta| meta.modified()) {
-            Ok(modified) => modified,
-            Err(e) => {
-                failures.push(format!("{}: {e}", entry_path.display()));
-                continue;
-            }
-        };
-        if !is_expired(now, modified, older_than) {
-            continue;
-        }
-        if dry_run {
-            removed.push(entry_path);
-            continue;
-        }
-        match std::fs::remove_file(&entry_path) {
-            Ok(()) => removed.push(entry_path),
-            Err(e) => failures.push(format!("{}: {e}", entry_path.display())),
+        match is_old(&entry.path(), now, older_than) {
+            Ok(true) => expired.push(entry.path()),
+            Ok(false) => {}
+            Err(e) => failures.push(format!("{}: {e}", entry.path().display())),
         }
     }
+    let removed = if dry_run || expired.is_empty() {
+        expired
+    } else {
+        remove_under_lock(path, expired, now, older_than, &mut failures)?
+    };
     if !failures.is_empty() {
         anyhow::bail!(
             "{} rotated session-log file(s) could not be checked or removed, {} removed: {}. \
@@ -174,6 +165,51 @@ pub(crate) fn prune_rotations(
             removed.len(),
             failures.join("; ")
         );
+    }
+    Ok(removed)
+}
+
+/// Whether the file at `path` was last written more than `older_than` before `now`.
+fn is_old(path: &Path, now: SystemTime, older_than: Duration) -> std::io::Result<bool> {
+    let modified = std::fs::symlink_metadata(path)?.modified()?;
+    Ok(is_expired(now, modified, older_than))
+}
+
+/// Remove each candidate under the rotation lock, after a second age check.
+///
+/// A rotation renames each generation up by one. Without the lock, a name judged old can name a
+/// newer file by the time it is removed. A file that is gone, or that is no longer old, stays out
+/// of the result.
+fn remove_under_lock(
+    path: &Path,
+    candidates: Vec<PathBuf>,
+    now: SystemTime,
+    older_than: Duration,
+    failures: &mut Vec<String>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let _lock = rotation_lock(path).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot lock {} to prune its rotations: {e}. Fix: run llmenv clean again when no \
+             rotation is in progress",
+            path.display()
+        )
+    })?;
+    let mut removed = Vec::new();
+    for candidate in candidates {
+        match is_old(&candidate, now, older_than) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                failures.push(format!("{}: {e}", candidate.display()));
+                continue;
+            }
+        }
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => removed.push(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => failures.push(format!("{}: {e}", candidate.display())),
+        }
     }
     Ok(removed)
 }
@@ -336,6 +372,29 @@ mod tests {
 
         assert_eq!(listed, vec![old_rotation.clone()]);
         assert!(old_rotation.exists());
+    }
+
+    #[test]
+    fn the_locked_pass_keeps_a_file_that_a_rotation_made_new_and_skips_a_gone_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-log.jsonl");
+        let renewed = rotation_path(&path, 2);
+        write_bytes(&renewed, 3);
+        let gone = rotation_path(&path, 3);
+        let mut failures = Vec::new();
+
+        let removed = remove_under_lock(
+            &path,
+            vec![renewed.clone(), gone],
+            SystemTime::now(),
+            Duration::from_secs(7 * 86_400),
+            &mut failures,
+        )
+        .unwrap();
+
+        assert!(removed.is_empty(), "{removed:?}");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(renewed.exists(), "a file that is no longer old was removed");
     }
 
     #[test]
