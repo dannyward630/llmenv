@@ -17,6 +17,10 @@ async fn a_failed_request_names_the_set_proxy_variable() {
         let text = format!("{error:#}");
         assert!(text.contains("HTTPS_PROXY is set"), "{text}");
         assert!(text.contains("docs/mcp"), "{text}");
+        let request = text
+            .find("for MCP initialize")
+            .expect("the request is named");
+        assert!(request < text.find("HTTPS_PROXY").expect("note"), "{text}");
         return;
     }
     // Bind and drop a listener, so the port is closed and the connection is refused at once.
@@ -28,9 +32,15 @@ async fn a_failed_request_names_the_set_proxy_variable() {
         "hook_run::mcp_client::tests::proxy_note::",
         "a_failed_request_names_the_set_proxy_variable"
     );
-    // The child re-runs this test binary, so the path is the test binary itself. nosemgrep: rust.lang.security.current-exe.current-exe
+    // The child re-runs this test binary, so the path is the test binary itself.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let test_binary = std::env::current_exe().expect("test binary path");
-    let output = std::process::Command::new(test_binary)
+    let mut child = std::process::Command::new(test_binary);
+    // A proxy variable of the test host would add its own name to the note.
+    for name in crate::proxy_note::PROXY_VARS {
+        child.env_remove(name);
+    }
+    let output = child
         .args(["--exact", test_name, "--nocapture"])
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env(TARGET_ENV, format!("http://{closed}/mcp"))
