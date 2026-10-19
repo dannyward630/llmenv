@@ -253,3 +253,20 @@ async fn subagent_start_without_an_agent_id_does_nothing() {
         "no ledger write"
     );
 }
+
+/// An Agent call with no id or no prompt is not queued: an empty id would merge two subagents.
+#[test]
+fn an_agent_call_without_an_id_or_a_prompt_is_not_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LedgerStore::new(dir.path());
+    store.update("s1", |_| {});
+    for payload in [
+        json!({"tool_name": "Agent", "tool_input": {"subagent_type": "Explore", "prompt": "find x"}}),
+        json!({"tool_name": "Agent", "tool_use_id": "", "tool_input": {"subagent_type": "Explore", "prompt": "find x"}}),
+        json!({"tool_name": "Agent", "tool_use_id": "t1", "tool_input": {"subagent_type": "Explore"}}),
+    ] {
+        record_local(HookEvent::SubagentTask, &store, "s1", &payload);
+    }
+    let mut ledger = store.load("s1").unwrap();
+    assert!(ledger.take_subagent("Explore", unix_now()).is_none());
+}

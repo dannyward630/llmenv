@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use super::mcp_health;
 use crate::agent_notice;
+#[cfg(test)]
 use crate::hook_run::HookEvent;
 use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
@@ -20,6 +21,7 @@ use crate::hook_run::transcript;
 
 mod cut;
 mod failure;
+mod local;
 mod outcome;
 mod scope;
 mod session_reset;
@@ -29,6 +31,7 @@ mod waves;
 #[cfg(test)]
 use cut::cut_items_notice;
 use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
+pub(super) use local::record_local;
 use outcome::Outcome;
 use scope::run_scope;
 #[cfg(test)]
@@ -391,51 +394,6 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super:
         );
     }
     Ok(budget.hook_text(Vec::new()))
-}
-
-/// Local ledger writes with no MCP call: batch activity and queued subagent tasks.
-pub(super) fn record_local(
-    event: HookEvent,
-    store: &LedgerStore,
-    session_id: &str,
-    payload: &Value,
-) {
-    let now = unix_now();
-    match event {
-        HookEvent::PostToolBatch => {
-            let empty = Vec::new();
-            let calls = payload["tool_calls"].as_array().unwrap_or(&empty);
-            note_unless_saved(
-                store.update(session_id, |l| {
-                    for call in calls {
-                        let tool = call["tool_name"].as_str().unwrap_or_default();
-                        if tool == "Agent"
-                            && let Some(id) = call["tool_use_id"].as_str()
-                        {
-                            l.drop_subagent(id);
-                        }
-                        l.push_activity(relevance::activity_from_tool_call(
-                            tool,
-                            &call["tool_input"],
-                            now,
-                        ));
-                    }
-                }),
-                ACTIVITY_UNSAVED,
-            );
-        }
-        HookEvent::SubagentTask if payload["tool_name"].as_str() == Some("Agent") => {
-            let input = &payload["tool_input"];
-            let id = payload["tool_use_id"].as_str().unwrap_or_default();
-            let kind = input["subagent_type"].as_str().unwrap_or("general-purpose");
-            let prompt = input["prompt"].as_str().unwrap_or_default();
-            note_unless_saved(
-                store.update(session_id, |l| l.queue_subagent(id, kind, prompt, now)),
-                ACTIVITY_UNSAVED,
-            );
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
