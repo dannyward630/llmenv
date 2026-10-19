@@ -77,3 +77,36 @@ fn the_tool_report_lists_the_strong_defaults_first_and_reads_path() {
         "an empty PATH found a binary"
     );
 }
+
+/// The setup skill tells the agent to run `llmenv setup --<flag>`. Each flag it names must exist,
+/// or the agent runs a command that fails.
+#[test]
+fn every_setup_flag_that_the_skill_names_exists() {
+    let skill = include_str!("../skills/setup-llmenv/SKILL.md");
+    let flags: std::collections::BTreeSet<&str> = skill
+        .match_indices("llmenv setup --")
+        .filter_map(|(at, prefix)| {
+            let rest = skill.get(at + prefix.len()..)?;
+            let end = rest
+                .find(|c: char| !(c.is_ascii_lowercase() || c == '-'))
+                .unwrap_or(rest.len());
+            rest.get(..end)
+        })
+        .collect();
+    assert!(
+        flags.contains("scan") && flags.contains("tools"),
+        "{flags:?}"
+    );
+    let home = tempfile::TempDir::new().expect("home");
+    let output = isolated_llmenv_cmd(home.path())
+        .args(["setup", "--help"])
+        .output()
+        .expect("run llmenv");
+    let help = String::from_utf8_lossy(&output.stdout);
+    for flag in flags {
+        assert!(
+            help.contains(&format!("--{flag}")),
+            "--{flag} is not a setup flag"
+        );
+    }
+}
