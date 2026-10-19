@@ -40,3 +40,52 @@ fn the_stateless_turn_recall_never_reads_every_project() {
     );
     assert!(turn_actions(vec![Action::Recall(String::new())], "q", &[]).is_empty());
 }
+
+/// One failed topic beside one that answered keeps the answer and tells the agent which topic is
+/// missing. Every topic failed is an error that names each topic.
+#[tokio::test]
+async fn a_failed_topic_beside_an_answer_is_noticed() {
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let reply = |body: &str| {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({"jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": body}]}}))
+    };
+    Mock::given(method("POST"))
+        .and(body_string_contains("initialize"))
+        .respond_with(reply(""))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#""topic":"preferences""#))
+        .respond_with(reply("[preferences] be terse"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains(r#""topic":"errors-resolved""#))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let client = McpHttpClient::test_new(server.uri(), std::time::Duration::from_secs(2)).unwrap();
+
+    let found = recall(
+        &client,
+        "q",
+        &topics(&["preferences", "errors-resolved"]),
+        4,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(found.contains("be terse"), "{found}");
+    let notice = crate::agent_notice::current().unwrap_or_default();
+    assert!(notice.contains("`errors-resolved`"), "{notice}");
+
+    let err = recall(&client, "q", &topics(&["errors-resolved"]), 4)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("errors-resolved"), "{err:#}");
+}

@@ -29,7 +29,8 @@ fn topic_queries(text: &str, topics: &[String], limit: u8) -> Vec<RecallQuery> {
 }
 
 /// The records of the global topics, one call per topic. `None` with no topic, an error when
-/// every call failed. A call that failed beside one that answered is logged.
+/// every call failed. A call that failed beside one that answered gets an agent notice, because
+/// the records of that topic are missing from the turn.
 pub(crate) async fn recall(
     client: &McpHttpClient,
     text: &str,
@@ -41,21 +42,38 @@ pub(crate) async fn recall(
         return None;
     }
     let mut texts = Vec::new();
-    let mut failure = None;
+    let mut failed = Vec::new();
     for q in queries {
         let topic = q.topic.clone().unwrap_or_default();
         match Action::RecallQuery(q).run(client, "", "").await {
             Ok(found) => texts.push(found),
             Err(e) => {
                 tracing::error!("memory recall of the global topic {topic} failed: {e:#}");
-                failure = Some(e);
+                failed.push((topic, e));
             }
         }
     }
-    match failure {
-        Some(e) if texts.is_empty() => Some(Err(e)),
-        _ => Some(Ok(texts.join("\n"))),
+    if texts.is_empty() {
+        let names: Vec<&str> = failed.iter().map(|(t, _)| t.as_str()).collect();
+        let causes: Vec<String> = failed.iter().map(|(t, e)| format!("{t}: {e:#}")).collect();
+        return Some(Err(anyhow::anyhow!(
+            "memory recall of the global topics {} failed: {}",
+            names.join(", "),
+            causes.join("; ")
+        )));
     }
+    for (topic, _) in &failed {
+        crate::agent_notice::record(partial_notice(topic));
+    }
+    Some(Ok(texts.join("\n")))
+}
+
+/// The notice for one global topic whose recall failed while another topic answered.
+fn partial_notice(topic: &str) -> String {
+    format!(
+        "llmenv: the memories of the global topic `{topic}` were skipped this turn: its icm recall \
+         failed. Fix: run `llmenv doctor` to check the memory server."
+    )
 }
 
 /// The turn recall actions of the stateless path: an empty `Recall` reads every project, so it is

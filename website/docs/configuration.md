@@ -725,8 +725,10 @@ Set `adaptive_recall: false` to go back to the stateless recall, which sends the
 
 `global_topics` (added in v3.13.0) sets which memories a prompt recall reads from other projects.
 The per-prompt recall reads the memories of the session's project, plus the memories in each topic of this list from every project.
+The keyword and related-topic recalls of a prompt also read the session's project only.
 It does not read other topics of other projects, so the facts of one project do not show up in another.
-A session with no project reads the global topics only.
+A session with no project reads the global topics only, and with `global_topics: []` it reads no memories on a prompt.
+A failed tool call reads `errors-resolved` from every project only while this list names it.
 Set `global_topics: []` to read the session's project only.
 
 #### Post-session consolidation
