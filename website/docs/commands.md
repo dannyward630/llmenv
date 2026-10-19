@@ -370,6 +370,7 @@ Inspect ICM memory state for the active scope.
 
 - `memory stats` — record counts by tag/bundle/type, last-written.
 - `memory list` — list stored memories for the active scope.
+  `memory ls` is an alias (added in v3.13.0).
   (changed in v3.12.0) It asks ICM for the memories of the project that the current folder belongs to.
   llmenv names the project like ICM does: the `origin` remote's repository name, else the main repository's folder name,
   else the folder name.
@@ -391,25 +392,62 @@ Inspect ICM memory state for the active scope.
   Remove `retention` from that entry to use the importance-based prune.
   A `retention` on an entry that is not active does not block the prune.
 
-## `prune`
+## `clean`
+
+(added in v3.13.0)
 
 ```text
-llmenv prune [--all] [--older-than DUR] [--dry-run]
+llmenv clean [--all] [--older-than DUR] [--dry-run] [--plugin-cache]
 ```
 
-Clean stale cache folders. Exits non-zero if any plugin cache entry could not
-be removed (added in v3.11.0) — the per-entry failures are printed above the
-summary.
+Remove the cache and state files that llmenv no longer needs.
+`clean` is the one cleanup command.
+It replaces `llmenv prune` and `llmenv doctor --gc`, which are deprecated (see [Deprecated commands](#deprecated-commands)).
 
-- (no flags) — remove folders from previous binary versions and orphaned `*.tmp`
-  staging dirs.
-- `--all` — remove **every** cache folder unconditionally (next `export`
-  re-materializes).
-- `--older-than DUR` — remove only current-version folders older than `DUR`
-  (e.g. `14d`, `1w`).
-- `--dry-run` — preview deletions without removing (works with `--all` and
-  `--older-than`).
-- `--plugin-cache` — also remove the shared plugin cache directory.
+`clean` does two things, in this order:
+
+1. It removes stale cache folders.
+   With no flag, these are the folders from previous binary versions and orphaned `*.tmp` staging folders.
+2. It runs the age-based sweeps, with the window set by `cache_retention_hours` (see [Configuration](configuration.md)).
+   A `null` value turns these sweeps off.
+
+The age-based sweeps remove:
+
+- Old cache entries.
+  On macOS this also drops the keychain credential item of each cache folder that it deletes.
+  The match is by folder path, so your default `~/.claude` login is never affected.
+- Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
+  An entry that a process holds open is kept.
+- Old session-log rotations.
+- Old codebase-memory index databases (`*.db`, `*.db-wal`, `*.db-shm`) in `state/codebase-memory`.
+  Since v3.11.1 (#1493) codebase-memory-mcp keeps its indexes in its own cache unless `index_path` is set.
+  So those files are left from an older setup.
+  A folder that a `features.codebase_memory` `index_path` names is never swept.
+  A database and its `-wal` and `-shm` files go together, judged by the newest of them.
+  A database that a process holds open is kept.
+
+Claude Code transcripts under `state/projects` are not swept.
+Claude Code removes them itself after `cleanupPeriodDays` (set it under `native.claude_code`).
+
+Flags:
+
+- `--all` — remove **every** cache folder unconditionally (the next `export` re-materializes).
+- `--older-than DUR` — in the cache-folder step, remove only current-version cache folders older than `DUR`.
+  Examples: `14d`, `1w`.
+  The age-based sweeps still use `cache_retention_hours`.
+  `--all` and `--older-than` cannot be used together.
+  A bad value stops the command before anything is removed.
+- `--dry-run` — list every item that a real run tries to remove, and remove nothing.
+  This covers the cache folders and every age-based sweep.
+  A real run can still fail on an item that the dry run lists, for example a folder without write access.
+- `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
+
+`clean` exits non-zero when a cache folder, a plugin cache entry, or a sweep item could not be removed.
+It also exits non-zero when an error made it skip a sweep.
+Examples: `lsof` cannot run, or a `bundle.yaml` cannot be read.
+The failures are printed above the summary, and every other removal still runs first.
+The codebase-memory sweep reads the `index_path` of the top-level config and of every bundle.
+A bundle counts whether or not it is active in the current folder.
 
 ## `read-once`
 
@@ -530,7 +568,8 @@ Only when the open session has no match does the search cover the whole project.
 - `task ls [--format json] (--session <id> | --all) [--state <s>]...
   [--hide-done] [--current-project]` — list tasks. **Requires `--session <id>`
   or `--all`** (added in v3.8.0) — no silent default to every session's
-  tasks; pass `--all` to deliberately see everything. The human output groups
+  tasks; pass `--all` to deliberately see everything. `task list` is an alias
+  of `task ls` (added in v3.13.0). The human output groups
   tasks by session (current-project sessions first), indents subtasks under
   their parent, prefixes each row with a state glyph + label
   (`open`/`wip`/`waiting`/`done`), and annotates blocked tasks with their
@@ -662,6 +701,7 @@ project's hook.
   description), current-project matches first. This is the recovery path
   after a compaction: with one session open for the project there's exactly
   one match to resume.
+  `task session list` is an alias (added in v3.13.0).
 
 When every task in an open session is done, the SessionStart/Stop hook
 reminders (below) nudge the agent to run `task session finish` or add more
@@ -1150,19 +1190,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
 
 - `--all` runs the full orphan analysis across the entire config (all bundles and
   scopes, not just active ones).
-- `--gc` runs cache garbage collection after the diagnostics. On macOS this also
-  drops the keychain credential item belonging to each cache folder it deletes
-  (added in v3.8.0); matched by folder path, so your default `~/.claude` login is
-  never affected. It also sweeps the state temp folder and removes old session-log rotations
-  (added in v3.13.0), with the window set by `cache_retention_hours`.
-  It also removes old codebase-memory index databases (`*.db`, `*.db-wal`, `*.db-shm`) from
-  `state/codebase-memory` (added in v3.13.0). Since v3.11.1 (#1493) codebase-memory-mcp keeps
-  its indexes in its own cache unless `index_path` is set, so those files are left from an
-  older setup. A folder that a `features.codebase_memory` `index_path` names is never swept.
-  A database and its `-wal` and `-shm` files go together, judged by the newest of them, and a
-  database that a process holds open is kept.
-  Claude Code transcripts under `state/projects` are not swept: Claude Code removes them
-  itself after `cleanupPeriodDays` (set it under `native.claude_code`).
+- `--gc` (deprecated in v3.13.0; use [`llmenv clean`](#clean)) runs the age-based sweeps of `llmenv clean` after the diagnostics.
+  It does not remove the stale cache folders that `clean` removes first.
+  It prints `llmenv doctor --gc is deprecated; use llmenv clean` before the sweeps.
+  `doctor` without `--gc` removes nothing.
 - `--probe-mcp` (added in v3.12.0) also starts the stdio MCP servers, to measure their text for the
   MCP text limits check. Starting a server can have side effects, so doctor does it only on request.
 - `--restart-memory-proxy` (added in v3.12.0) replaces the checks; see above.
@@ -1181,3 +1212,14 @@ deprecation warning and delegate to `status <subcommand>`. Use the
 | `llmenv mcp-ls` | `llmenv status mcps` |
 | `llmenv marketplace-ls` | `llmenv status marketplaces` |
 | `llmenv plugin-ls` | `llmenv status plugins` |
+
+### `prune`
+
+(deprecated in v3.13.0) Use [`llmenv clean`](#clean).
+`llmenv prune` takes the same flags as `clean` and runs all of `clean`, the age-based sweeps included.
+It prints `llmenv prune is deprecated; use llmenv clean` first.
+
+### `doctor --gc`
+
+(deprecated in v3.13.0) Use [`llmenv clean`](#clean).
+`llmenv doctor --gc` keeps the sweeps it ran before, and prints `llmenv doctor --gc is deprecated; use llmenv clean`.

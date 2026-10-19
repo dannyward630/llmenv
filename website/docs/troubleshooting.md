@@ -4,7 +4,7 @@ Start with the two diagnostic commands, then drill into the specific failure
 below.
 
 ```bash
-llmenv doctor       # validate config + wiring; --gc to also clean the cache
+llmenv doctor       # validate config + wiring; run llmenv clean to clean the cache
 llmenv context      # show resolved scopes/tags/bundles for the current dir
 ```
 
@@ -73,11 +73,10 @@ Restart the agent to pick up the new config.
 ## The cache is growing / I want a clean slate
 
 ```bash
-llmenv prune --dry-run            # preview
-llmenv prune                      # remove old-version folders + orphaned *.tmp
-llmenv prune --older-than 14d     # remove current-version folders older than 14d
-llmenv prune --all                # nuke everything (re-materializes on next export)
-llmenv doctor --gc                # diagnostics + GC in one pass
+llmenv clean --dry-run            # preview every item a real run removes
+llmenv clean                      # old-version folders, orphaned *.tmp, and old state files
+llmenv clean --older-than 14d     # also current-version folders older than 14d
+llmenv clean --all                # nuke everything (re-materializes on next export)
 ```
 
 ## Claude Code says CLAUDE.md is large

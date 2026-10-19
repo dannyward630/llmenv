@@ -50,16 +50,19 @@ pub struct StaleSummary {
 ///
 /// A failure on one entry is recorded and the sweep goes on, so one unreadable entry does not
 /// block the others (#1372).
+///
+/// With `dry_run`, the report lists the same entries and nothing is removed (#2917).
 pub fn sweep(
     tmp_root: &Path,
     older_than: Duration,
     in_use: &[PathBuf],
+    dry_run: bool,
 ) -> anyhow::Result<GcReport> {
     let scan = scan(tmp_root, older_than, in_use)?;
     let mut report = GcReport {
         kept: scan.kept,
         failed: scan.failed,
-        ..GcReport::default()
+        ..GcReport::new(dry_run)
     };
     for stale in &scan.stale {
         if stale.is_dir {
@@ -179,15 +182,6 @@ fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
     scan.failed.push(path.to_path_buf());
 }
 
-/// Sweep `<state_dir>/tmp` with the retention `older_than` (#2814).
-///
-/// # Errors
-/// Fails when the in-use list cannot be read. See [`open_paths`].
-pub fn sweep_state_tmp(state_dir: &Path, older_than: Duration) -> anyhow::Result<GcReport> {
-    let in_use = open_paths()?;
-    sweep(&state_dir.join("tmp"), older_than, &in_use)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -213,6 +207,80 @@ mod tests {
         SystemTime::now() - 30 * DAY
     }
 
+    /// Every path under `root`, so a test can tell that a run changed nothing.
+    fn listing(root: &Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+        let mut out = std::collections::BTreeSet::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(listing(&path));
+            }
+            out.insert(path);
+        }
+        out
+    }
+
+    #[test]
+    fn a_dry_run_lists_exactly_what_a_real_run_removes() {
+        use proptest::prelude::*;
+        let entry = (any::<bool>(), any::<bool>(), any::<bool>());
+        proptest!(ProptestConfig::with_cases(24), |(entries in proptest::collection::vec(entry, 0..8))| {
+            let root = tempfile::tempdir().unwrap();
+            let resolved = fs::canonicalize(root.path()).unwrap();
+            let mut in_use = Vec::new();
+            for (i, (is_dir, is_old, held)) in entries.iter().enumerate() {
+                let path = root.path().join(format!("e{i}"));
+                if *is_dir {
+                    fs::create_dir(&path).unwrap();
+                    fs::write(path.join("f"), b"x").unwrap();
+                } else {
+                    fs::write(&path, b"x").unwrap();
+                }
+                if *is_old {
+                    age_tree(&path, old());
+                }
+                if *held {
+                    in_use.push(resolved.join(format!("e{i}")));
+                }
+            }
+            let before = listing(root.path());
+
+            let preview = sweep(root.path(), DAY * 7, &in_use, true).unwrap();
+            prop_assert_eq!(&listing(root.path()), &before);
+            let real = sweep(root.path(), DAY * 7, &in_use, false).unwrap();
+
+            let mut listed = preview.removed.clone();
+            listed.sort();
+            let mut removed = real.removed.clone();
+            removed.sort();
+            prop_assert_eq!(listed, removed);
+            prop_assert!(real.failed.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_dry_run_lists_the_old_entries_and_removes_none() {
+        let root = tempfile::tempdir().unwrap();
+        let old_dir = root.path().join("cargo-old");
+        fs::create_dir(&old_dir).unwrap();
+        fs::write(old_dir.join("artifact"), b"x").unwrap();
+        age_tree(&old_dir, old());
+        let old_file = root.path().join("scratch.txt");
+        fs::write(&old_file, b"y").unwrap();
+        age_tree(&old_file, old());
+        fs::create_dir(root.path().join("fresh")).unwrap();
+
+        let report = sweep(root.path(), DAY * 7, &[], true).unwrap();
+
+        let mut listed = report.removed.clone();
+        listed.sort();
+        let mut expected = vec![old_dir.clone(), old_file.clone()];
+        expected.sort();
+        assert_eq!(listed, expected);
+        assert_eq!(report.kept, 1);
+        assert!(old_dir.exists() && old_file.exists());
+    }
+
     #[test]
     fn an_old_directory_and_an_old_file_are_removed_and_a_fresh_one_is_kept() {
         let root = tempfile::tempdir().unwrap();
@@ -226,7 +294,7 @@ mod tests {
         let fresh = root.path().join("fresh");
         fs::create_dir(&fresh).unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
 
         assert_eq!(report.removed.len(), 2, "removed: {:?}", report.removed);
         assert_eq!(report.kept, 1);
@@ -244,7 +312,7 @@ mod tests {
         fs::write(&held, b"z").unwrap();
         age_tree(&busy, old());
 
-        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&held)).unwrap();
+        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&held), false).unwrap();
 
         assert!(
             report.removed.is_empty(),
@@ -269,7 +337,7 @@ mod tests {
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
 
         // lsof reports the resolved path, so the in-use list holds it, not the link path.
-        let report = sweep(&link, DAY * 7, std::slice::from_ref(&held)).unwrap();
+        let report = sweep(&link, DAY * 7, std::slice::from_ref(&held), false).unwrap();
 
         assert!(
             report.removed.is_empty(),
@@ -289,7 +357,7 @@ mod tests {
             .set_modified(SystemTime::now() + DAY)
             .unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
 
         assert!(report.removed.is_empty());
         assert!(future.exists());
@@ -308,7 +376,7 @@ mod tests {
         fs::write(&old_file, b"o").unwrap();
         age_tree(&old_file, old());
 
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
 
         // Restore the mode before any assertion, so the tempdir can be removed.
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
@@ -334,7 +402,7 @@ mod tests {
         let link = tmp.join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let report = sweep(&tmp, Duration::ZERO, &[]).unwrap();
+        let report = sweep(&tmp, Duration::ZERO, &[], false).unwrap();
 
         assert_eq!(
             report.removed,
