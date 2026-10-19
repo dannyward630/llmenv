@@ -555,7 +555,7 @@ impl AgentAdapter for OpencodeAdapter {
                         )
                     })?;
                     let source = crate::paths::bounded::asset_text(&path)?;
-                    let translated = translate_command_md(&source, name)?;
+                    let translated = translate_command_md(&source)?;
                     let out_name = format!("command/__plugin_{name}.md");
                     crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
                     plugin_skill_paths.push(PathBuf::from(&out_name));
@@ -579,7 +579,7 @@ impl AgentAdapter for OpencodeAdapter {
                         )
                     })?;
                     let source = crate::paths::bounded::asset_text(&path)?;
-                    let translated = translate_agent_md(&source, name)?;
+                    let translated = translate_agent_md(&source)?;
                     // opencode 2.x reads agents from `agents/`; a file in `command/` is a slash
                     // command (#2844).
                     let out_name = format!("agents/{name}.md");
@@ -902,15 +902,9 @@ impl AgentAdapter for OpencodeAdapter {
                 let source = crate::paths::bounded::asset_text(abs).map_err(|e| {
                     anyhow::anyhow!("failed to read bundle file '{}': {e:#}", rel.display())
                 })?;
-                let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "bundle command file '{}' has no valid file stem",
-                        rel.display(),
-                    )
-                })?;
                 // The bundle copy at `rel` is already in a folder opencode reads, so the
                 // translation replaces it and the command is not listed two times (#2844).
-                let translated = translate_command_md(&source, name)?;
+                let translated = translate_command_md(&source)?;
                 write_translated(out, rel, &translated)?;
                 owned.push(rel.clone());
             }
@@ -918,13 +912,7 @@ impl AgentAdapter for OpencodeAdapter {
                 let source = crate::paths::bounded::asset_text(abs).map_err(|e| {
                     anyhow::anyhow!("failed to read bundle file '{}': {e:#}", rel.display())
                 })?;
-                let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "bundle agent file '{}' has no valid file stem",
-                        rel.display(),
-                    )
-                })?;
-                let translated = translate_agent_md(&source, name)?;
+                let translated = translate_agent_md(&source)?;
                 if owned.contains(rel) {
                     eprintln!(
                         "warning: bundle agent '{}' replaces the plugin agent of the same name \
@@ -1093,6 +1081,7 @@ mod tests {
     mod agents;
     mod hook_table;
     mod permission_list;
+    mod props;
     mod server;
     use crate::adapter::skills::{arb_distinct_resolved_mcps, arb_string_map};
     use crate::mcp::resolve::ResolvedMcp;
@@ -2742,7 +2731,7 @@ mod tests {
     #[test]
     fn translate_command_md_keeps_description() {
         let src = "---\ndescription: My test command\nmodel: claude-sonnet-4-20250514\nallowed_tools: [Bash]\n---\n\nRun this command.";
-        let result = translate_command_md(src, "test").unwrap();
+        let result = translate_command_md(src).unwrap();
         assert!(result.contains("description: My test command"));
         assert!(!result.contains("model:"));
         assert!(!result.contains("allowed_tools:"));
@@ -2752,14 +2741,14 @@ mod tests {
     #[test]
     fn translate_command_md_no_frontmatter_passthrough() {
         let src = "Just raw markdown content.";
-        let result = translate_command_md(src, "test").unwrap();
+        let result = translate_command_md(src).unwrap();
         assert_eq!(result, "Just raw markdown content.");
     }
 
     #[test]
     fn translate_command_md_empty_description_still_works() {
         let src = "---\n---\n\nBody only.";
-        let result = translate_command_md(src, "test").unwrap();
+        let result = translate_command_md(src).unwrap();
         // No valid frontmatter fields → body returned as-is (no --- wrapper)
         assert_eq!(result, "Body only.");
     }
@@ -2767,7 +2756,7 @@ mod tests {
     #[test]
     fn translate_agent_md_keeps_model_description_tools() {
         let src = "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\ntools: [Bash, Read]\n---\n\nDo things autonomously.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("description: My agent"));
         assert!(result.contains("model: claude-sonnet-4-20250514"));
         assert!(result.contains("tools:"));
@@ -2778,7 +2767,7 @@ mod tests {
     #[test]
     fn translate_agent_md_adds_subagent_mode() {
         let src = "---\ndescription: Just description\n---\n\nBody.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("description: Just description"));
         assert!(result.contains("mode: subagent"));
     }
@@ -2786,7 +2775,7 @@ mod tests {
     #[test]
     fn translate_agent_md_no_frontmatter_passthrough() {
         let src = "Just raw content.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("mode: subagent"));
         assert!(result.contains("Just raw content."));
     }
@@ -2794,7 +2783,7 @@ mod tests {
     #[test]
     fn translate_agent_md_accepts_allowed_tools() {
         let src = "---\ndescription: Agent with allowed tools\nallowed_tools: [Bash]\n---\n\nBody.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         assert!(result.contains("allowed_tools:"));
         assert!(result.contains("mode: subagent"));
     }
@@ -2802,7 +2791,7 @@ mod tests {
     #[test]
     fn translate_agent_md_drops_unsupported_keys() {
         let src = "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\nomitClaudeMd: true\neffort: high\nmaxTurns: 5\n---\n\nBody.";
-        let result = translate_agent_md(src, "test").unwrap();
+        let result = translate_agent_md(src).unwrap();
         // Supported keys should be present
         assert!(result.contains("description: My agent"));
         assert!(result.contains("model: claude-sonnet-4-20250514"));
@@ -3707,7 +3696,7 @@ mod tests {
             } else {
                 "---\ndescription: d\n---\nbody\n"
             };
-            let out = translate_agent_md(source, "n").unwrap();
+            let out = translate_agent_md(source).unwrap();
             let (fm, _) = split_frontmatter(&out);
             let fm = fm.unwrap();
             prop_assert_eq!(
@@ -3725,8 +3714,8 @@ mod tests {
             } else {
                 "---\ndescription: d\n---\nbody\n"
             };
-            let agent_once = translate_agent_md(agent_source, "n").unwrap();
-            let agent_twice = translate_agent_md(&agent_once, "n").unwrap();
+            let agent_once = translate_agent_md(agent_source).unwrap();
+            let agent_twice = translate_agent_md(&agent_once).unwrap();
             prop_assert_eq!(agent_once, agent_twice);
 
             let command_source = if has_extra {
@@ -3734,8 +3723,8 @@ mod tests {
             } else {
                 "no frontmatter here\n"
             };
-            let command_once = translate_command_md(command_source, "n").unwrap();
-            let command_twice = translate_command_md(&command_once, "n").unwrap();
+            let command_once = translate_command_md(command_source).unwrap();
+            let command_twice = translate_command_md(&command_once).unwrap();
             prop_assert_eq!(command_once, command_twice);
         }
 

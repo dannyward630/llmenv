@@ -39,7 +39,7 @@ pub(super) fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &st
 /// Keeps only `description` from the frontmatter. Drops `model` and
 /// `allowed_tools` with a warning — those are Claude-specific concepts that
 /// opencode does not support for commands.
-pub(super) fn translate_command_md(source: &str, _name: &str) -> anyhow::Result<String> {
+pub(super) fn translate_command_md(source: &str) -> anyhow::Result<String> {
     let (fm, body) = split_frontmatter(source);
     let mut new_fm = serde_yaml::Mapping::new();
 
@@ -93,20 +93,15 @@ pub(super) fn dropped_agent_keys(map: &serde_yaml::Mapping) -> Vec<String> {
 ///
 /// Keeps `description`, `model`, `tools` / `allowed_tools`, and adds
 /// `mode: subagent` so opencode runs the agent as a sub-process.
-pub(super) fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
+pub(super) fn translate_agent_md(source: &str) -> anyhow::Result<String> {
     let (fm, body) = split_frontmatter(source);
     let mut new_fm = serde_yaml::Mapping::new();
 
     if let Some(serde_yaml::Value::Mapping(ref map)) = fm {
-        let keep: &[&str] = &["description", "model"];
-        for key in keep {
+        // `name` is the one key that is not copied: opencode takes it from the file name.
+        for key in OPENCODE_AGENT_KEYS.iter().filter(|k| **k != "name") {
             if let Some(val) = map.get(serde_yaml::Value::String((*key).into())) {
                 new_fm.insert((*key).into(), val.clone());
-            }
-        }
-        for tool_key in &["tools", "allowed_tools"] {
-            if let Some(val) = map.get(serde_yaml::Value::String((*tool_key).into())) {
-                new_fm.insert((*tool_key).into(), val.clone());
             }
         }
 

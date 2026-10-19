@@ -111,6 +111,13 @@ pub(super) fn render(
                     !pattern.is_empty(),
                     "native_permissions.opencode.{action}: rule {s:?} has an empty pattern '()'"
                 );
+                // Text after the closing `)` would be dropped, so the rule would cover less or
+                // more than the user wrote.
+                anyhow::ensure!(
+                    s[end + 1..].trim().is_empty(),
+                    "native_permissions.opencode.{action}: rule {s:?} has text after its closing \
+                     ')'. Write the rule as tool(pattern)."
+                );
                 Ok((tool, pattern.to_string()))
             }
             _ => anyhow::bail!(
