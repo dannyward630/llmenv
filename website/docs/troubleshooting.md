@@ -4,7 +4,7 @@ Start with the two diagnostic commands, then drill into the specific failure
 below.
 
 ```bash
-llmenv doctor       # validate config + wiring; --gc to also clean the cache
+llmenv doctor       # validate config + wiring; run llmenv clean to clean the cache
 llmenv context      # show resolved scopes/tags/bundles for the current dir
 ```
 

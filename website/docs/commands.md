@@ -432,14 +432,22 @@ Claude Code removes them itself after `cleanupPeriodDays` (set it under `native.
 Flags:
 
 - `--all` — remove **every** cache folder unconditionally (the next `export` re-materializes).
-- `--older-than DUR` — remove only current-version cache folders older than `DUR` (e.g. `14d`, `1w`).
+- `--older-than DUR` — in the cache-folder step, remove only current-version cache folders older than `DUR`.
+  Examples: `14d`, `1w`.
+  The age-based sweeps still use `cache_retention_hours`.
   `--all` and `--older-than` cannot be used together.
-- `--dry-run` — list every item that a real run removes, and remove nothing.
+  A bad value stops the command before anything is removed.
+- `--dry-run` — list every item that a real run tries to remove, and remove nothing.
   This covers the cache folders and every age-based sweep.
+  A real run can still fail on an item that the dry run lists, for example a folder without write access.
 - `--plugin-cache` — also remove the shared plugin cache folder of each adapter.
 
-`clean` exits non-zero when a cache folder or a plugin cache entry could not be removed.
-The failures are printed above the summary.
+`clean` exits non-zero when a cache folder, a plugin cache entry, or a sweep item could not be removed.
+It also exits non-zero when an error made it skip a sweep.
+Examples: `lsof` cannot run, or a `bundle.yaml` cannot be read.
+The failures are printed above the summary, and every other removal still runs first.
+The codebase-memory sweep reads the `index_path` of the top-level config and of every bundle.
+A bundle counts whether or not it is active in the current folder.
 
 ## `read-once`
 
