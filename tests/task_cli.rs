@@ -2795,7 +2795,7 @@ fn file_flags_accept_a_file_at_the_limit_and_refuse_one_byte_over() {
         .arg(&over)
         .assert()
         .failure()
-        .stderr(predicates::str::contains("larger than").and(predicates::str::contains("65536")));
+        .stderr(predicates::str::contains("more than 65536 bytes"));
 }
 
 #[test]
