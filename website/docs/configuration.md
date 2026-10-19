@@ -1677,6 +1677,7 @@ than being treated as "no credential stored" (added in v3.8.0).
 Each keychain call has a deadline (added in v3.13.0).
 A read waits at most 120 s, because macOS can ask you to allow the access.
 At a terminal, llmenv prints a line before the read, so a waiting prompt is visible.
+A write of the credential also waits at most 120 s, for the same reason.
 The delete in `llmenv clean` waits at most 10 s, because it shows no prompt.
 A call past its deadline fails with an error that names the keychain item and says to unlock the keychain.
 

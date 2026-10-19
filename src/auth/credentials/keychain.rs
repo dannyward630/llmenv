@@ -15,6 +15,37 @@ const FORGET_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The longest the Security framework write may run. Like the read, it can wait on the macOS
+/// keychain prompt, so the user needs time to answer it (#2892).
+#[cfg(target_os = "macos")]
+const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The message for a keychain call that gave no answer within `timeout`.
+#[cfg(any(target_os = "macos", test))]
+fn timeout_error(operation: &str, service: &str, timeout: Duration) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`security {operation}` for keychain item {service} gave no answer within {} s. Fix: \
+         unlock the login keychain (`security unlock-keychain`), answer any macOS keychain \
+         prompt, then run the command again.",
+        timeout.as_secs()
+    )
+}
+
+/// Run `call` on a worker thread for at most `timeout`. A call past the deadline keeps its thread,
+/// because the Security framework gives no way to stop it, and the caller gets the timeout error.
+#[cfg(any(target_os = "macos", test))]
+fn with_deadline<T: Send + 'static>(
+    timeout: Duration,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // The receiver is gone after a timeout, so a late answer has no reader.
+        let _ = tx.send(call());
+    });
+    rx.recv_timeout(timeout).ok()
+}
+
 /// Run one `security` call with a deadline. A timeout names the operation, the keychain item, and
 /// the fix, because a locked keychain blocks the call with no output.
 #[cfg(any(target_os = "macos", test))]
@@ -26,12 +57,7 @@ fn run_security(
 ) -> anyhow::Result<std::process::Output> {
     crate::process::run_with_timeout(cmd, timeout).map_err(|e| {
         if e.kind() == std::io::ErrorKind::TimedOut {
-            anyhow::anyhow!(
-                "`security {operation}` for keychain item {service} gave no answer within {} s. \
-                 Fix: unlock the login keychain (`security unlock-keychain`), answer any macOS \
-                 keychain prompt, then run the command again.",
-                timeout.as_secs()
-            )
+            timeout_error(operation, service, timeout)
         } else {
             anyhow::anyhow!("running `security {operation}` for keychain item {service}: {e}")
         }
@@ -142,6 +168,11 @@ pub(super) fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<super::C
             "llmenv: reading keychain item {service}. If macOS asks for keychain access, answer \
              the prompt."
         );
+    } else {
+        tracing::info!(
+            "reading keychain item {service}, for at most {} s",
+            READ_TIMEOUT.as_secs()
+        );
     }
     let out = run_security(cmd, READ_TIMEOUT, "find-generic-password", &service)?;
     if !out.status.success() {
@@ -191,8 +222,14 @@ pub(super) fn keychain_write(config_dir: &Path, creds: &super::Credentials) -> a
     let service = super::keychain_service(config_dir);
     let account = keychain_account()?;
     let blob = creds.to_blob()?;
-    security_framework::passwords::set_generic_password(&service, &account, blob.as_bytes())
-        .map_err(|e| anyhow::anyhow!("writing keychain item for service {service}: {e}"))
+    // A locked keychain blocks the write as it blocks the read, and export runs this (#2892).
+    let item = service.clone();
+    let written = with_deadline(WRITE_TIMEOUT, move || {
+        security_framework::passwords::set_generic_password(&item, &account, blob.as_bytes())
+            .map_err(|e| e.to_string())
+    })
+    .ok_or_else(|| timeout_error("add-generic-password", &service, WRITE_TIMEOUT))?;
+    written.map_err(|e| anyhow::anyhow!("writing keychain item for service {service}: {e}"))
 }
 
 #[cfg(test)]
@@ -218,6 +255,16 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("Fix: unlock the login keychain"), "{err}");
+    }
+
+    #[test]
+    fn a_call_past_its_deadline_gives_no_answer_and_a_quick_one_does() {
+        let slow = with_deadline(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(5));
+            1
+        });
+        assert_eq!(slow, None);
+        assert_eq!(with_deadline(Duration::from_secs(5), || 2), Some(2));
     }
 
     #[test]
