@@ -981,6 +981,8 @@ trackers share this one setting:
   already had something to say about the same call — the two aren't
   mutually exclusive, since a model can get stuck retrying a call the other
   feature already denied or warned about.
+  (changed in v3.13.0) Each subagent has its own counter, so parallel
+  subagents that each make the same call one time get no advisory.
 - **Task-tracker Stop reminder**: if `features.task_tracker` is on and the
   task tracker's "you still have a task in progress" reminder fires
   identically `threshold` times in a row, this appends a pointer to
