@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 mod clean;
+mod config_guard;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
 mod plugin_payloads;
@@ -888,7 +889,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(Command::ConfigGuard { engine }) => {
             tracing::debug!(engine, "config-guard invoked by engine");
             warn_if_unknown_engine(&engine);
-            run_config_guard();
+            config_guard::run(&engine);
         }
         Some(Command::Throttle { event }) => {
             crate::throttle::run_throttle_hook(&event);
@@ -2770,138 +2771,6 @@ fn run_config_context() {
     }
 
     emit(&text);
-}
-
-/// Read `CLAUDE_CONFIG_DIR` for the config guard. Unset means the default cache
-/// root is used. A value that is not Unicode is an error, because the guard would
-/// otherwise read a different cache from the one Claude Code started from (#2559).
-fn config_dir_from_var(
-    value: Result<String, std::env::VarError>,
-) -> Result<Option<String>, String> {
-    match value {
-        Ok(dir) => Ok(Some(dir)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(
-            "CLAUDE_CONFIG_DIR is not valid UTF-8, so the guard did not run. Export the \
-             directory again as a plain path."
-                .to_string(),
-        ),
-    }
-}
-
-/// `llmenv config-guard`: warn on PreToolUse Write/Edit to managed cache paths (#289).
-///
-/// Reads the Claude Code hook payload from stdin. If the target path is inside the
-/// llmenv cache directory, prints a redirection hint. Always exits 0 (fail-soft).
-/// The default cache root, `~/.cache/llmenv`. On failure it prints that the guard is skipped and
-/// returns `None`. Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
-fn config_guard_default_cache() -> Option<PathBuf> {
-    match paths::expand_tilde("~/.cache/llmenv") {
-        Ok(dir) => Some(PathBuf::from(dir)),
-        Err(e) => {
-            println!("\u{26a0} llmenv config-guard skipped: {e:#}");
-            None
-        }
-    }
-}
-
-fn run_config_guard() {
-    use std::io::Read;
-
-    let mut stdin_buf = String::new();
-    // Fix C: surface stdin read failures via stderr instead of silently discarding
-    // them — the guard becomes a no-op on failure, but the operator can see why.
-    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
-        eprintln!("llmenv config-guard: failed to read stdin: {e}");
-        return;
-    }
-
-    // Locate the `claude-code` adapter dir in the CLAUDE_CONFIG_DIR path
-    // and take its parent as cache_root. This works for all hashing modes:
-    //   Normal  → <root>/claude-code/<version>/<shape>  (3 levels below root)
-    //   Loose   → <root>/claude-code/<shape>            (2 levels below root)
-    //   Strict  → <root>/claude-code/<VERSION>-<hash>   (2 levels below root)
-    // Walking up to find "claude-code" and taking its parent is invariant to depth.
-    let cache_root = match config_dir_from_var(std::env::var("CLAUDE_CONFIG_DIR")) {
-        Ok(None) => {
-            // Expected when not running inside a hook.
-            let Some(default_cache) = config_guard_default_cache() else {
-                return;
-            };
-            default_cache
-        }
-        Err(msg) => {
-            // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
-            println!("\u{26a0} llmenv config-guard: {msg}");
-            return;
-        }
-        Ok(Some(dir)) => {
-            let path = PathBuf::from(&dir);
-            match path
-                .ancestors()
-                .skip(1)
-                .find(|p| p.file_name().map(|n| n == "claude-code").unwrap_or(false))
-                .and_then(|p| p.parent().map(PathBuf::from))
-            {
-                Some(root) => root,
-                None => {
-                    eprintln!(
-                        "llmenv config-guard: could not locate cache root from \
-                         CLAUDE_CONFIG_DIR={dir}; falling back to default"
-                    );
-                    let Some(default_cache) = config_guard_default_cache() else {
-                        return;
-                    };
-                    default_cache
-                }
-            }
-        }
-    };
-
-    let Some(path_str) = extract_hook_file_path(&stdin_buf) else {
-        return;
-    };
-
-    let expanded = match paths::expand_tilde(&path_str) {
-        Ok(path) => path,
-        Err(e) => {
-            // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
-            println!("\u{26a0} llmenv config-guard skipped: {e:#}");
-            return;
-        }
-    };
-    if crate::util::is_within(&cache_root, &expanded) {
-        let config_path = paths::config_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "~/.config/llmenv/config.yaml".to_string());
-        println!(
-            "\u{26a0} llmenv: {path_str} is inside the managed cache and will be overwritten \
-             on the next config regeneration.\n\
-             Edit your source config instead: {config_path}\n\
-             Then run: llmenv regenerate"
-        );
-    }
-}
-
-/// Extract `tool_input.file_path` from a raw hook payload JSON string.
-///
-/// Returns `None` on parse failure (logged to stderr unless the buffer is
-/// empty, which is expected outside a hook invocation) or when the field is
-/// missing/non-string.
-fn extract_hook_file_path(stdin_buf: &str) -> Option<String> {
-    match serde_json::from_str::<serde_json::Value>(stdin_buf) {
-        Ok(v) => v
-            .get("tool_input")
-            .and_then(|ti| ti.get("file_path"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        Err(e) => {
-            if !stdin_buf.trim().is_empty() {
-                eprintln!("llmenv config-guard: failed to parse hook payload: {e}");
-            }
-            None
-        }
-    }
 }
 
 /// Sync one marketplace and fill `rm.install_location` + `rm.head`.
@@ -5048,8 +4917,6 @@ fn run_completions_install(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
 
-    use super::config_dir_from_var;
-
     #[test]
     fn sync_plugin_payloads_drops_a_plugin_missing_from_its_manifest() {
         // A missing install path reads as first-party, so the adapter would serve the plugin
@@ -5074,30 +4941,6 @@ mod tests {
             kept.is_empty(),
             "a plugin absent from its manifest must be dropped: {kept:?}"
         );
-    }
-
-    #[test]
-    fn config_dir_var_unset_selects_the_default_root() {
-        assert_eq!(
-            config_dir_from_var(Err(std::env::VarError::NotPresent)),
-            Ok(None)
-        );
-    }
-
-    #[test]
-    fn config_dir_var_set_is_used_as_given() {
-        let dir = "/opt/claude-config".to_string();
-        assert_eq!(config_dir_from_var(Ok(dir.clone())), Ok(Some(dir)));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn config_dir_var_non_unicode_names_the_variable() {
-        use std::os::unix::ffi::OsStringExt as _;
-        let raw = std::ffi::OsString::from_vec(vec![0xff]);
-        let msg = config_dir_from_var(Err(std::env::VarError::NotUnicode(raw)))
-            .expect_err("a non-UTF-8 config dir must not select the default root");
-        assert!(msg.contains("CLAUDE_CONFIG_DIR"), "{msg}");
     }
 
     #[test]
@@ -6731,137 +6574,6 @@ mod tests {
             out[0].install_location.is_some(),
             "install_location must be filled in for injected built-in (was None before fix)"
         );
-    }
-}
-
-#[cfg(test)]
-mod config_guard_tests {
-    use super::*;
-    use proptest::prelude::*;
-
-    #[cfg(unix)]
-    #[test]
-    #[expect(clippy::unwrap_used, reason = "test code")]
-    fn create_refusing_symlink_does_not_write_through_a_marker_link() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let target = dir.path().join("victim");
-        let marker = dir.path().join(".transcripts-migrated");
-        std::fs::write(&target, b"keep").unwrap();
-        std::os::unix::fs::symlink(&target, &marker).unwrap();
-        assert!(
-            crate::paths::create_refusing_symlink(&marker).is_err(),
-            "a symlink marker must be refused"
-        );
-        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
-    }
-
-    #[test]
-    fn test_is_within_cache_basic() {
-        let cache_root = std::path::Path::new("/home/user/.cache/llmenv");
-        assert!(crate::util::is_within(
-            cache_root,
-            "/home/user/.cache/llmenv/config"
-        ));
-        assert!(crate::util::is_within(
-            cache_root,
-            "/home/user/.cache/llmenv/data/file.txt"
-        ));
-        assert!(!crate::util::is_within(
-            cache_root,
-            "/home/user/.config/llmenv/config.yaml"
-        ));
-        assert!(!crate::util::is_within(
-            cache_root,
-            "/home/user/.cache/llmenv-adjacent/file"
-        ));
-    }
-
-    #[test]
-    fn test_is_within_cache_empty_path() {
-        let cache_root = std::path::Path::new("/cache");
-        assert!(!crate::util::is_within(cache_root, ""));
-    }
-
-    #[test]
-    fn test_is_within_cache_dot_dot_escape() {
-        let cache_root = std::path::Path::new("/cache/llmenv");
-        // After normalization, /cache/llmenv/../../../etc/passwd → /etc/passwd,
-        // which does not start with /cache/llmenv.
-        let escaped = "/cache/llmenv/../../../etc/passwd";
-        assert!(!crate::util::is_within(cache_root, escaped));
-    }
-
-    #[test]
-    fn extract_hook_file_path_from_edit_fixture() {
-        let raw = crate::test_fixtures::load_hook_payload_raw("edit.json");
-        assert_eq!(
-            extract_hook_file_path(&raw).as_deref(),
-            Some("/path/to/file.rs")
-        );
-    }
-
-    #[test]
-    fn extract_hook_file_path_from_write_fixture() {
-        let raw = crate::test_fixtures::load_hook_payload_raw("write.json");
-        assert_eq!(
-            extract_hook_file_path(&raw).as_deref(),
-            Some("/path/to/file.rs")
-        );
-    }
-
-    #[test]
-    fn extract_hook_file_path_from_bash_fixture_is_none() {
-        // Bash's tool_input has no file_path field.
-        let raw = crate::test_fixtures::load_hook_payload_raw("bash.json");
-        assert_eq!(extract_hook_file_path(&raw), None);
-    }
-
-    #[test]
-    fn extract_hook_file_path_missing_tool_input_is_none() {
-        assert_eq!(extract_hook_file_path(r#"{"tool_name": "SomeTool"}"#), None);
-    }
-
-    #[test]
-    fn extract_hook_file_path_from_malformed_json_is_none() {
-        assert_eq!(extract_hook_file_path("not valid json{"), None);
-    }
-
-    #[test]
-    fn extract_hook_file_path_from_empty_stdin_is_none() {
-        assert_eq!(extract_hook_file_path(""), None);
-    }
-
-    // Property-based tests
-    proptest! {
-        #[test]
-        fn prop_within_cache_reflexive(ref cache_root in r"/[a-z/]+") {
-            let path = std::path::Path::new(cache_root);
-            prop_assert!(crate::util::is_within(path, cache_root));
-        }
-
-        #[test]
-        fn prop_within_cache_child_paths(ref cache_root in r"/[a-z/]+", ref suffix in r"[a-z0-9]+") {
-            let path = std::path::Path::new(cache_root);
-            let child = format!("{}/{}", cache_root, suffix);
-            prop_assert!(crate::util::is_within(path, &child));
-        }
-
-        #[test]
-        fn prop_sibling_paths_not_within(ref cache_root in r"/cache/[a-z]+") {
-            let path = std::path::Path::new(cache_root);
-            // Adjacent directory with similar prefix should not match
-            if let Some(base) = cache_root.rfind('/') {
-                let sibling = format!("{}{}", &cache_root[..=base], "other");
-                prop_assert!(!crate::util::is_within(path, &sibling));
-            }
-        }
-
-        #[test]
-        fn prop_no_panic_on_arbitrary_strings(ref cache_root in r"/[a-z/]*", ref path_str in ".*") {
-            let path = std::path::Path::new(cache_root);
-            // Should never panic, even on malformed paths
-            let _ = crate::util::is_within(path, path_str);
-        }
     }
 }
 
