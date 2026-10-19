@@ -391,6 +391,10 @@ Inspect ICM memory state for the active scope.
   ICM's recall output has no record age or type, so llmenv cannot apply the per-type durations.
   Remove `retention` from that entry to use the importance-based prune.
   A `retention` on an entry that is not active does not block the prune.
+  (changed in v3.13.0) It keeps a memory whose importance it does not know, and a record with no importance or weight.
+  Its summary counts both.
+  The `auto_prune` pass prints no summary, because the shell evaluates the output of `llmenv export`.
+  It prints a warning when it keeps such records, or when two active entries stop it from running.
 
 ## `clean`
 

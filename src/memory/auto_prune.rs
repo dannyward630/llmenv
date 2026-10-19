@@ -8,13 +8,41 @@ fn wants_auto_prune(
     memory: &[crate::config::Memory],
     active_tags: &std::collections::BTreeSet<String>,
 ) -> bool {
+    single_active(memory, active_tags).is_some_and(|entry| entry.auto_prune)
+}
+
+/// The one active entry of `memory`, or `None` with zero or two or more: with two, the memory
+/// server does not resolve, so no entry of them applies.
+pub(super) fn single_active<'a>(
+    memory: &'a [crate::config::Memory],
+    active_tags: &std::collections::BTreeSet<String>,
+) -> Option<&'a crate::config::Memory> {
     let mut active = memory
         .iter()
         .filter(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags));
     match (active.next(), active.next()) {
-        (Some(entry), None) => entry.auto_prune,
-        _ => false,
+        (Some(entry), None) => Some(entry),
+        _ => None,
     }
+}
+
+/// The warning for an `auto_prune: true` that cannot run because more than one memory entry is
+/// active, or `None`.
+fn ambiguous_notice(
+    memory: &[crate::config::Memory],
+    active_tags: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let active: Vec<_> = memory
+        .iter()
+        .filter(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags))
+        .collect();
+    (active.len() > 1 && active.iter().any(|m| m.auto_prune)).then(|| {
+        format!(
+            "warning: auto_prune did not run: {} memory entries are active, so no memory server \
+             is picked. Fix: change the `when` tags so that one entry is active",
+            active.len()
+        )
+    })
 }
 
 /// Run an automatic prune pass during materialize if the active memory entry has
@@ -36,6 +64,10 @@ pub(crate) fn auto_prune_if_enabled(
             return;
         }
     };
+    if let Some(warning) = ambiguous_notice(&merged.memory, &active.tags) {
+        eprintln!("{warning}");
+        return;
+    }
     if !wants_auto_prune(&merged.memory, &active.tags) {
         return;
     }
@@ -48,6 +80,9 @@ pub(crate) fn auto_prune_if_enabled(
                 result.forgotten,
                 result.total
             );
+            if let Some(kept) = result.kept_unplaced() {
+                eprintln!("warning: auto_prune kept {kept}");
+            }
         }
         // `tracing` warnings are off at the default log level, and the user must learn that
         // the configured prune did not run.
@@ -174,5 +209,21 @@ mod tests {
                 proptest::prop_assert_eq!(wants_auto_prune(&memory, &active), expected);
             }
         }
+    }
+
+    #[test]
+    fn two_active_entries_name_the_auto_prune_that_did_not_run() {
+        let entry = |auto_prune: bool| -> crate::config::Memory {
+            serde_json::from_value(serde_json::json!({
+                "when": ["t"], "server_host": "h", "port": 9092, "auto_prune": auto_prune
+            }))
+            .unwrap()
+        };
+        let tags = std::collections::BTreeSet::from(["t".to_string()]);
+        let notice = ambiguous_notice(&[entry(false), entry(true)], &tags).unwrap();
+        assert!(notice.contains("2 memory entries are active"), "{notice}");
+        assert_eq!(ambiguous_notice(&[entry(false), entry(false)], &tags), None);
+        assert_eq!(ambiguous_notice(&[entry(true)], &tags), None);
+        assert!(single_active(&[entry(true), entry(true)], &tags).is_none());
     }
 }

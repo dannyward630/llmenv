@@ -31,7 +31,8 @@ use crate::hook_run::mcp_client::McpHttpClient;
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
 mod records;
-use records::{Importance, MemoryRecord, parse_recall_output};
+mod report;
+use records::{Importance, MemoryRecord, count_headers, parse_recall_output};
 
 /// Result of a single prune run.
 #[derive(Debug, Default, PartialEq)]
@@ -46,6 +47,12 @@ pub struct PruneResult {
     medium: usize,
     /// Low-importance records (prune candidates).
     low: usize,
+    /// Records with an importance that prune does not know (always kept).
+    unknown: usize,
+    /// Record headers with no importance or weight, which prune cannot read (kept).
+    unread: usize,
+    /// Records that the pass forgets, or would forget in a dry run.
+    candidates: usize,
     /// Number of records actually forgotten (non-dry-run only).
     pub(crate) forgotten: usize,
     /// Whether this was a dry run (no forget calls made).
@@ -65,9 +72,7 @@ fn ensure_retention_unset(
     memory: &[crate::config::Memory],
     active_tags: &std::collections::BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    let configured = memory
-        .iter()
-        .find(|m| crate::mcp::resolve::memory_is_tag_active(m, active_tags))
+    let configured = super::auto_prune::single_active(memory, active_tags)
         .is_some_and(|m| m.retention.is_some());
     if configured {
         anyhow::bail!(
@@ -125,6 +130,23 @@ fn recall_args(project: Option<&str>) -> anyhow::Result<serde_json::Value> {
 /// The most records one prune pass reads.
 const RECALL_LIMIT: u32 = 100;
 
+/// Forget each candidate, and give the count that ICM forgot. A failed forget is printed to
+/// stderr and the rest still run.
+fn forget_all(client: &McpHttpClient, candidates: &[&MemoryRecord]) -> usize {
+    let mut forgotten = 0;
+    for candidate in candidates {
+        match call_tool_blocking(
+            client.clone(),
+            "icm_memory_forget",
+            serde_json::json!({ "id": candidate.id }),
+        ) {
+            Ok(_) => forgotten += 1,
+            Err(e) => eprintln!("  Failed to forget {}: {e}", candidate.id),
+        }
+    }
+    forgotten
+}
+
 /// Run the prune pass: query ICM, evaluate candidates, forget if not dry-run.
 ///
 /// `dry_run` when true prints what would be pruned without making forget
@@ -139,11 +161,14 @@ pub(crate) fn run(dry_run: bool) -> anyhow::Result<PruneResult> {
         &crate::scope::matcher::Env::detect_for_config(&config)?,
     );
     let merged = crate::hook_run::merged_memory(&config, config_dir, &active)?;
-    run_with(&config, config_dir, &active, &merged.memory, dry_run)
+    let result = run_with(&config, config_dir, &active, &merged.memory, dry_run)?;
+    report::print(&result);
+    Ok(result)
 }
 
 /// [`run`] for scopes and memory entries that the caller already resolved, so the caller's
-/// `auto_prune` check and the pruned backend come from the same entry (#2947).
+/// `auto_prune` check and the pruned backend come from the same entry (#2947). It prints
+/// nothing to stdout: `llmenv export` runs it, and the shell evaluates that stdout.
 ///
 /// # Errors
 /// The active entry sets `retention`, the memory server cannot be reached, or a call fails.
@@ -169,90 +194,27 @@ pub(super) fn run_with(
     let records = parse_recall_output(&output);
     let mut result = PruneResult {
         total: records.len(),
+        unread: count_headers(&output).saturating_sub(records.len()),
         dry_run,
         ..Default::default()
     };
-
     for rec in &records {
         match rec.importance {
             Importance::Critical => result.critical += 1,
             Importance::High => result.high += 1,
             Importance::Medium => result.medium += 1,
             Importance::Low => result.low += 1,
+            Importance::Unknown => result.unknown += 1,
         }
     }
-
-    // Identify prune candidates
     let candidates: Vec<&MemoryRecord> = records
         .iter()
         .filter(|r| r.importance.should_prune())
         .collect();
-
-    if dry_run {
-        println!("Prune dry-run — no changes made.");
-        println!("  Total records:       {}", result.total);
-        println!("  critical (kept):     {}", result.critical);
-        println!("  high (kept):         {}", result.high);
-        println!("  medium (candidate):  {}", result.medium);
-        println!("  low (candidate):     {}", result.low);
-        println!(
-            "  Would prune:         {} record(s) (low + medium importance)",
-            candidates.len()
-        );
-        if result.total > 0 {
-            println!(
-                "  Would keep:          {} record(s) (critical + high importance)",
-                result.critical + result.high
-            );
-        }
-        let pct = if result.total > 0 {
-            candidates.len() as f64 / result.total as f64 * 100.0
-        } else {
-            0.0
-        };
-        if candidates.is_empty() {
-            println!("  No prune candidates found.");
-        } else {
-            println!("  ({pct:.1}% of records are prune candidates)");
-            println!();
-            println!("  ponytail: age-based TTL unavailable because ICM's MCP output");
-            println!("  omits `created_at` timestamps. This pass uses importance as a");
-            println!("  heuristic: low and medium importance memories are candidates;");
-            println!("  high and critical are always kept. Add date-based pruning once");
-            println!("  ICM exposes timestamps through the MCP interface.");
-        }
-    } else {
-        let forget_client = client;
-        let mut forgotten = 0;
-        for candidate in &candidates {
-            match call_tool_blocking(
-                forget_client.clone(),
-                "icm_memory_forget",
-                serde_json::json!({ "id": candidate.id }),
-            ) {
-                Ok(_) => forgotten += 1,
-                Err(e) => {
-                    eprintln!("  Failed to forget {}: {e}", candidate.id);
-                }
-            }
-        }
-        result.forgotten = forgotten;
-
-        println!("Prune complete.");
-        println!("  Total records:       {}", result.total);
-        println!("  critical (kept):     {}", result.critical);
-        println!("  high (kept):         {}", result.high);
-        println!("  medium (pruned):     {}", result.medium);
-        println!("  low (pruned):        {}", result.low);
-        println!("  Forgot:              {forgotten} record(s)");
-        if forgotten != candidates.len() {
-            println!(
-                "  Skipped:             {} record(s) (forget errored)",
-                candidates.len() - forgotten
-            );
-        }
+    result.candidates = candidates.len();
+    if !dry_run {
+        result.forgotten = forget_all(&client, &candidates);
     }
-
     Ok(result)
 }
 
@@ -326,6 +288,17 @@ mod tests {
         assert_eq!(records[0].importance, Importance::Low);
         assert_eq!(records[1].id, "id-2");
         assert_eq!(records[1].importance, Importance::Critical);
+    }
+
+    #[test]
+    fn an_unknown_importance_is_kept_and_a_record_without_weight_is_unread() {
+        let text =
+            "--- a ---\n  importance: Critical\n  weight: 0.5\n--- b ---\n  importance: low\n";
+        let records = parse_recall_output(text);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].importance, Importance::Unknown);
+        assert!(!Importance::Unknown.should_prune());
+        assert_eq!(count_headers(text), 2);
     }
 
     #[test]

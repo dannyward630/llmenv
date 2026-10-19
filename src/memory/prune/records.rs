@@ -14,6 +14,9 @@ pub(super) enum Importance {
     High,
     Medium,
     Low,
+    /// A level that ICM may add later. Prune forgets for good, so a record it cannot place is
+    /// kept.
+    Unknown,
 }
 
 impl Importance {
@@ -22,13 +25,23 @@ impl Importance {
             "critical" => Self::Critical,
             "high" => Self::High,
             "medium" => Self::Medium,
-            _ => Self::Low,
+            "low" => Self::Low,
+            _ => Self::Unknown,
         }
     }
 
     pub(super) fn should_prune(&self) -> bool {
         matches!(self, Self::Medium | Self::Low)
     }
+}
+
+/// The record headers in `text`, read or not. A header with no importance or weight is not a
+/// record that [`parse_recall_output`] returns, so prune reports the difference.
+pub(super) fn count_headers(text: &str) -> usize {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("--- "))
+        .filter(|rest| rest.ends_with(" ---"))
+        .count()
 }
 
 /// Parse the non-compact `icm_memory_recall` output into structured records.
