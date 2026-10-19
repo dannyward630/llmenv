@@ -144,6 +144,12 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_builtin_cd_gets_the_advisory() {
+        assert!(command_ends_with_cd("ls && builtin cd /tmp"));
+        assert!(command_ends_with_cd("command cd /tmp"));
+    }
+
+    #[test]
     fn a_trailing_cd_in_a_subshell_gets_no_advisory() {
         assert!(!command_ends_with_cd("ls && (cd /tmp)"));
         assert!(!command_ends_with_cd("(cd /tmp)"));
