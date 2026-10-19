@@ -16,8 +16,9 @@ const USER_HOOK_TIMEOUT_MS: u64 = 30_000;
 /// The longest that one built-in `llmenv` hook may run. Each one reads local state only.
 const BUILTIN_HOOK_TIMEOUT_MS: u64 = 5_000;
 
-/// The tools whose edits the config guard checks, as the Claude Code adapter matches them.
-const CONFIG_GUARD_MATCHER: &str = "Write|Edit|MultiEdit";
+/// The tools whose edits the config guard checks: the Claude Code file tools, and opencode's
+/// `patch`, which keeps its own name and writes files through a patch text.
+const CONFIG_GUARD_MATCHER: &str = "Write|Edit|MultiEdit|patch";
 
 /// The neutral tools that `hook-run pre_tool_use` must see on opencode: the codebase-memory
 /// `index_repository` guard (#1331), and `Bash` for the commit gate of the task tracker (#2456).
@@ -54,14 +55,20 @@ pub(super) fn write(
     pre_tools: &[&str],
     mcp_servers: &[&str],
 ) -> anyhow::Result<Vec<PathBuf>> {
+    use anyhow::Context as _;
+
     let table = hook_table(hooks, pre_tools, mcp_servers);
     let plugin_dir = out.join("plugin");
-    std::fs::create_dir_all(&plugin_dir)?;
-    crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), PLUGIN_JS.as_bytes())?;
-    crate::paths::write_owner_only(
-        &plugin_dir.join("llmenv-hooks.json"),
-        serde_json::to_string(&table)?.as_bytes(),
-    )?;
+    std::fs::create_dir_all(&plugin_dir)
+        .with_context(|| format!("creating {}", plugin_dir.display()))?;
+    for (name, bytes) in [
+        ("llmenv.js", PLUGIN_JS.as_bytes().to_vec()),
+        ("llmenv-hooks.json", serde_json::to_vec(&table)?),
+    ] {
+        let path = plugin_dir.join(name);
+        crate::paths::write_owner_only(&path, &bytes)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
     Ok(vec![
         PathBuf::from("plugin/llmenv.js"),
         PathBuf::from("plugin/llmenv-hooks.json"),
@@ -100,21 +107,29 @@ pub(super) fn hook_table(
         "llmenv config-guard --engine opencode",
     ));
     if !pre_tools.is_empty() {
-        entries.push(builtin(
+        // The commit gate and the index guard deny on purpose, so a run that times out or cannot
+        // start blocks the call instead of letting it through.
+        let mut gate = builtin(
             "PreToolUse",
             Some(&pre_tools.join("|")),
             "llmenv hook-run pre_tool_use --engine opencode",
-        ));
+        );
+        gate["timeout"] = USER_HOOK_TIMEOUT_MS.into();
+        gate["failClosed"] = true.into();
+        entries.push(gate);
     }
-    let namespaces: serde_json::Map<String, serde_json::Value> = mcp_servers
-        .iter()
-        .map(|s| {
-            (
-                crate::adapter::tools::opencode_hooks::mcp_namespace(s),
-                serde_json::Value::from(*s),
-            )
-        })
-        .collect();
+    let mut namespaces = serde_json::Map::new();
+    for server in mcp_servers {
+        let namespace = crate::adapter::tools::opencode_hooks::mcp_namespace(server);
+        if let Some(other) = namespaces.insert(namespace.clone(), serde_json::Value::from(*server))
+        {
+            eprintln!(
+                "warning: the MCP servers {other} and {server} share the opencode tool prefix \
+                 `{namespace}_`, so a hook sees the tools of both as tools of {server}. Fix: \
+                 rename one of the two servers"
+            );
+        }
+    }
     serde_json::json!({
         "hooks": entries,
         "tools": crate::adapter::tools::opencode_hooks::tools_json(),
@@ -136,11 +151,13 @@ fn user_hook_entry(hook: &crate::config::Hook) -> Option<serde_json::Value> {
     let command = match &hook.bundle_origin {
         Some(bundle_dir) => super::super::resolve_bundle_relative_paths(command, bundle_dir)
             .unwrap_or_else(|| {
-                tracing::error!(
-                    command = %command,
-                    bundle_dir = %bundle_dir.display(),
-                    "could not resolve a bundle-relative hook command path for opencode; the \
-                     raw command is used"
+                // `tracing` errors are off at the default log level, and the hook may not run.
+                eprintln!(
+                    "warning: the {} hook command `{command}` names a path in the bundle {} that \
+                     cannot be resolved, so opencode runs the command as written. Fix: check the \
+                     path in the hook command",
+                    hook.event,
+                    bundle_dir.display()
                 );
                 command.to_string()
             }),

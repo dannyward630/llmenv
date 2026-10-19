@@ -173,3 +173,18 @@ fn opencode_reads_its_own_config_dir_variable() {
     .unwrap_err();
     assert!(msg.contains("OPENCODE_CONFIG_DIR"), "{msg}");
 }
+
+#[test]
+fn a_patch_call_names_each_file_against_its_cwd() {
+    let payload = serde_json::json!({
+        "tool_name": "patch",
+        "cwd": "/repo",
+        "tool_input": { "patchText": "*** Begin Patch\n*** Update File: src/a.rs\n*** Add File: /abs/b.rs\n*** End Patch" },
+    });
+    assert_eq!(
+        extract_hook_file_paths(&payload.to_string()),
+        ["/repo/src/a.rs", "/abs/b.rs"]
+    );
+    let edit = serde_json::json!({ "tool_name": "Edit", "tool_input": { "file_path": "/x" } });
+    assert_eq!(extract_hook_file_paths(&edit.to_string()), ["/x"]);
+}

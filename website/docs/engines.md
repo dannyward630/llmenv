@@ -367,6 +367,13 @@ An MCP tool arrives as `mcp__<server>__<tool>`.
 A hook runs only for the tools that its `matcher` names.
 A hook blocks a tool call by exit code 2, with stderr as the reason, or by `permissionDecision: "deny"` on stdout.
 The `additionalContext` of a hook reaches the model as system text, and so does the error of a hook that cannot run.
+A hook that rewrites the input with `updatedInput` passes the new input to the hooks after it.
+A hook that runs past its timeout is stopped with its child processes.
+The llmenv `hook-run pre_tool_use` gate blocks the call when it times out or cannot start.
+The text of a `Stop` hook reaches the next request, because opencode cannot continue a finished turn.
+opencode's `patch` tool keeps its own name, and the llmenv config guard checks each file in its patch text.
+When `plugin/llmenv-hooks.json` cannot be read, no hook runs, and each request says so with the fix.
+Hooks run under `/bin/sh`.
 
 ### Env vars
 

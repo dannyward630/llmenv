@@ -7,8 +7,26 @@
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 
-const TABLE = JSON.parse(readFileSync(new URL("./llmenv-hooks.json", import.meta.url), "utf8"));
+const TABLE_URL = new URL("./llmenv-hooks.json", import.meta.url);
 const DEFAULT_TIMEOUT_MS = 30000;
+
+/** Why the hook table did not load, or null. Every hook is off then, so each request says so. */
+let tableError = null;
+
+function loadTable() {
+  try {
+    return JSON.parse(readFileSync(TABLE_URL, "utf8"));
+  } catch (e) {
+    tableError = `llmenv: no llmenv hook runs in this opencode session, because ${TABLE_URL.pathname} cannot be read: ${e.message}. Fix: run \`llmenv materialize\`.`;
+    console.error(tableError);
+    return { hooks: [], tools: {}, mcpServers: {} };
+  }
+}
+
+const TABLE = loadTable();
+
+/** The MCP namespaces, longest first, so a server `a_b` is not read as server `a`. */
+const NAMESPACES = Object.entries(TABLE.mcpServers ?? {}).sort(([a], [b]) => b.length - a.length);
 
 /** The project folder of the opencode instance, from the plugin context. */
 let workDir = process.cwd();
@@ -17,7 +35,7 @@ let workDir = process.cwd();
 export function toNeutral(tool, input) {
   const mapped = TABLE.tools[tool];
   if (mapped) return { name: mapped.name, input: renameKeys(input, mapped.args) };
-  for (const [namespace, server] of Object.entries(TABLE.mcpServers)) {
+  for (const [namespace, server] of NAMESPACES) {
     const prefix = `${namespace}_`;
     if (tool.startsWith(prefix)) {
       return { name: `mcp__${server}__${tool.slice(prefix.length)}`, input };
@@ -52,6 +70,7 @@ export function matches(matcher, toolName) {
  */
 export async function runHooks(event, sessionID, extra, toolName) {
   const out = { context: [], errors: [], block: null, updatedInput: null };
+  let current = extra;
   for (const hook of TABLE.hooks) {
     if (hook.event !== event) continue;
     if (toolName !== undefined) {
@@ -66,17 +85,30 @@ export async function runHooks(event, sessionID, extra, toolName) {
       hook_event_name: event,
       session_id: sessionID ?? "",
       cwd: workDir,
-      ...extra,
+      ...current,
     };
     let result;
     try {
       result = await spawnHook(hook.command, hook.timeout ?? DEFAULT_TIMEOUT_MS, payload);
     } catch (e) {
-      out.errors.push(`llmenv: the ${event} hook \`${hook.command}\` could not run: ${e.message}`);
+      const why = `llmenv: the ${event} hook \`${hook.command}\` could not run: ${e.message}`;
+      // A gate that cannot run must not let the call through.
+      if (hook.failClosed) {
+        out.block = why;
+        return out;
+      }
+      out.errors.push(why);
       continue;
     }
+    if (hook.failClosed && result.timedOut) {
+      out.block = `llmenv: the ${event} hook \`${hook.command}\` timed out, so the call is blocked. Run it again, or run \`llmenv doctor\`.`;
+      return out;
+    }
+    const before = out.updatedInput;
     readResult(event, hook.command, result, out);
     if (out.block) return out;
+    // A later hook checks the input that the tool will get, not the input before a rewrite.
+    if (out.updatedInput !== before) current = { ...current, tool_input: out.updatedInput };
   }
   return out;
 }
@@ -115,24 +147,36 @@ function readResult(event, command, result, out) {
 
 function spawnHook(command, timeoutMs, payload) {
   return new Promise((resolve, reject) => {
-    const child = spawn("sh", ["-c", command], { stdio: ["pipe", "pipe", "pipe"] });
+    // An absolute shell: a bare `sh` is looked up in PATH, which can name the project folder.
+    // The hook leads its own process group, so a timeout stops its children too.
+    const child = spawn("/bin/sh", ["-c", command], { stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stdout = "";
     let stderr = "";
-    let timedOut = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
     const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      // A child that holds the pipes open would keep `close` from firing, so the timer ends the wait.
+      finish({ code: null, timedOut: true, stdout: stdout.trim(), stderr: stderr.trim() });
     }, timeoutMs);
     child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(e);
     });
     child.stdout.on("data", (d) => (stdout += d.toString()));
     child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, timedOut, stdout: stdout.trim(), stderr: stderr.trim() });
-    });
+    child.on("close", (code) => finish({ code, timedOut: false, stdout: stdout.trim(), stderr: stderr.trim() }));
     // A hook that does not read stdin closes the pipe; that is not an error.
     child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify(payload));
@@ -145,7 +189,7 @@ const sessions = new Map();
 function state(sessionID) {
   let s = sessions.get(sessionID);
   if (!s) {
-    s = { started: null, start: [], turn: [], errors: [], ended: false };
+    s = { started: null, start: [], turn: [], once: [], errors: [], ended: false };
     sessions.set(sessionID, s);
   }
   return s;
@@ -166,16 +210,23 @@ async function endSession(sessionID) {
   const s = sessions.get(sessionID);
   if (!s || s.ended) return;
   s.ended = true;
-  await runHooks("SessionEnd", sessionID, {});
+  const out = await runHooks("SessionEnd", sessionID, {});
+  // The session is over, so no request can carry these errors.
+  for (const error of out.errors) console.error(error);
   sessions.delete(sessionID);
 }
 
-/** The system parts for the next request: SessionStart text, turn text, and hook errors. */
+/**
+ * The system parts for the next request: SessionStart text, turn text, the text of the last Stop
+ * hooks, and hook errors. A table that did not load is named on every request.
+ */
 export function systemParts(sessionID) {
   const s = sessions.get(sessionID);
-  if (!s) return [];
+  const table = tableError ? [tableError] : [];
+  if (!s) return table.map((text) => ({ type: "text", text }));
+  const once = s.once.splice(0);
   const errors = s.errors.splice(0);
-  return [...s.start, ...s.turn, ...errors].map((text) => ({ type: "text", text }));
+  return [...table, ...s.start, ...s.turn, ...once, ...errors].map((text) => ({ type: "text", text }));
 }
 
 async function onEvent(ev) {
@@ -184,8 +235,18 @@ async function onEvent(ev) {
   if (ev.type === "session.created") await startSession(sessionID);
   else if (ev.type === "session.execution.succeeded") {
     const out = await runHooks("Stop", sessionID, { stop_hook_active: false });
-    state(sessionID).errors.push(...out.errors);
+    // opencode cannot continue a finished turn, so a Stop reminder or block goes to the next request.
+    const s = state(sessionID);
+    s.once.push(...out.context);
+    if (out.block) s.once.push(out.block);
+    s.errors.push(...out.errors);
   } else if (ev.type === "session.deleted") await endSession(sessionID);
+}
+
+/** Log `text`, and give it to the next request of every open session. */
+function toEverySession(text) {
+  console.error(text);
+  for (const s of sessions.values()) s.errors.push(text);
 }
 
 export default {
@@ -223,9 +284,9 @@ export default {
     // Not awaited: setup must return, and the event stream never ends.
     void (async () => {
       for await (const ev of ctx.event.subscribe()) {
-        await onEvent(ev).catch((err) => console.error(`llmenv: an event hook failed: ${err.message}`));
+        await onEvent(ev).catch((err) => toEverySession(`llmenv: an event hook failed: ${err.message}`));
       }
-    })().catch((err) => console.error(`llmenv: the event stream stopped, so SessionStart, Stop, and SessionEnd hooks no longer run: ${err.message}`));
+    })().catch((err) => toEverySession(`llmenv: the event stream stopped, so SessionStart, Stop, and SessionEnd hooks no longer run: ${err.message}`));
     return async () => {
       await Promise.all([...sessions.keys()].map(endSession));
     };

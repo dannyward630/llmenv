@@ -101,11 +101,14 @@ pub(super) fn run(engine: &str) {
         }
     };
 
-    let Some(path_str) = extract_hook_file_path(&stdin_buf) else {
-        return;
-    };
+    for path_str in extract_hook_file_paths(&stdin_buf) {
+        warn_if_cached(&cache_root, &path_str);
+    }
+}
 
-    let expanded = match paths::expand_tilde(&path_str) {
+/// Warn the agent when `path_str` is inside the managed cache.
+fn warn_if_cached(cache_root: &std::path::Path, path_str: &str) {
+    let expanded = match paths::expand_tilde(path_str) {
         Ok(path) => path,
         Err(e) => {
             // Stdout reaches the agent from a hook. Stderr from an exit-0 hook does not.
@@ -113,7 +116,7 @@ pub(super) fn run(engine: &str) {
             return;
         }
     };
-    if crate::util::is_within(&cache_root, &expanded) {
+    if crate::util::is_within(cache_root, &expanded) {
         let config_path = paths::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "~/.config/llmenv/config.yaml".to_string());
@@ -124,6 +127,29 @@ pub(super) fn run(engine: &str) {
              Then run: llmenv regenerate"
         );
     }
+}
+
+/// The files that a hook payload writes: `tool_input.file_path`, or each file of an opencode
+/// `patch` call, made absolute against the payload's `cwd`.
+fn extract_hook_file_paths(stdin_buf: &str) -> Vec<String> {
+    if let Some(path) = extract_hook_file_path(stdin_buf) {
+        return vec![path];
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdin_buf) else {
+        return Vec::new();
+    };
+    if payload["tool_name"] != "patch" {
+        return Vec::new();
+    }
+    let cwd = std::path::Path::new(payload["cwd"].as_str().unwrap_or_default());
+    patch::patch_paths(
+        payload["tool_input"]["patchText"]
+            .as_str()
+            .unwrap_or_default(),
+    )
+    .into_iter()
+    .map(|p| cwd.join(p).display().to_string())
+    .collect()
 }
 
 /// Extract `tool_input.file_path` from a raw hook payload JSON string.
@@ -146,6 +172,8 @@ fn extract_hook_file_path(stdin_buf: &str) -> Option<String> {
         }
     }
 }
+
+mod patch;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

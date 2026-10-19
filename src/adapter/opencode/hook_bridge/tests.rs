@@ -192,3 +192,144 @@ console.log(JSON.stringify(out));
         "{out}"
     );
 }
+
+fn table(hooks: serde_json::Value, servers: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "hooks": hooks, "tools": {}, "mcpServers": servers })
+}
+
+/// Server `a_b` is not read as server `a` with a tool named `b_x`.
+#[test]
+fn the_longest_mcp_namespace_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let servers = serde_json::json!({ "a": "a", "a_b": "a.b" });
+    let plugin = write_plugin(dir.path(), &table(serde_json::json!([]), servers));
+    let driver = r#"
+const m = await import(process.argv[1]);
+console.log(JSON.stringify({ long: m.toNeutral("a_b_x", {}).name, short: m.toNeutral("a_y", {}).name }));
+"#;
+    let out = run_node(driver, &[&plugin]);
+    assert_eq!(out["long"], "mcp__a.b__x");
+    assert_eq!(out["short"], "mcp__a__y");
+}
+
+/// A hook after a rewrite sees the rewritten input, so a guard checks what the tool will get.
+#[test]
+fn a_later_hook_sees_the_updated_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("seen.json");
+    let rewrite = r#"echo '{"hookSpecificOutput":{"updatedInput":{"command":"rewritten"}}}'"#;
+    let hooks = serde_json::json!([
+        { "event": "PreToolUse", "matcher": null, "command": rewrite, "timeout": 5000 },
+        { "event": "PreToolUse", "matcher": null, "command": format!("cat > {}", log.display()), "timeout": 5000 },
+    ]);
+    let plugin = write_plugin(dir.path(), &table(hooks, serde_json::json!({})));
+    let driver = r#"
+const m = await import(process.argv[1]);
+const out = await m.runHooks("PreToolUse", "s", { tool_name: "Bash", tool_input: { command: "orig" } }, "Bash");
+console.log(JSON.stringify(out));
+"#;
+    let out = run_node(driver, &[&plugin]);
+    assert_eq!(out["updatedInput"]["command"], "rewritten");
+    let seen: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(seen["tool_input"]["command"], "rewritten");
+}
+
+/// A gate that times out blocks the call. A hook whose child keeps the pipes open still ends at
+/// its timeout, because the whole process group is stopped.
+#[test]
+fn a_timeout_stops_the_hook_and_a_gate_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let hooks = serde_json::json!([
+        { "event": "PreToolUse", "matcher": "Bash", "command": "sleep 30 & sleep 30", "timeout": 300, "failClosed": true },
+        { "event": "PostToolUse", "matcher": null, "command": "sleep 30 & sleep 30", "timeout": 300 },
+    ]);
+    let plugin = write_plugin(dir.path(), &table(hooks, serde_json::json!({})));
+    let driver = r#"
+const m = await import(process.argv[1]);
+const started = Date.now();
+const gate = await m.runHooks("PreToolUse", "s", {}, "Bash");
+const post = await m.runHooks("PostToolUse", "s", {}, "Bash");
+console.log(JSON.stringify({ gate, post, ms: Date.now() - started }));
+"#;
+    let out = run_node(driver, &[&plugin]);
+    assert!(
+        out["gate"]["block"].as_str().unwrap().contains("timed out"),
+        "{out}"
+    );
+    assert_eq!(out["post"]["block"], serde_json::Value::Null);
+    assert!(
+        out["post"]["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("timed out"),
+        "{out}"
+    );
+    assert!(out["ms"].as_u64().unwrap() < 10_000, "{out}");
+}
+
+/// With no hook table, every request says that no llmenv hook runs, and names the fix.
+#[test]
+fn a_missing_hook_table_is_named_on_every_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("llmenv.js");
+    std::fs::write(&plugin, PLUGIN_JS).unwrap();
+    let driver = r#"
+const m = await import(process.argv[1]);
+console.log(JSON.stringify({ a: m.systemParts("s1"), b: m.systemParts("s1") }));
+"#;
+    let out = run_node(driver, &[&plugin]);
+    for key in ["a", "b"] {
+        let text = out[key][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("cannot be read") && text.contains("llmenv materialize"),
+            "{out}"
+        );
+    }
+}
+
+/// The text of a Stop hook reaches the next request, one time.
+#[test]
+fn a_stop_reminder_reaches_the_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let hooks = serde_json::json!([
+        { "event": "Stop", "matcher": null, "command": "echo stop note", "timeout": 5000 },
+    ]);
+    let plugin = write_plugin(dir.path(), &table(hooks, serde_json::json!({})));
+    let driver = r#"
+const plugin = (await import(process.argv[1])).default;
+const m = await import(process.argv[1]);
+const hooks = {};
+const ctx = {
+  location: { directory: process.argv[2] },
+  tool: { hook: async (name, cb) => { hooks["tool." + name] = cb; } },
+  session: { hook: async (name, cb) => { hooks["session." + name] = cb; } },
+  event: { subscribe: () => (async function* () {
+    yield { type: "session.created", data: { sessionID: "ses_1" } };
+    yield { type: "session.execution.succeeded", data: { sessionID: "ses_1" } };
+  })() },
+};
+await plugin.setup(ctx);
+await new Promise((r) => setTimeout(r, 300));
+const first = { sessionID: "ses_1", system: [] };
+await hooks["session.context"](first);
+const second = { sessionID: "ses_1", system: [] };
+await hooks["session.context"](second);
+console.log(JSON.stringify({ first: first.system.map((p) => p.text), second: second.system.map((p) => p.text) }));
+"#;
+    let out = run_node(driver, &[&plugin, dir.path()]);
+    assert!(
+        out["first"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("stop note")),
+        "{out}"
+    );
+    assert!(
+        !out["second"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("stop note")),
+        "{out}"
+    );
+}
