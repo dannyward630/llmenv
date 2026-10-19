@@ -11,6 +11,7 @@ repository = "https://github.com/phaedrus1992/llmenv"
 workspace = true
 
 [dependencies]
+llmenv-paths = { path = "../llmenv-paths" }
 
 [dev-dependencies]
 proptest = { workspace = true }

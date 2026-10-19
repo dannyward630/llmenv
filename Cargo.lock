@@ -1338,6 +1338,7 @@ dependencies = [
 name = "llmenv-git"
 version = "3.12.2"
 dependencies = [
+ "llmenv-paths",
  "proptest",
  "tempfile",
 ]
@@ -1350,6 +1351,7 @@ dependencies = [
  "proptest",
  "rustix",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

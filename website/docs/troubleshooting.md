@@ -194,6 +194,21 @@ The warning does not fire for an inline shell command.
 A `/` that is part of shell syntax, such as the jq `//` operator, `2>/dev/null`, or a URL, is not a script path.
 A path in a system folder, such as `/usr/bin/env`, is not a script path either.
 
+## A program is reported as not found
+
+(changed in v3.13.0)
+
+llmenv looks for a program only in the absolute folders of `PATH`.
+A relative folder such as `.` names a different place in each working folder.
+So a file in a cloned repository could stand in for the real program.
+This covers the engines, `icm`, `mcp-proxy`, `uvx`, `lsof`, and `codebase-memory-mcp`.
+It also covers a stdio MCP server, `git`, and the `gh` that the statusline runs.
+llmenv also gives `mcp-proxy` the absolute path of `icm`, because `mcp-proxy` would otherwise do its own `PATH` search.
+
+If a program is installed but reported as not found, run `llmenv doctor`.
+It names the relative `PATH` folders that llmenv skips.
+Add the program's folder to `PATH` as an absolute path.
+
 ## A task command refuses
 
 (added in v3.12.0)

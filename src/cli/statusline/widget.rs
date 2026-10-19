@@ -14,6 +14,8 @@ use usage_state::*;
 
 mod git;
 use git::*;
+mod gh_cmd;
+use gh_cmd::GhPrCmd;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EngineData {
@@ -534,36 +536,6 @@ fn pr_style_for(pr: &PrInfo) -> Option<&'static str> {
 /// call on every render.
 const PR_CACHE_TTL_SECS: i64 = 60;
 
-/// How long to wait for `gh pr view` before giving up and degrading to no PR.
-/// `gh` hits the GitHub API over the network; a stalled connection must not
-/// hang the statusline render. 3s is generous for a healthy connection and
-/// short enough that a bad one doesn't stall the prompt.
-const DEFAULT_GH_PR_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Which `gh` binary [`gh_pr_view`] invokes and how long it may take.
-///
-/// The timeout travels with the binary rather than being read from a constant
-/// so tests can point at a fake `gh` *and* give it a budget that machine load
-/// can't blow: a test asserting "this JSON parses into this `PrInfo`" must not
-/// fail because a `/bin/sh` child missed a 3-second production deadline
-/// (#1073). Bundling the two also keeps [`derive_pr`] within the
-/// positional-parameter limit.
-#[derive(Clone, Copy, Debug)]
-struct GhPrCmd<'a> {
-    bin: &'a str,
-    timeout: Duration,
-}
-
-impl<'a> GhPrCmd<'a> {
-    /// `bin` with the production timeout ([`DEFAULT_GH_PR_TIMEOUT`]).
-    fn new(bin: &'a str) -> Self {
-        Self {
-            bin,
-            timeout: DEFAULT_GH_PR_TIMEOUT,
-        }
-    }
-}
-
 /// Resolve the PR for the current session, in precedence order:
 ///
 /// 1. `data.pr` from stdin — forward-compat if an engine ever sends one
@@ -771,7 +743,11 @@ fn write_pr_cache(path: &Path, lookup: &PrLookup, now: i64) {
 /// (`gh.timeout`), and a failed read or wait are failures, so the widget can name
 /// them instead of showing "no PR" (#2821). This never prints or panics.
 fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
-    let mut cmd = Command::new(gh.bin);
+    // The repository is the working folder, so a bare `gh` could run a copy it holds (#2948).
+    let Ok(program) = crate::path_lookup::resolve_program(gh.bin) else {
+        return Err(GhFailure::Missing);
+    };
+    let mut cmd = Command::new(program);
     // `--` terminates option parsing so `branch` (derived from git state) is
     // always read as the positional argument, never as a `gh` flag — a
     // branch named e.g. `--json` (or starting with `-`) can't be

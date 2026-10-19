@@ -6,6 +6,10 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The program that [`secure_git`] runs when no absolute `PATH` folder holds `git`. The path
+/// does not exist, so the spawn fails as not found and names no relative folder.
+const GIT_NOT_FOUND: &str = "/git-is-not-in-an-absolute-PATH-folder/git";
+
 /// Git config flags to protect cloned repos from executing hooks or fsmonitors.
 /// Prevents a malicious config repo from running arbitrary code via git hooks or fsmonitors.
 pub const GIT_CONFIG_FLAGS: &[&str] = &[
@@ -23,8 +27,15 @@ pub const GIT_CONFIG_FLAGS: &[&str] = &[
 /// prompt such as a credential helper (#299, #307). Centralizing it here means
 /// every `secure_git()` call site — including `.status()`/`.spawn()` callers
 /// that would otherwise inherit the parent's stdin — gets the guarantee.
+///
+/// `git` is taken from an absolute `PATH` folder only, because a bare name also searches a
+/// relative folder such as `.`, where a cloned repository could hold its own `git` (#2948). With
+/// no `git` in an absolute folder, the spawn fails as not found.
 pub fn secure_git() -> Command {
-    let mut cmd = Command::new("git");
+    let path_var = std::env::var_os("PATH");
+    let git = llmenv_paths::program::find_on_path("git", path_var.as_deref())
+        .unwrap_or_else(|| std::path::PathBuf::from(GIT_NOT_FOUND));
+    let mut cmd = Command::new(git);
     cmd.args(GIT_CONFIG_FLAGS);
     cmd.stdin(Stdio::null());
     cmd
@@ -273,8 +284,17 @@ mod tests {
     #[test]
     fn secure_git_includes_config_flags() {
         let cmd = secure_git();
-        // Just verify command is created; actual flag testing is in integration tests
-        assert_eq!(cmd.get_program(), "git");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, GIT_CONFIG_FLAGS);
+    }
+
+    /// A bare `git` would search a relative PATH folder too, where a cloned repository can hold
+    /// its own copy (#2948).
+    #[test]
+    fn secure_git_runs_git_from_an_absolute_folder() {
+        let program = std::path::PathBuf::from(secure_git().get_program());
+        assert!(program.is_absolute(), "{}", program.display());
+        assert_eq!(program.file_name(), Some(std::ffi::OsStr::new("git")));
     }
 
     #[test]
