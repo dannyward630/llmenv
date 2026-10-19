@@ -880,15 +880,11 @@ impl AgentAdapter for OpencodeAdapter {
             .collect();
         all_hooks.extend(plugin_hooks);
 
-        let guards_index_repository = manifest
-            .mcps
-            .iter()
-            .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
         let mcp_servers: Vec<&str> = manifest.mcps.iter().map(|m| m.name.as_str()).collect();
         owned.extend(hook_bridge::write(
             out,
             &all_hooks,
-            guards_index_repository,
+            &hook_bridge::pre_tool_hook_tools(manifest),
             &mcp_servers,
         )?);
 
@@ -3297,19 +3293,19 @@ mod tests {
     }
 
     // #1331: opencode gets the same `manifest.mcps` Claude Code does, so the
-    // same `index_repository` clobber is reachable here. Its plugin API has no
-    // per-tool matcher, so the hook is only registered when that MCP is wired.
-    // #1304: same `block_engine_task_tools` opt-out Claude Code got in #980 —
-    // a user who wants the tracker but keeps opencode's native todo list turns
-    // it off and no redirect is registered.
+    // same `index_repository` clobber is reachable here. The hook names only the tools that
+    // need it, so no other tool call pays for it.
     #[test]
     fn index_repository_guard_hook_tracks_the_codebase_memory_mcp() {
-        let with = hook_bridge::hook_table(&[], true, &[]).to_string();
-        let without = hook_bridge::hook_table(&[], false, &[]).to_string();
-        assert!(
-            with.contains("llmenv hook-run pre_tool_use --engine opencode"),
-            "guard hook missing when codebase-memory-mcp is wired"
-        );
+        let with = hook_bridge::hook_table(&[], &["mcp__x__index_repository", "Bash"], &[]);
+        let without = hook_bridge::hook_table(&[], &[], &[]).to_string();
+        let entry = with["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["command"] == "llmenv hook-run pre_tool_use --engine opencode")
+            .unwrap();
+        assert_eq!(entry["matcher"], "mcp__x__index_repository|Bash");
         assert!(
             !without.contains("hook-run pre_tool_use"),
             "no MCP is wired, so every tool call would pay for a hook that \
@@ -3329,7 +3325,7 @@ mod tests {
             },
             bundle_origin: None,
         }];
-        let table = hook_bridge::hook_table(&hooks, false, &[]);
+        let table = hook_bridge::hook_table(&hooks, &[], &[]);
         let events: Vec<_> = table["hooks"]
             .as_array()
             .unwrap()
@@ -3353,7 +3349,7 @@ mod tests {
         }];
         // "echo hello" has no '/' token, so resolve_bundle_relative_paths
         // returns None and the raw command is used.
-        let table = hook_bridge::hook_table(&hooks, false, &["codebase-memory-mcp"]);
+        let table = hook_bridge::hook_table(&hooks, &[], &["codebase-memory-mcp"]);
         assert_eq!(table["hooks"][0]["command"], "echo hello");
         assert_eq!(table["hooks"][0]["matcher"], "Bash");
         assert_eq!(
@@ -3734,8 +3730,8 @@ mod tests {
         fn every_command_hook_reaches_the_table_in_order(
             hooks in proptest::collection::vec(arb_hook(), 0..5)
         ) {
-            let table = hook_bridge::hook_table(&hooks, false, &[]);
-            prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, false, &[]));
+            let table = hook_bridge::hook_table(&hooks, &[], &[]);
+            prop_assert_eq!(&table, &hook_bridge::hook_table(&hooks, &[], &[]));
             let entries = table["hooks"].as_array().unwrap();
             let with_command: Vec<_> = hooks.iter().filter(|h| h.handler.command.is_some()).collect();
             for (hook, entry) in with_command.iter().zip(entries) {

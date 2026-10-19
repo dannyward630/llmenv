@@ -828,10 +828,6 @@ Nothing turns off the third item.
   The deny marker clears the next time a commit or pull request runs while a task is in progress, so a later gap with no
   task denies once more.
 
-When a reminder cannot do its work, the agent is told why (changed in v3.13.0).
-This covers a hook payload with no session id, and a nudge state that cannot be saved.
-A corrupt nudge state is reset on disk, and the agent is told one time.
-The commit gate denies a shell call whose `tool_input.command` is missing or not a string, and names the field.
   A task that is only `open` or `waiting` does not count as in progress.
   (changed in v3.12.2) The gate reads the command the way the shell does.
   It sees a commit inside `bash -c`, `$( )`, a backtick substitution, or a process substitution (`<( )` and `>( )`).
@@ -849,6 +845,11 @@ The commit gate denies a shell call whose `tool_input.command` is missing or not
   (changed in v3.13.0) When the nudge state file or the task store cannot be read, the gate denies the commit and
   names the file and the error. It does not allow the commit on a guess.
 
+When a reminder cannot do its work, the agent is told why (changed in v3.13.0).
+This covers a hook payload with no session id, and a nudge state that cannot be saved.
+A corrupt nudge state is reset on disk, and the agent is told one time.
+The commit gate denies a shell call whose `tool_input.command` is missing or not a string, and names the field.
+
 Two more reminders do not depend on `nudges`.
 A reminder for a parent task in progress shows how many of its sub-tasks are done, in progress, waiting, and not started.
 The Stop reminder names the next sub-task to start when a parent is in progress and its sub-tasks are all `open` or `done`.
@@ -856,7 +857,9 @@ The Stop reminder names the next sub-task to start when a parent is in progress 
 The tracker looks at the whole project: a task in progress in any open session of the project counts as tracked work.
 The deny is once for each session, not once for each commit, and a failed state write lets the command through.
 The hooks register on Claude Code. When session logging already routes every tool call to `hook-run`, the tracker adds no
-second entry. See [`features.task_tracker:`](configuration.md#featurestask_tracker) for the fields. (#2456)
+second entry.
+On opencode only the commit gate registers, for the shell tool (changed in v3.13.0).
+See [`features.task_tracker:`](configuration.md#featurestask_tracker) for the fields. (#2456)
 
 ### Resume context (added in v3.12.0)
 

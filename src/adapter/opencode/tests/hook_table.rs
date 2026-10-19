@@ -108,3 +108,29 @@ fn materialize_manifest_hook_mcp_tool_kind_skipped() {
     let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
     assert!(!shim_src.contains("some_tool"));
 }
+
+/// The commit gate of the task tracker reaches opencode: `hook-run pre_tool_use` runs for `Bash`
+/// only, and turning `enforce_commit` off removes it (#2456).
+#[test]
+fn the_commit_gate_runs_pre_tool_use_for_bash() {
+    let table = |tracker: &str| {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = MergedManifest::default();
+        manifest.capabilities.features = Some(serde_yaml::from_str(tracker).unwrap());
+        OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()
+    };
+    let pre_tool = |doc: &serde_json::Value| {
+        doc["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["command"] == "llmenv hook-run pre_tool_use --engine opencode")
+            .cloned()
+    };
+    let on = table("task_tracker: {enabled: true}");
+    assert_eq!(pre_tool(&on).unwrap()["matcher"], "Bash");
+    let off = table("task_tracker: {enabled: true, enforce_commit: false}");
+    assert!(pre_tool(&off).is_none(), "{off}");
+}

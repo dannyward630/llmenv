@@ -19,18 +19,42 @@ const BUILTIN_HOOK_TIMEOUT_MS: u64 = 5_000;
 /// The tools whose edits the config guard checks, as the Claude Code adapter matches them.
 const CONFIG_GUARD_MATCHER: &str = "Write|Edit|MultiEdit";
 
+/// The neutral tools that `hook-run pre_tool_use` must see on opencode: the codebase-memory
+/// `index_repository` guard (#1331), and `Bash` for the commit gate of the task tracker (#2456).
+pub(super) fn pre_tool_hook_tools(manifest: &crate::merge::MergedManifest) -> Vec<&'static str> {
+    let mut tools = Vec::new();
+    if manifest
+        .mcps
+        .iter()
+        .any(|m| m.name == crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
+    {
+        tools.push(crate::hook_run::cbm_index_guard::INDEX_REPOSITORY_TOOL);
+    }
+    let enforce_commit = manifest
+        .capabilities
+        .features
+        .as_ref()
+        .and_then(|f| f.task_tracker.as_ref())
+        .is_some_and(|t| t.enabled && t.enforce_commit);
+    if enforce_commit {
+        tools.push("Bash");
+    }
+    tools
+}
+
 /// Write the plugin and its hook table into `out/plugin`, and return the owned paths.
 ///
-/// `needs_pre_tool_hook` adds `hook-run pre_tool_use` for every tool call. It serves the
-/// `index_repository` name guard (#1331), and its per-call cost is why it is not always
-/// registered. opencode 2.x has no todo tool, so the tracker has nothing to redirect there.
+/// `pre_tools` are the neutral tool names that get `hook-run pre_tool_use`: the
+/// `index_repository` name guard (#1331) and the commit gate (#2456). A hook that runs on every
+/// tool call costs each call, so the entry names these tools only, and none means no entry.
+/// opencode 2.x has no todo tool, so the tracker has nothing to redirect there.
 pub(super) fn write(
     out: &Path,
     hooks: &[crate::config::Hook],
-    needs_pre_tool_hook: bool,
+    pre_tools: &[&str],
     mcp_servers: &[&str],
 ) -> anyhow::Result<Vec<PathBuf>> {
-    let table = hook_table(hooks, needs_pre_tool_hook, mcp_servers);
+    let table = hook_table(hooks, pre_tools, mcp_servers);
     let plugin_dir = out.join("plugin");
     std::fs::create_dir_all(&plugin_dir)?;
     crate::paths::write_owner_only(&plugin_dir.join("llmenv.js"), PLUGIN_JS.as_bytes())?;
@@ -48,7 +72,7 @@ pub(super) fn write(
 /// namespaces. A hook keeps its matcher, so it runs only for the tools it names.
 pub(super) fn hook_table(
     hooks: &[crate::config::Hook],
-    needs_pre_tool_hook: bool,
+    pre_tools: &[&str],
     mcp_servers: &[&str],
 ) -> serde_json::Value {
     let mut entries: Vec<serde_json::Value> = hooks.iter().filter_map(user_hook_entry).collect();
@@ -75,10 +99,10 @@ pub(super) fn hook_table(
         Some(CONFIG_GUARD_MATCHER),
         "llmenv config-guard --engine opencode",
     ));
-    if needs_pre_tool_hook {
+    if !pre_tools.is_empty() {
         entries.push(builtin(
             "PreToolUse",
-            None,
+            Some(&pre_tools.join("|")),
             "llmenv hook-run pre_tool_use --engine opencode",
         ));
     }
