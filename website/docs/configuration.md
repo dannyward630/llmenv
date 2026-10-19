@@ -1869,6 +1869,11 @@ for discovery rules.
 A FIFO, a folder, a link to a missing file, or a larger file is not read: llmenv logs the error and uses the defaults from the folder basename.
 The project id of `llmenv task` also shows the error as a notice that names the file.
 
+(added in v3.13.0) A marker that is a link is followed only while its target stays inside the folder that holds the marker.
+A link out of that folder is refused with an error that names the marker and the target, and the defaults apply.
+So a repository cannot make llmenv read a file outside it, or reach a network path such as `/net/<host>/x`.
+A dotfile link such as `~/.llmenv.yaml -> dotfiles/llmenv.yaml` stays inside `$HOME`, so it still works.
+
 Disabling a bundle withdraws *everything* it contributes, not just its
 permissions and instruction files. That includes any `features.memory` or
 `host:` entry declared in its `bundle.yaml` — so if the ICM memory backend is

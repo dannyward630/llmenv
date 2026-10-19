@@ -44,6 +44,9 @@ llmenv status tags     # marks active tags
   `LLMENV_PROJECT_ROOT` are set only when a marker matched.
 - Malformed marker YAML degrades to defaults (id/name from the folder basename)
   and logs a warning; it does not fail the whole resolution.
+- A marker that is a link to a file outside its folder is refused (changed in v3.13.0).
+  The notice names the marker and the target.
+  Replace the link with a regular file, or move the target into the folder.
 
 ## A bundle / MCP server / plugin won't fire
 
