@@ -44,6 +44,7 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
 /// credentials (settings, sync state, MCP configs, ICM memory) where
 /// world-readable defaults would leak data on shared systems.
 ///
+/// A FIFO or another special file at `path` is an error on Unix, and the open does not block on it.
 /// A symlink at `path` is an error on Unix (`O_NOFOLLOW`), so the write never lands on the link's
 /// target (#2686). Only the final component is checked. A symlink in a parent directory is still
 /// followed, so the parent must already be a directory the user controls.
@@ -57,8 +58,14 @@ pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+            .custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                    .bits()
+                    .cast_signed(),
+            )
             .open(path)?;
+        // A FIFO with no reader fails the open with ENXIO; one with a reader fails here (#2942).
+        crate::check_regular_file(&file)?;
         file.write_all(content)?;
     }
     #[cfg(not(unix))]
@@ -149,6 +156,19 @@ mod tests {
             "a symlink at the final component must fail with ELOOP: {err}"
         );
         assert_eq!(std::fs::read(&target).expect("read target"), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_fails_at_once_on_a_fifo() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(write_owner_only(&path, b"x").is_err());
     }
 
     #[cfg(unix)]

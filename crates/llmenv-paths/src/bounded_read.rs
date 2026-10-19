@@ -17,13 +17,13 @@ use std::path::Path;
 pub fn read_file_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
     match open_nonblocking(path) {
         Ok(file) => read_open_file(file, max_bytes).map(Some),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            if std::fs::symlink_metadata(path).is_ok() {
-                Err(invalid("it is a link to a file that does not exist"))
-            } else {
-                Ok(None)
-            }
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => match std::fs::symlink_metadata(path) {
+            Ok(_) => Err(invalid(
+                "it is a link to a file that does not exist; correct or remove the link",
+            )),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        },
         Err(e) => Err(e),
     }
 }
@@ -39,7 +39,7 @@ pub fn read_text_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Strin
     };
     String::from_utf8(bytes).map(Some).map_err(|e| {
         invalid(&format!(
-            "it is not UTF-8 text (the first bad byte is at offset {})",
+            "it is not UTF-8 text (the first bad byte is at offset {}); save it as UTF-8",
             e.utf8_error().valid_up_to()
         ))
     })
@@ -58,7 +58,9 @@ pub fn read_open_file(file: std::fs::File, max_bytes: u64) -> io::Result<Vec<u8>
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
-        return Err(invalid(&format!("it holds more than {max_bytes} bytes")));
+        return Err(invalid(&format!(
+            "it holds more than {max_bytes} bytes; make the file smaller"
+        )));
     }
     Ok(bytes)
 }
@@ -70,9 +72,36 @@ pub fn read_open_file(file: std::fs::File, max_bytes: u64) -> io::Result<Vec<u8>
 pub fn check_regular_file(file: &std::fs::File) -> io::Result<()> {
     let kind = file.metadata()?.file_type();
     if kind.is_file() {
-        Ok(())
+        return Ok(());
+    }
+    Err(invalid(&format!(
+        "it is {}, not a regular file; replace it with a regular file",
+        kind_name(kind)
+    )))
+}
+
+#[cfg(unix)]
+fn kind_name(kind: std::fs::FileType) -> &'static str {
+    use std::os::unix::fs::FileTypeExt as _;
+    if kind.is_dir() {
+        "a folder"
+    } else if kind.is_fifo() {
+        "a FIFO"
+    } else if kind.is_socket() {
+        "a socket"
+    } else if kind.is_char_device() || kind.is_block_device() {
+        "a device"
     } else {
-        Err(invalid(&format!("it is not a regular file ({kind:?})")))
+        "a special file"
+    }
+}
+
+#[cfg(not(unix))]
+fn kind_name(kind: std::fs::FileType) -> &'static str {
+    if kind.is_dir() {
+        "a folder"
+    } else {
+        "a special file"
     }
 }
 
@@ -141,7 +170,11 @@ mod tests {
         let err = read_file_bounded(&link, CAP).unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err}");
         let err = read_file_bounded(dir.path(), CAP).unwrap_err();
-        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("it is a folder, not a regular file"),
+            "{err}"
+        );
         let bad = dir.path().join("bad");
         std::fs::write(&bad, b"ok\xffno").unwrap();
         let err = read_text_bounded(&bad, CAP).unwrap_err();
@@ -155,7 +188,10 @@ mod tests {
         let fifo = dir.path().join("fifo");
         mkfifo(&fifo);
         let err = read_file_bounded(&fifo, CAP).unwrap_err();
-        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(
+            err.to_string().contains("it is a FIFO, not a regular file"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -174,6 +210,28 @@ mod tests {
     }
 
     proptest::proptest! {
+        #[test]
+        fn a_file_reads_exactly_when_its_length_is_within_the_cap(
+            len in 0usize..=256,
+            max_bytes in 0u64..=256,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("f");
+            std::fs::write(&path, vec![b'x'; len]).unwrap();
+            let within = u64::try_from(len).unwrap() <= max_bytes;
+            match read_file_bounded(&path, max_bytes) {
+                Ok(Some(bytes)) => {
+                    proptest::prop_assert!(within);
+                    proptest::prop_assert_eq!(bytes.len(), len);
+                }
+                Err(e) => {
+                    proptest::prop_assert!(!within, "{e}");
+                    proptest::prop_assert!(e.to_string().contains("more than"), "{e}");
+                }
+                Ok(None) => proptest::prop_assert!(false, "the file exists"),
+            }
+        }
+
         #[test]
         fn small_files_read_back_exactly_or_fail_as_bad_text(
             bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),

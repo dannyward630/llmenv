@@ -50,16 +50,27 @@ fn materialize_with(
     if features.task_tracker.as_ref().is_some_and(|t| t.enabled) {
         refs.push(("task-tracker.md", TASK_TRACKER_REF));
     }
-    if !features.memory.is_empty() && servers.contains(&crate::mcp::resolve::MEMORY_MCP_NAME) {
-        refs.push(("memory.md", MEMORY_REF));
+    if !features.memory.is_empty() {
+        if servers.contains(&crate::mcp::resolve::MEMORY_MCP_NAME) {
+            refs.push(("memory.md", MEMORY_REF));
+        } else {
+            tracing::debug!(
+                "llmenv skill: no memory reference, because this scope runs no memory server"
+            );
+        }
     }
     if features.context_mode.as_ref().is_some_and(|c| c.enabled) {
         refs.push(("context-mode.md", CONTEXT_MODE_REF));
     }
-    if !features.codebase_memory.is_empty()
-        && servers.contains(&crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME)
-    {
-        refs.push(("codebase-memory.md", CODEBASE_MEMORY_REF));
+    if !features.codebase_memory.is_empty() {
+        if servers.contains(&crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME) {
+            refs.push(("codebase-memory.md", CODEBASE_MEMORY_REF));
+        } else {
+            tracing::debug!(
+                "llmenv skill: no codebase-memory reference, because this scope runs no \
+                 codebase-memory server"
+            );
+        }
     }
     if refs.is_empty() {
         return Ok(Vec::new());
@@ -109,6 +120,35 @@ mod tests {
             !owned.iter().any(|p| p.ends_with("codebase-memory.md")),
             "{owned:?}"
         );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_reference_is_written_iff_its_feature_is_on_and_its_server_runs(
+            flags in proptest::array::uniform4(proptest::bool::ANY),
+            has_memory_server in proptest::bool::ANY,
+            has_cbm_server in proptest::bool::ANY,
+        ) {
+            let [task_tracker, memory, context_mode, codebase_memory] = flags;
+            let mut servers = Vec::new();
+            if has_memory_server {
+                servers.push(crate::mcp::resolve::MEMORY_MCP_NAME);
+            }
+            if has_cbm_server {
+                servers.push(crate::mcp::resolve::CODEBASE_MEMORY_MCP_NAME);
+            }
+            let dir = TempDir::new().expect("test");
+            let features = features_with(task_tracker, memory, context_mode, codebase_memory);
+            let owned = materialize_with(dir.path(), &features, &servers).expect("test");
+            let wrote = |name: &str| owned.iter().any(|p| p.ends_with(format!("references/{name}")));
+            proptest::prop_assert_eq!(wrote("task-tracker.md"), task_tracker);
+            proptest::prop_assert_eq!(wrote("memory.md"), memory && has_memory_server);
+            proptest::prop_assert_eq!(wrote("context-mode.md"), context_mode);
+            proptest::prop_assert_eq!(
+                wrote("codebase-memory.md"),
+                codebase_memory && has_cbm_server
+            );
+        }
     }
 
     fn features_with(

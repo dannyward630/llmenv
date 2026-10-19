@@ -435,78 +435,14 @@ pub(crate) fn matches_content_all<'a>(
     matched
 }
 
-/// Discover project by walking cwd upward looking for `.llmenv.yaml`.
-/// When found, parse and return a `ResolvedProject` with all fields resolved
-/// (defaults applied, unknown fields collected). If YAML is malformed, log a
-/// warning and return a minimal `ResolvedProject` with id/name from the
-/// folder basename.
-///
-/// The walk is bounded at `$HOME`: a marker at `~/.llmenv.yaml` activates,
-/// but the walk does not ascend above home. This prevents a hostile marker
-/// dropped in e.g. `/tmp` (on a shared host) or `/Volumes/...` from being
-/// picked up. When `$HOME` is unknown, only the cwd itself is checked.
-#[must_use]
-pub(crate) fn discover_project(env: &Env) -> Option<ResolvedProject> {
-    let mut cur = std::path::PathBuf::from(&env.cwd);
-    loop {
-        let marker_path = cur.join(".llmenv.yaml");
-        if marker_path.exists() {
-            let pf = super::marker_file::read_project_file(&marker_path);
-            let basename = cur
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("llmenv")
-                .to_string();
-            let id = pf.id.unwrap_or_else(|| basename.clone());
-            let name = pf.name.unwrap_or_else(|| basename.clone());
-            let unknown_fields: Vec<String> = pf
-                .extra
-                .keys()
-                .filter(|k| {
-                    !matches!(
-                        k.as_str(),
-                        "id" | "name"
-                            | "description"
-                            | "tags"
-                            | "enable_bundles"
-                            | "disable_bundles"
-                    )
-                })
-                .cloned()
-                .collect();
-            return Some(ResolvedProject {
-                root: cur,
-                id,
-                name,
-                description: pf.description,
-                tags: sanitize_tags(pf.tags, ".llmenv.yaml"),
-                enable_bundles: sanitize_tags(pf.enable_bundles, ".llmenv.yaml enable_bundles"),
-                disable_bundles: sanitize_tags(pf.disable_bundles, ".llmenv.yaml disable_bundles"),
-                unknown_fields,
-            });
-        }
-        // Stop the walk once we've checked $HOME (or if home is unknown,
-        // after checking only cwd). This blocks markers above home from
-        // activating.
-        match &env.home {
-            Some(h) if cur == *h => break,
-            None => break,
-            _ => {}
-        }
-        if !cur.pop() {
-            break;
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        ContentScope, Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, discover_project, glob_matches,
+        ContentScope, Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, glob_matches,
         is_valid_tag_charset, matches_content_all, parse_extra_tags, sanitize_tags,
     };
+    use crate::scope::marker_file::discover_project;
     use proptest::prelude::*;
     use std::collections::BTreeSet;
     use std::path::Path;
@@ -1178,6 +1114,26 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn a_dangling_marker_link_is_the_marker_and_its_error_is_logged() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(home.path().join(".llmenv.yaml"), "id: parent\n").expect("write");
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir");
+        std::os::unix::fs::symlink(repo.join("gone.yaml"), repo.join(".llmenv.yaml"))
+            .expect("symlink");
+        let env = env_in(&repo, home.path());
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let project = discover_project(&env).expect("discover");
+            assert_eq!(
+                project.root, repo,
+                "the walk must stop at the dangling link"
+            );
+            assert_eq!(project.id, "repo");
+        });
+        assert!(logs.contains("does not exist"), "{logs}");
     }
 
     #[test]

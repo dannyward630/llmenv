@@ -109,7 +109,14 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// once (#2942). A missing file is a `NotFound` error, as from `std::fs::read_to_string`.
 pub(crate) fn read_config_text(path: &Path) -> anyhow::Result<String> {
     llmenv_paths::read_text_bounded(path, MAX_CONFIG_FILE_BYTES)
-        .and_then(|text| text.ok_or_else(|| std::io::ErrorKind::NotFound.into()))
+        .and_then(|text| {
+            text.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "there is no file there; run `llmenv init` to create one",
+                )
+            })
+        })
         .with_context(|| format!("failed to read config file: {}", path.display()))
 }
 

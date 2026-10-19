@@ -149,7 +149,15 @@ pub(crate) fn copy_file_at(
 ) -> io::Result<u64> {
     let mut src = open_regular_file_at(src_dir, name)?;
     let mut dst = create_file_at(dst_dir, name, mode)?;
-    io::copy(&mut src, &mut dst)
+    io::copy(&mut src, &mut dst).inspect_err(|_| {
+        // A partial copy under the final name would look complete to the next reader.
+        if let Err(e) = remove_file_at(dst_dir, name) {
+            tracing::warn!(
+                "could not remove the partial copy of {}: {e}",
+                name.to_string_lossy()
+            );
+        }
+    })
 }
 
 fn open_regular_file_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<std::fs::File> {

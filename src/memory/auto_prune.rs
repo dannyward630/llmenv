@@ -35,7 +35,10 @@ pub(crate) fn auto_prune_if_enabled(
         }
         // `tracing` warnings are off at the default log level, and the user must learn that
         // the configured prune did not run.
-        Err(e) => eprintln!("warning: auto_prune did not run: {e:#}"),
+        Err(e) => eprintln!(
+            "warning: auto_prune did not run: {e:#}. Run `llmenv doctor` to check the memory \
+             server, or set auto_prune to false"
+        ),
     }
 }
 
@@ -66,5 +69,50 @@ mod tests {
         );
         assert!(wants_auto_prune(&config, &tags("work")));
         assert!(!wants_auto_prune(&config, &tags("none")));
+    }
+
+    const TAGS: [&str; 3] = ["a", "b", "c"];
+
+    fn memory(when: &[usize], auto_prune: bool) -> crate::config::Memory {
+        let when: Vec<&str> = when.iter().map(|&i| TAGS[i]).collect();
+        serde_json::from_value(serde_json::json!({
+            "when": when, "server_host": "h", "port": 9092, "auto_prune": auto_prune
+        }))
+        .unwrap()
+    }
+
+    fn config_of(memory: Vec<crate::config::Memory>) -> crate::config::Config {
+        crate::config::Config {
+            features: Some(crate::config::Features {
+                memory,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn an_inactive_entry_never_changes_the_answer(
+            entries in proptest::collection::vec(
+                (proptest::collection::vec(0usize..3, 1..3), proptest::bool::ANY),
+                0..5,
+            ),
+            active in proptest::collection::btree_set(0usize..3, 0..3),
+            extra_prune in proptest::bool::ANY,
+        ) {
+            let active: std::collections::BTreeSet<String> =
+                active.iter().map(|&i| TAGS[i].to_string()).collect();
+            let expected = entries.iter().any(|(when, prune)| {
+                *prune && when.iter().any(|&i| active.contains(TAGS[i]))
+            });
+            let mut memory: Vec<_> = entries.iter().map(|(w, p)| self::memory(w, *p)).collect();
+            proptest::prop_assert_eq!(wants_auto_prune(&config_of(memory.clone()), &active), expected);
+            let inactive: Vec<usize> = (0..3).filter(|&i| !active.contains(TAGS[i])).collect();
+            if !inactive.is_empty() {
+                memory.push(self::memory(&inactive, extra_prune));
+                proptest::prop_assert_eq!(wants_auto_prune(&config_of(memory), &active), expected);
+            }
+        }
     }
 }

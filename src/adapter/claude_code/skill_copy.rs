@@ -107,14 +107,17 @@ fn copy_dir_owner_only_inner(
             // #1341: a symlink already at `dest_path` is never legitimate —
             // `write_owner_only` opens with `create(true).truncate(true)`,
             // which follows a symlink and overwrites its target.
-            if let Ok(dest_meta) = std::fs::symlink_metadata(&dest_path)
-                && dest_meta.file_type().is_symlink()
-            {
-                anyhow::bail!(
+            match std::fs::symlink_metadata(&dest_path) {
+                Ok(meta) if meta.file_type().is_symlink() => anyhow::bail!(
                     "destination path '{}' is a symlink — a path llmenv owns and writes \
                      through must never be a symlink",
                     dest_path.display()
-                );
+                ),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| format!("checking '{}'", dest_path.display()));
+                }
             }
             let content =
                 crate::paths::dirfd::read_file_at(src_dir, &file_name, MAX_SKILL_FILE_BYTES)
@@ -123,7 +126,8 @@ fn copy_dir_owner_only_inner(
             written.push(dest_path);
         } else {
             eprintln!(
-                "warning: skipping {} inside a skill; it is not a regular file or a folder",
+                "warning: skipping {} inside a skill; it is not a regular file or a folder. \
+                 Replace it with a regular file, or move it out of the skill folder",
                 src_path.display()
             );
         }
@@ -135,6 +139,38 @@ fn copy_dir_owner_only_inner(
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        #[test]
+        fn a_copied_tree_matches_its_source_byte_for_byte(
+            files in proptest::collection::btree_map(
+                "(sub/)?[a-z]{1,6}\\.md",
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+                1..6,
+            ),
+        ) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let src = tempfile::tempdir().unwrap();
+            let out = tempfile::tempdir().unwrap();
+            for (rel, bytes) in &files {
+                let path = src.path().join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, bytes).unwrap();
+            }
+            let dest = out.path().join("skill");
+            let mut written = copy_dir_owner_only(src.path(), &dest).unwrap();
+            written.sort();
+            let mut expected: Vec<PathBuf> = files.keys().map(|rel| dest.join(rel)).collect();
+            expected.sort();
+            proptest::prop_assert_eq!(&written, &expected);
+            for (rel, bytes) in &files {
+                let path = dest.join(rel);
+                proptest::prop_assert_eq!(&std::fs::read(&path).unwrap(), bytes);
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                proptest::prop_assert_eq!(mode, 0o600);
+            }
+        }
+    }
 
     #[test]
     fn a_fifo_is_skipped_and_a_file_over_the_cap_fails_with_its_name() {

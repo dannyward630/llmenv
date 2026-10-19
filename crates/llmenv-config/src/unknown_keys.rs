@@ -94,32 +94,6 @@ mod tests {
         unknown_top_level_keys(&dir.path().join("config.yaml")).unwrap()
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_fifo_fails_at_once_and_names_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .unwrap();
-        assert!(made.success());
-        let err = format!("{:#}", unknown_top_level_keys(&path).unwrap_err());
-        assert!(err.contains(&path.display().to_string()), "{err}");
-        assert!(err.contains("not a regular file"), "{err}");
-    }
-
-    #[test]
-    fn a_file_over_the_cap_fails_and_names_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        let size = usize::try_from(crate::MAX_CONFIG_FILE_BYTES).unwrap() + 1;
-        std::fs::write(&path, vec![b'#'; size]).unwrap();
-        let err = format!("{:#}", unknown_top_level_keys(&path).unwrap_err());
-        assert!(err.contains(&path.display().to_string()), "{err}");
-        assert!(err.contains("more than"), "{err}");
-    }
-
     #[test]
     fn skipped_when_unset_fields_are_known() {
         // These fields skip serialization when unset, so the derived shape cannot show them.

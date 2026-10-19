@@ -60,7 +60,7 @@ fn resolve_project_tag(cwd: &Path, home: Option<&Path>) -> String {
                 home: home.map(Path::to_path_buf),
                 ..crate::scope::matcher::Env::empty()
             };
-            crate::scope::matcher::discover_project(&env).map(|p| (p.root, p.id))
+            crate::scope::marker_file::discover_project(&env).map(|p| (p.root, p.id))
         })
         .unwrap_or_else(|| (cwd.to_path_buf(), basename(cwd)));
 
@@ -105,7 +105,7 @@ fn read_llmenv_yaml_id(dir: &Path) -> Option<String> {
         Err(e) => {
             warn_tag_change(
                 &format!("could not read {} for the project id: {e}", path.display()),
-                &format!("make that file a readable regular file of at most {max} bytes"),
+                "correct or remove that file",
             );
             return None;
         }
