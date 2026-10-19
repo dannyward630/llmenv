@@ -128,6 +128,7 @@ Before v3.12.1 any link-local address made the SessionStart health check report 
 MCP HTTP requests ignore proxy environment variables (changed after v3.12.2).
 A proxy resolves the host itself, so it would send a request to a private address outside llmenv's address check.
 An MCP server that is reachable only through a proxy is not supported.
+(added in v3.13.0) When `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` (in either case) is set and an MCP request fails, the error names the variable and links here, so the cause is not a bare timeout.
 
 ### Tool search and the ICM tools (added in v3.12.0)
 

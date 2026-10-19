@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 
+mod proxy_note;
 mod request_headers;
 
 mod ssrf;
@@ -208,7 +209,8 @@ impl McpHttpClient {
             .send()
             .await
             .map_err(reqwest::Error::without_url)
-            .with_context(|| format!("POST {} for MCP initialize", self.display_url()))?;
+            .with_context(|| format!("POST {} for MCP initialize", self.display_url()))
+            .map_err(proxy_note::with_proxy_note)?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp
@@ -421,6 +423,7 @@ impl McpHttpClient {
             .await
             .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {} for {label}", self.display_url()))
+            .map_err(proxy_note::with_proxy_note)
             .map_err(CallToolError::Fatal)?;
 
         // Capture status and body for detailed error reporting.

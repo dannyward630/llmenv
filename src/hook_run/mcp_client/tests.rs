@@ -11,6 +11,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 mod calls;
 mod listing_and_headers;
 mod probe_and_info;
+mod proxy_note;
 mod ssrf_addrs;
 mod ssrf_url;
 mod text_and_timeouts;

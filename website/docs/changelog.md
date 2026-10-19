@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A failed MCP request names `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` when one is set, because llmenv sends MCP requests without a proxy. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#memory-backend-memory) (#2884) [feat:mcp]
 - `llmenv setup --scan ROOT...` prints the repositories under the roots as JSON evidence for onboarding: top-level names, workflow names, and a fixed set of manifest keys. It reads no source, runs no repository script, and writes nothing. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---scan) (#2785) [feat:cli]
 - `llmenv setup --tools` prints the tools that onboarding can suggest, with the binary found on `PATH` for each. ICM and codebase-memory-mcp come first. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---tools) (#2791) [feat:cli]
 - `llmenv clean` is the one cleanup command. It removes the stale cache folders that `prune` removed, then runs the age-based sweeps that `doctor --gc` ran, and `--dry-run` lists every item from both. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#clean) (#2917) [feat:cli]
