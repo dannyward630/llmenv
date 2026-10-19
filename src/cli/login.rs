@@ -74,7 +74,16 @@ pub(super) fn run_login_capture(
         anyhow::bail!("`claude auth login` exited with status {status}");
     }
 
-    let entry = crate::auth::read_auth_from_dir(tmp.path())?.ok_or_else(|| {
+    store_login(adapter_root, tmp.path(), current_folder)
+}
+
+/// Save the account from a finished login, then the folder that the session runs in.
+fn store_login(
+    adapter_root: &Path,
+    login_dir: &Path,
+    current_folder: Option<&Path>,
+) -> anyhow::Result<()> {
+    let entry = crate::auth::read_auth_from_dir(login_dir)?.ok_or_else(|| {
         anyhow::anyhow!(
             "`claude auth login` completed but no oauthAccount found in the result. \
              Try running `claude auth login` directly."
@@ -83,7 +92,7 @@ pub(super) fn run_login_capture(
 
     crate::auth::save_auth_entry(adapter_root, &entry)?;
     eprintln!("[llmenv] login: saved auth for {}", entry.email);
-    capture_login_credentials(adapter_root, tmp.path(), current_folder)?;
+    capture_login_credentials(adapter_root, login_dir, current_folder)?;
 
     if let Some(folder) = current_folder
         && folder.is_dir()
@@ -163,3 +172,6 @@ pub(super) fn import_auth_from_file(source: &Path, adapter_root: &Path) -> anyho
     eprintln!("[llmenv] login: imported auth for {}", entry.email);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

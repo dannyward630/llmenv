@@ -1,5 +1,7 @@
 //! The launch of the AI engine that runs the setup skill.
 
+use std::process::{Command, ExitStatus};
+
 use anyhow::{Context as _, Result};
 
 /// Run the setup skill in `engine_id`, with `skill_content` as its prompt.
@@ -14,34 +16,49 @@ use anyhow::{Context as _, Result};
 pub(super) fn launch_engine(engine_id: &str, skill_content: &str) -> Result<()> {
     match engine_id {
         "claude_code" => {
-            let mut cmd = crate::cli::command_for_binary("claude")?;
-            cmd.arg("-p")
-                .arg(skill_content)
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
+            let cmd = claude_command(crate::cli::command_for_binary("claude")?, skill_content);
             let status =
                 crate::cli::run_supervised(cmd, "claude", None).context("launching claude")?;
-            if !status.success() {
-                anyhow::bail!("claude exited with status {status}");
-            }
+            ensure_success("claude", status)
         }
         "crush" => {
-            let mut cmd = crate::cli::command_for_binary("crush")?;
-            cmd.arg("run")
-                .arg("--quiet")
-                .arg("Execute the setup-llmenv skill")
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
+            let cmd = crush_command(crate::cli::command_for_binary("crush")?);
             // crush takes the skill text on stdin; `run_supervised` pipes it,
             // writes it, and closes the pipe so crush sees EOF.
             let status = crate::cli::run_supervised(cmd, "crush", Some(skill_content.as_bytes()))
                 .context("launching crush")?;
-            if !status.success() {
-                anyhow::bail!("crush exited with status {status}");
-            }
+            ensure_success("crush", status)
         }
         other => anyhow::bail!("unsupported engine: {other}"),
     }
+}
+
+/// `claude -p <skill>`, with the terminal handed to the session.
+fn claude_command(mut cmd: Command, skill_content: &str) -> Command {
+    cmd.arg("-p")
+        .arg(skill_content)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    cmd
+}
+
+/// `crush run --quiet <prompt>`. The skill text arrives on stdin, not as an argument.
+fn crush_command(mut cmd: Command) -> Command {
+    cmd.arg("run")
+        .arg("--quiet")
+        .arg("Execute the setup-llmenv skill")
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    cmd
+}
+
+fn ensure_success(engine: &str, status: ExitStatus) -> Result<()> {
+    if !status.success() {
+        anyhow::bail!("{engine} exited with status {status}");
+    }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
