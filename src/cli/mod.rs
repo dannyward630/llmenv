@@ -2707,22 +2707,22 @@ fn run_config_context() {
     let config_path = match paths::config_path() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("llmenv config-context: failed to resolve config path: {e}");
-            emit(
-                "llmenv config-context: could not resolve config path. \
-                 Run `llmenv doctor` to diagnose.",
-            );
+            eprintln!("llmenv config-context: failed to resolve config path: {e:#}");
+            emit(&format!(
+                "llmenv config-context: could not resolve config path ({e:#}). \
+                 Run `llmenv doctor` to diagnose."
+            ));
             return;
         }
     };
     let bundles_dir = match paths::config_dir() {
         Ok(d) => d.join("bundles"),
         Err(e) => {
-            eprintln!("llmenv config-context: failed to resolve config dir: {e}");
-            emit(
-                "llmenv config-context: could not resolve config dir. \
-                 Run `llmenv doctor` to diagnose.",
-            );
+            eprintln!("llmenv config-context: failed to resolve config dir: {e:#}");
+            emit(&format!(
+                "llmenv config-context: could not resolve config dir ({e:#}). \
+                 Run `llmenv doctor` to diagnose."
+            ));
             return;
         }
     };
@@ -2769,10 +2769,10 @@ fn run_config_context() {
                     }
                     Err(e) => {
                         eprintln!(
-                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e}"
+                            "llmenv config-context: failed to resolve state dir for task-tracker reminder: {e:#}"
                         );
                         text.push_str(&format!(
-                            "\n\nllmenv: the task tracker reminders could not be loaded ({e}). Run \
+                            "\n\nllmenv: the task tracker reminders could not be loaded ({e:#}). Run \
                              `llmenv doctor`."
                         ));
                     }
@@ -2780,11 +2780,34 @@ fn run_config_context() {
             }
         }
         Err(e) => {
-            eprintln!("llmenv config-context: failed to load config for task-tracker reminder: {e}")
+            eprintln!(
+                "llmenv config-context: failed to load config for task-tracker reminder: {e:#}"
+            );
+            text.push_str(&config_load_notice(&e));
         }
     }
 
     emit(&text);
+}
+
+/// The `SessionStart` line for a config that does not load. The engine drops the hook's stderr, so
+/// the full error chain goes into the context the agent reads (#2923).
+fn config_load_notice(error: &anyhow::Error) -> String {
+    format!(
+        "\n\nllmenv: the config could not be loaded, so the task tracker reminders are missing \
+         ({error:#}). Run `llmenv doctor`."
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn a_config_that_does_not_load_names_the_whole_cause() {
+    let error = anyhow::anyhow!("line 3: bad key").context("parsing config.yaml");
+    let notice = config_load_notice(&error);
+    assert!(
+        notice.contains("parsing config.yaml: line 3: bad key"),
+        "{notice}"
+    );
 }
 
 /// Read `CLAUDE_CONFIG_DIR` for the config guard. Unset means the default cache
@@ -2885,7 +2908,7 @@ fn run_config_guard() {
             return;
         }
     };
-    if is_within_cache(&cache_root, &expanded) {
+    if crate::util::is_within(&cache_root, &expanded) {
         let config_path = paths::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "~/.config/llmenv/config.yaml".to_string());
@@ -6749,34 +6772,6 @@ mod tests {
     }
 }
 
-/// Lexically normalize a path: resolve `..` and `.` components without touching
-/// the filesystem. This prevents `..`-based traversal bypasses when checking
-/// path prefixes on paths that may not exist yet.
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut out = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Pure path-prefix check: does `expanded_path` lie within `cache_root`?
-///
-/// Normalizes `..` components lexically (no filesystem access) so traversal
-/// paths like `/cache/llmenv/../../../etc/passwd` cannot bypass the check.
-#[must_use]
-fn is_within_cache(cache_root: &std::path::Path, expanded_path: &str) -> bool {
-    let path = normalize_path(std::path::Path::new(expanded_path));
-    path.starts_with(cache_root)
-}
-
 #[cfg(test)]
 mod config_guard_tests {
     use super::*;
@@ -6801,19 +6796,19 @@ mod config_guard_tests {
     #[test]
     fn test_is_within_cache_basic() {
         let cache_root = std::path::Path::new("/home/user/.cache/llmenv");
-        assert!(is_within_cache(
+        assert!(crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv/config"
         ));
-        assert!(is_within_cache(
+        assert!(crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv/data/file.txt"
         ));
-        assert!(!is_within_cache(
+        assert!(!crate::util::is_within(
             cache_root,
             "/home/user/.config/llmenv/config.yaml"
         ));
-        assert!(!is_within_cache(
+        assert!(!crate::util::is_within(
             cache_root,
             "/home/user/.cache/llmenv-adjacent/file"
         ));
@@ -6822,7 +6817,7 @@ mod config_guard_tests {
     #[test]
     fn test_is_within_cache_empty_path() {
         let cache_root = std::path::Path::new("/cache");
-        assert!(!is_within_cache(cache_root, ""));
+        assert!(!crate::util::is_within(cache_root, ""));
     }
 
     #[test]
@@ -6831,7 +6826,7 @@ mod config_guard_tests {
         // After normalization, /cache/llmenv/../../../etc/passwd → /etc/passwd,
         // which does not start with /cache/llmenv.
         let escaped = "/cache/llmenv/../../../etc/passwd";
-        assert!(!is_within_cache(cache_root, escaped));
+        assert!(!crate::util::is_within(cache_root, escaped));
     }
 
     #[test]
@@ -6879,14 +6874,14 @@ mod config_guard_tests {
         #[test]
         fn prop_within_cache_reflexive(ref cache_root in r"/[a-z/]+") {
             let path = std::path::Path::new(cache_root);
-            prop_assert!(is_within_cache(path, cache_root));
+            prop_assert!(crate::util::is_within(path, cache_root));
         }
 
         #[test]
         fn prop_within_cache_child_paths(ref cache_root in r"/[a-z/]+", ref suffix in r"[a-z0-9]+") {
             let path = std::path::Path::new(cache_root);
             let child = format!("{}/{}", cache_root, suffix);
-            prop_assert!(is_within_cache(path, &child));
+            prop_assert!(crate::util::is_within(path, &child));
         }
 
         #[test]
@@ -6895,7 +6890,7 @@ mod config_guard_tests {
             // Adjacent directory with similar prefix should not match
             if let Some(base) = cache_root.rfind('/') {
                 let sibling = format!("{}{}", &cache_root[..=base], "other");
-                prop_assert!(!is_within_cache(path, &sibling));
+                prop_assert!(!crate::util::is_within(path, &sibling));
             }
         }
 
@@ -6903,7 +6898,7 @@ mod config_guard_tests {
         fn prop_no_panic_on_arbitrary_strings(ref cache_root in r"/[a-z/]*", ref path_str in ".*") {
             let path = std::path::Path::new(cache_root);
             // Should never panic, even on malformed paths
-            let _ = is_within_cache(path, path_str);
+            let _ = crate::util::is_within(path, path_str);
         }
     }
 }

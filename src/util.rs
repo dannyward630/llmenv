@@ -72,6 +72,35 @@ pub(crate) fn display_safe(s: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// Lexically normalize a path: resolve `..` and `.` components without touching
+/// the filesystem. This prevents `..`-based traversal bypasses when checking
+/// path prefixes on paths that may not exist yet.
+pub(crate) fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Pure path-prefix check: does `expanded_path` lie within `cache_root`? Components are compared,
+/// not text, so `/cache2` is not within `/cache`.
+///
+/// Normalizes `..` components lexically (no filesystem access) so traversal
+/// paths like `/cache/llmenv/../../../etc/passwd` cannot bypass the check.
+#[must_use]
+pub(crate) fn is_within(cache_root: &std::path::Path, expanded_path: &str) -> bool {
+    let path = normalize_path(std::path::Path::new(expanded_path));
+    path.starts_with(cache_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
