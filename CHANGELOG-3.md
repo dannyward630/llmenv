@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - The `cd` advisory fires only when a command ends with `cd`, and its text no longer says that Claude Code resets the working directory. `cd /x && cargo test` gets no advisory. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featurescd_guard) (#2900) [fix:hook]
 - Repeat-call detection keeps one counter for each subagent. Parallel subagents that each make the same call one time no longer get a stuck-loop advisory. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration#featuresrepeat_detect) (#2901) [fix:hook]
+- A background job whose working directory is gone is no longer retried, with an error, at every session start. The session start deletes its checkpoint and shows one notice that names the job. See [background work](https://phaedrus1992.github.io/llmenv/docs/mcp#background-work-request-ids-and-checkpoints-added-in-v3120) (#2912) [fix:hook]
 - A hook message that went to stderr now reaches the agent as a notice: the deprecated `filePath` key, a session with no ICM transcript, and a subagent start with no usable agent id (#2818) [fix:hook]
 - A notice longer than 1000 characters keeps its `Fix:` line. Only the cause is cut (#2820) [fix:hook]
 - `llmenv clean` sweeps the state temp folder (`state/tmp`) by age, and skips an entry that a process has open. It stops with a fix when `lsof` cannot run (#2814) [fix:materialize]
