@@ -287,7 +287,7 @@ fn read_tasks(state_dir: &Path, policy: UnreadablePolicy) -> anyhow::Result<Vec<
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        match std::fs::read_to_string(&path)
+        match crate::paths::bounded::state_text_io(&path)
             .map_err(anyhow::Error::from)
             .and_then(|content| Ok(serde_json::from_str::<Task>(&content)?))
         {

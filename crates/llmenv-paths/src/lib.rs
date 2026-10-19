@@ -7,7 +7,7 @@ mod atomic_write;
 mod bounded_read;
 mod owner_only;
 pub use atomic_write::{resolve_user_link, write_owner_only_atomic, write_user_file_atomic};
-pub use bounded_read::{check_regular_file, read_open_file, read_text_bounded};
+pub use bounded_read::{check_regular_file, read_file_bounded, read_open_file, read_text_bounded};
 pub use owner_only::{create_dir_owner_only, write_owner_only};
 
 /// Expand a leading `~` or `~/` to `$HOME`. Other input is returned unchanged.

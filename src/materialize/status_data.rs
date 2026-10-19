@@ -453,21 +453,7 @@ fn collect_session_log() -> Option<u64> {
             return None;
         }
     };
-    collect_session_log_from_path(&path)
-}
-
-/// Internal helper taking an injectable path so tests can point at a temp
-/// file instead of the real, ambient state dir.
-fn collect_session_log_from_path(path: &Path) -> Option<u64> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            tracing::debug!("session log stat collection failed (non-fatal): {e}");
-            return None;
-        }
-    };
-    Some(content.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+    crate::session_log::count::count_records(&path)
 }
 
 #[cfg(test)]
@@ -1048,14 +1034,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-log.jsonl");
         std::fs::write(&path, "line one\nline two\n\nline three\n").unwrap();
-        assert_eq!(collect_session_log_from_path(&path), Some(3));
+        assert_eq!(crate::session_log::count::count_records(&path), Some(3));
     }
 
     #[test]
     fn collect_session_log_from_path_missing_file_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.jsonl");
-        assert_eq!(collect_session_log_from_path(&missing), None);
+        assert_eq!(crate::session_log::count::count_records(&missing), None);
     }
 
     // --- collect_tasks (mandatory-sessions rework) ---

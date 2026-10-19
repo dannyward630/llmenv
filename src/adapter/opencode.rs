@@ -18,6 +18,10 @@ pub struct OpencodeAdapter;
 
 mod hook_bridge;
 mod permissions;
+mod translate;
+#[cfg(test)]
+use translate::{OPENCODE_AGENT_KEYS, dropped_agent_keys, split_frontmatter};
+use translate::{translate_agent_md, translate_command_md};
 
 const OPENCODE_JSON_FILE: &str = "opencode.json";
 const OPENCODE_SCHEMA_FILE: &str = "opencode.schema.json";
@@ -235,13 +239,16 @@ fn parse_plugin_hooks(
     // #915: `Ok(None)` means a manifest of this name is absent — the caller
     // tries the next candidate name. A real read error (e.g. permission
     // denied) propagates rather than being masked by a caller `exists()` guard.
-    let source = match std::fs::read_to_string(hooks_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("reading {}", hooks_path.display())));
-        }
-    };
+    let source =
+        match llmenv_paths::read_text_bounded(hooks_path, crate::paths::bounded::MAX_ASSET_BYTES) {
+            Ok(Some(s)) => s,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("reading {}", hooks_path.display()))
+                );
+            }
+        };
     let manifest: PluginHooksManifest = serde_json::from_str(&source)?;
 
     let mut hooks = Vec::new();
@@ -298,11 +305,12 @@ fn parse_plugin_mcp_entries(
     // #915: a missing file means the plugin ships no MCP config — nothing to
     // translate. Other read errors (e.g. permission denied) propagate rather
     // than being masked by a caller `exists()` guard.
-    let content = match std::fs::read_to_string(mcp_json_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::Map::new());
-        }
+    let content = match llmenv_paths::read_text_bounded(
+        mcp_json_path,
+        crate::paths::bounded::MAX_ASSET_BYTES,
+    ) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(serde_json::Map::new()),
         Err(e) => {
             return Err(anyhow::anyhow!(
                 "plugin '{plugin_name}': failed to read {mcp_json_path:?}: {e}"
@@ -546,7 +554,7 @@ impl AgentAdapter for OpencodeAdapter {
                             path.display(),
                         )
                     })?;
-                    let source = std::fs::read_to_string(&path)?;
+                    let source = crate::paths::bounded::asset_text(&path)?;
                     let translated = translate_command_md(&source, name)?;
                     let out_name = format!("command/__plugin_{name}.md");
                     crate::paths::write_owner_only(&out.join(&out_name), translated.as_bytes())?;
@@ -570,7 +578,7 @@ impl AgentAdapter for OpencodeAdapter {
                             path.display(),
                         )
                     })?;
-                    let source = std::fs::read_to_string(&path)?;
+                    let source = crate::paths::bounded::asset_text(&path)?;
                     let translated = translate_agent_md(&source, name)?;
                     // opencode 2.x reads agents from `agents/`; a file in `command/` is a slash
                     // command (#2844).
@@ -891,8 +899,8 @@ impl AgentAdapter for OpencodeAdapter {
             }
             let rel_str = rel.to_string_lossy();
             if rel_str.starts_with("commands/") && rel_str.ends_with(".md") {
-                let source = std::fs::read_to_string(abs).map_err(|e| {
-                    anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
+                let source = crate::paths::bounded::asset_text(abs).map_err(|e| {
+                    anyhow::anyhow!("failed to read bundle file '{}': {e:#}", rel.display())
                 })?;
                 let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -907,8 +915,8 @@ impl AgentAdapter for OpencodeAdapter {
                 owned.push(rel.clone());
             }
             if rel_str.starts_with("agents/") && rel_str.ends_with(".md") {
-                let source = std::fs::read_to_string(abs).map_err(|e| {
-                    anyhow::anyhow!("failed to read bundle file '{}': {e}", rel.display())
+                let source = crate::paths::bounded::asset_text(abs).map_err(|e| {
+                    anyhow::anyhow!("failed to read bundle file '{}': {e:#}", rel.display())
                 })?;
                 let name = rel.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -947,130 +955,6 @@ impl AgentAdapter for OpencodeAdapter {
             super::SessionStartContext::Accepted,
         )
     }
-}
-
-/// Split markdown source into optional frontmatter and body.
-///
-/// Returns `(parsed_frontmatter_or_None, body_text)`. The body text is the
-/// content after the closing `---` delimiter (leading whitespace trimmed).
-fn split_frontmatter(source: &str) -> (Option<serde_yaml::Value>, &str) {
-    let s = source.trim_start();
-    if !s.starts_with("---") {
-        return (None, source);
-    }
-    let after_opener = &s[3..];
-
-    // Find the closing `\n---` (opener + newline + closing delimiter).
-    if let Some(end) = after_opener.find("\n---") {
-        // `end` is the position of `\n` before the closing `---`. YAML
-        // content is between the opening `---` and that `\n`; strip_prefix
-        // (rather than a fixed `[1..]` byte slice) drops the newline right
-        // after the opener without risking a non-UTF-8-boundary panic when
-        // there isn't one (e.g. malformed input like "---é\n---").
-        let content = &after_opener[..end];
-        let fm_raw = content.strip_prefix('\n').unwrap_or(content);
-        let body = &after_opener[(end + 4)..];
-        let fm = match serde_yaml::from_str(fm_raw) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::error!("failed to parse frontmatter YAML (treated as absent): {e}");
-                None
-            }
-        };
-        (fm, body.trim_start())
-    } else {
-        (None, source)
-    }
-}
-
-/// Translate a command markdown file from Claude frontmatter to opencode format.
-///
-/// Keeps only `description` from the frontmatter. Drops `model` and
-/// `allowed_tools` with a warning — those are Claude-specific concepts that
-/// opencode does not support for commands.
-fn translate_command_md(source: &str, _name: &str) -> anyhow::Result<String> {
-    let (fm, body) = split_frontmatter(source);
-    let mut new_fm = serde_yaml::Mapping::new();
-
-    if let Some(serde_yaml::Value::Mapping(ref map)) = fm {
-        if let Some(desc) = map.get(serde_yaml::Value::String("description".into())) {
-            new_fm.insert("description".into(), desc.clone());
-        }
-        let dropped: &[&str] = &["model", "allowed_tools"];
-        for key in dropped {
-            if map.contains_key(serde_yaml::Value::String((*key).into())) {
-                eprintln!(
-                    "warning: opencode adapter does not support '{key}' in \
-                     command frontmatter — dropping this field"
-                );
-            }
-        }
-    }
-
-    if new_fm.is_empty() {
-        Ok(body.to_string())
-    } else {
-        let fm_yaml = serde_yaml::to_string(&new_fm)?;
-        Ok(format!("---\n{}---\n{}", fm_yaml, body))
-    }
-}
-
-/// Frontmatter keys that produce no drop warning: the keys `translate_agent_md` copies, plus
-/// `name`, because opencode takes the agent name from the file name.
-const OPENCODE_AGENT_KEYS: &[&str] = &["description", "model", "tools", "allowed_tools", "name"];
-
-/// Source frontmatter keys that opencode has no field for (#2150), in source order. A key that
-/// is not a string (`1: x`) is rendered as YAML, so it is reported instead of dropped silently.
-fn dropped_agent_keys(map: &serde_yaml::Mapping) -> Vec<String> {
-    map.keys()
-        .filter(|key| {
-            key.as_str()
-                .is_none_or(|k| !OPENCODE_AGENT_KEYS.contains(&k))
-        })
-        .map(|key| match key.as_str() {
-            Some(k) => k.to_owned(),
-            None => serde_yaml::to_string(key)
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        })
-        .collect()
-}
-
-/// Translate an agent markdown file from Claude frontmatter to opencode format.
-///
-/// Keeps `description`, `model`, `tools` / `allowed_tools`, and adds
-/// `mode: subagent` so opencode runs the agent as a sub-process.
-fn translate_agent_md(source: &str, _name: &str) -> anyhow::Result<String> {
-    let (fm, body) = split_frontmatter(source);
-    let mut new_fm = serde_yaml::Mapping::new();
-
-    if let Some(serde_yaml::Value::Mapping(ref map)) = fm {
-        let keep: &[&str] = &["description", "model"];
-        for key in keep {
-            if let Some(val) = map.get(serde_yaml::Value::String((*key).into())) {
-                new_fm.insert((*key).into(), val.clone());
-            }
-        }
-        for tool_key in &["tools", "allowed_tools"] {
-            if let Some(val) = map.get(serde_yaml::Value::String((*tool_key).into())) {
-                new_fm.insert((*tool_key).into(), val.clone());
-            }
-        }
-
-        for key in dropped_agent_keys(map) {
-            // Agent files come from third-party plugins, so a key can hold terminal escapes.
-            let key = crate::util::escape_control(&key);
-            eprintln!(
-                "warning: opencode adapter does not support '{key}' in \
-                 agent frontmatter — dropping this field"
-            );
-        }
-    }
-
-    new_fm.insert("mode".into(), serde_yaml::Value::String("subagent".into()));
-    let fm_yaml = serde_yaml::to_string(&new_fm)?;
-    Ok(format!("---\n{}---\n{}", fm_yaml, body))
 }
 
 /// Map llmenv's `ModelProvider.api_type` (an open wire-format string) to the

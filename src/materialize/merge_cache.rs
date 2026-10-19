@@ -80,10 +80,8 @@ pub(crate) fn read_if_matching(
 /// The stored entry. `None` for a missing file.
 fn read_entry(path: &Path) -> anyhow::Result<Option<PersistedMergeCache>> {
     use anyhow::Context as _;
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    let Some(bytes) = crate::paths::bounded::state(path)? else {
+        return Ok(None);
     };
     let entry = serde_json::from_slice(&bytes)
         .with_context(|| format!("{} is not a valid merge cache", path.display()))?;

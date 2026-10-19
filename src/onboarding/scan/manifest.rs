@@ -3,11 +3,9 @@
 //! does not follow a symlink.
 
 use std::ffi::OsStr;
-use std::io::Read as _;
 use std::os::fd::{AsFd as _, BorrowedFd};
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 
 use super::{
@@ -126,28 +124,14 @@ fn read_manifest(dir: BorrowedFd<'_>, name: &str, notes: &mut Vec<String>) -> Op
 /// is a regular file, and read at most [`MAX_MANIFEST_BYTES`] from it. The checks and the read
 /// use the same open file, so a swap between them cannot change what is read.
 fn read_regular_file(dir: BorrowedFd<'_>, name: &str) -> Result<Option<String>, String> {
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let fd = match rustix::fs::openat(dir, name, flags, Mode::empty()) {
-        Ok(fd) => fd,
-        Err(Errno::NOENT) => return Ok(None),
-        Err(Errno::LOOP) => return Err("it is a symlink, which the scan does not follow".into()),
+    let bytes = match crate::paths::dirfd::read_file_at(dir, name.as_ref(), MAX_MANIFEST_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(Errno::LOOP.raw_os_error()) => {
+            return Err("it is a symlink, which the scan does not follow".into());
+        }
         Err(e) => return Err(e.to_string()),
     };
-    let st = rustix::fs::fstat(&fd).map_err(|e| e.to_string())?;
-    let kind = rustix::fs::FileType::from_raw_mode(st.st_mode as rustix::fs::RawMode);
-    if kind != rustix::fs::FileType::RegularFile {
-        return Err(format!("it is not a regular file ({kind:?})"));
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::from(fd)
-        .take(MAX_MANIFEST_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
-        return Err(format!(
-            "it holds more than MAX_MANIFEST_BYTES ({MAX_MANIFEST_BYTES}) bytes"
-        ));
-    }
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| "it is not UTF-8 text".into())

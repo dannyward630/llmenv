@@ -138,7 +138,7 @@ fn requote_name_and_description(frontmatter: &str) -> String {
 
 /// Validate a single skill's `SKILL.md` frontmatter (name + description present).
 fn validate_skill_frontmatter(skill_md: &Path, skill_dir: &Path) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(skill_md)?;
+    let content = crate::paths::bounded::asset_text(skill_md)?;
     let Some(frontmatter_end) = content.find("\n---\n").or_else(|| {
         content
             .ends_with("---")
@@ -185,7 +185,7 @@ fn scan_skill_files_for_hardcoded_paths(dir: &Path) -> anyhow::Result<()> {
         if meta.is_dir() {
             scan_skill_files_for_hardcoded_paths(&path)?;
         } else if meta.is_file()
-            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(Some(content)) = crate::paths::bounded::asset_text_optional(&path)
         {
             reject_hardcoded_config_path(&content, &path.display().to_string())?;
         }

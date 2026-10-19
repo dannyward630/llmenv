@@ -498,12 +498,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            // A bundle file is user content, so a FIFO or a huge file must not hang the render.
             if is_hook_json(rel) {
-                let raw = std::fs::read_to_string(abs)?;
+                let raw = crate::paths::bounded::asset_text(abs)?;
                 let rendered = raw.replace("{{ICM_MCP}}", MEMORY_MCP_NAME);
                 crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
             } else {
-                let bytes = std::fs::read(abs)?;
+                let bytes = crate::paths::bounded::asset(abs)?;
                 crate::paths::write_owner_only(&dest, &bytes)?;
             }
             owned.push(rel.clone());

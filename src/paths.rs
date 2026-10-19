@@ -1,3 +1,4 @@
+pub(crate) mod bounded;
 pub(crate) mod dirfd;
 
 pub use llmenv_paths::{
