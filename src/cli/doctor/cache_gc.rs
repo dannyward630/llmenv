@@ -55,109 +55,174 @@ impl GcOutput<'_> {
     }
 }
 
-/// Run every sweep. All of them use `cache.cache_retention_hours` (default 168). A `null` value
-/// turns all of them off (#2829).
-pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) {
-    let (pass, warn) = (out.pass, out.warn);
+/// Run every sweep, and return how many entries or sweeps failed. All of them use
+/// `cache.cache_retention_hours` (default 168). A `null` value turns all of them off (#2829).
+///
+/// A failure is printed as a warning here. `llmenv clean` turns a nonzero count into an error, so
+/// a script does not read a skipped sweep as a finished one.
+pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) -> usize {
     eprintln!("Running garbage collection...");
     let Some(retention) = config.cache.gc_retention() else {
         eprintln!(
-            "{pass} GC skipped: cache.cache_retention_hours is null, so age-based GC is off. \
-             Set it to a number of hours to turn GC on."
+            "{} GC skipped: cache.cache_retention_hours is null, so age-based GC is off. \
+             Set it to a number of hours to turn GC on.",
+            out.pass
         );
-        return;
+        return 0;
     };
-    match std::fs::metadata(cache_dir) {
+    let mut failures = match std::fs::metadata(cache_dir) {
         Ok(meta) if meta.permissions().readonly() => {
-            eprintln!("{warn} GC of the cache skipped: cache directory is read-only");
+            eprintln!(
+                "{} GC of the cache skipped: cache directory is read-only",
+                out.warn
+            );
+            1
         }
         Ok(_) => sweep_cache(cache_dir, config, retention, out),
-        Err(e) => eprintln!("{warn} GC of the cache skipped: cannot stat cache directory: {e:#}"),
-    }
-    match paths::state_dir() {
-        Ok(state_dir) => {
-            sweep_state(&state_dir, retention, out);
-            sweep_cbm_indexes(&state_dir, config, retention, out);
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => {
+            eprintln!(
+                "{} GC of the cache skipped: cannot stat cache directory: {e:#}",
+                out.warn
+            );
+            1
         }
-        Err(e) => eprintln!(
-            "{warn} GC of state/tmp and session-log rotations skipped: cannot resolve the state \
-             directory: {e:#}"
-        ),
+    };
+    match paths::state_dir() {
+        Ok(state_dir) => failures += sweep_state(&state_dir, config, retention, out),
+        Err(e) => {
+            eprintln!(
+                "{} GC of state/tmp, session-log rotations, and codebase-memory indexes skipped: \
+                 cannot resolve the state directory: {e:#}",
+                out.warn
+            );
+            failures += 1;
+        }
     }
+    failures
 }
 
-/// Sweep the hashed cache under `cache_dir`.
-fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) {
+/// Sweep the hashed cache under `cache_dir`. Returns the count of failed entries.
+fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) -> usize {
     match cache::gc(cache_dir, retention, config.cache.hashing, out.dry_run) {
         Ok(report) => {
             out.report("", &report);
-            if out.dry_run {
-                return;
+            if !out.dry_run {
+                let forgotten = forget_credentials_for(&report.removed);
+                if forgotten > 0 {
+                    eprintln!(
+                        "{} GC: dropped {forgotten} orphaned OAuth credential entries",
+                        out.pass
+                    );
+                }
             }
-            let forgotten = forget_credentials_for(&report.removed);
-            if forgotten > 0 {
-                eprintln!(
-                    "{} GC: dropped {forgotten} orphaned OAuth credential entries",
-                    out.pass
-                );
-            }
+            report.failed.len()
         }
-        Err(e) => eprintln!("{} GC failed: {e:#}", out.warn),
+        Err(e) => {
+            eprintln!("{} GC failed: {e:#}", out.warn);
+            1
+        }
     }
 }
 
-/// Sweep the folders under `state_dir`: `state/tmp`, then the session-log rotations.
-fn sweep_state(state_dir: &Path, retention: Duration, out: GcOutput<'_>) {
-    sweep_state_tmp(state_dir, retention, out);
-    prune_session_log(state_dir, retention, out);
+/// Sweep the folders under `state_dir`: `state/tmp`, the session-log rotations, and the old
+/// codebase-memory indexes. Returns the count of failures.
+///
+/// The in-use list comes from one lsof call, which the two sweeps share. lsof can take up to a
+/// minute on a hung mount.
+fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) -> usize {
+    let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
+    let in_use = in_use.as_ref().map(Vec::as_slice).map_err(String::as_str);
+    sweep_state_tmp(state_dir, retention, in_use, out)
+        + prune_session_log(state_dir, retention, out)
+        + sweep_cbm_indexes(state_dir, config, retention, in_use, out)
 }
 
 /// Sweep `state/tmp`, which `TMPDIR` points at, with the same retention as the cache (#2814).
-fn sweep_state_tmp(state_dir: &Path, retention: Duration, out: GcOutput<'_>) {
-    match tmp_sweep::sweep_state_tmp(state_dir, retention, out.dry_run) {
-        Ok(report) => out.report(" for state/tmp", &report),
-        Err(e) => eprintln!("{} GC of state/tmp skipped: {e:#}", out.warn),
+fn sweep_state_tmp(
+    state_dir: &Path,
+    retention: Duration,
+    in_use: Result<&[PathBuf], &str>,
+    out: GcOutput<'_>,
+) -> usize {
+    let swept = in_use.map_err(str::to_string).and_then(|in_use| {
+        tmp_sweep::sweep(&state_dir.join("tmp"), retention, in_use, out.dry_run)
+            .map_err(|e| format!("{e:#}"))
+    });
+    match swept {
+        Ok(report) => {
+            out.report(" for state/tmp", &report);
+            report.failed.len()
+        }
+        Err(e) => {
+            eprintln!("{} GC of state/tmp skipped: {e}", out.warn);
+            1
+        }
     }
 }
 
 /// Remove old index databases from `state/codebase-memory`, unless a configured `index_path`
 /// names that folder as the live cache (#2817). A database that a process holds open is kept.
-fn sweep_cbm_indexes(state_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) {
+fn sweep_cbm_indexes(
+    state_dir: &Path,
+    config: &Config,
+    retention: Duration,
+    in_use: Result<&[PathBuf], &str>,
+    out: GcOutput<'_>,
+) -> usize {
     let (pass, warn) = (out.pass, out.warn);
     let dir = state_dir.join("codebase-memory");
-    match cache_use(config, &dir) {
+    // lsof reports resolved paths, so the folder is resolved too before the paths are compared.
+    let resolved = match std::fs::canonicalize(&dir) {
+        Ok(resolved) => resolved,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => {
+            eprintln!(
+                "{warn} GC of {} skipped: cannot resolve the folder: {e}",
+                dir.display()
+            );
+            return 1;
+        }
+    };
+    match cache_use(config, &bundles_dir(), &dir) {
         CacheUse::Unused => {}
         CacheUse::Live => {
             eprintln!(
                 "{pass} GC of {} skipped: a features.codebase_memory index_path uses it",
                 dir.display()
             );
-            return;
+            return 0;
         }
         CacheUse::Unknown(cause) => {
             eprintln!("{warn} GC of {} skipped: {cause}", dir.display());
-            return;
+            return 1;
         }
     }
-    let in_use = match crate::materialize::open_files::open_paths() {
-        Ok(in_use) => in_use,
-        Err(e) => {
-            eprintln!("{warn} GC of old codebase-memory indexes skipped: {e:#}");
-            return;
-        }
-    };
-    // lsof reports resolved paths, so the folder is resolved too before the paths are compared.
-    let resolved = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-    let swept = crate::materialize::cbm_sweep::sweep_legacy_indexes(
-        &resolved,
-        retention,
-        &in_use,
-        out.dry_run,
-    );
+    let swept = in_use.map_err(str::to_string).and_then(|in_use| {
+        crate::materialize::cbm_sweep::sweep_legacy_indexes(
+            &resolved,
+            retention,
+            in_use,
+            out.dry_run,
+        )
+        .map_err(|e| format!("{e:#}"))
+    });
     match swept {
-        Ok(report) => out.report(" for old codebase-memory indexes", &report),
-        Err(e) => eprintln!("{warn} GC of old codebase-memory indexes skipped: {e:#}"),
+        Ok(report) => {
+            out.report(" for old codebase-memory indexes", &report);
+            report.failed.len()
+        }
+        Err(e) => {
+            eprintln!("{warn} GC of old codebase-memory indexes skipped: {e}");
+            1
+        }
     }
+}
+
+/// The folder of the bundles. An unresolved config folder gives a path with no bundles in it, and
+/// [`cache_use`] then reads only the top-level entries.
+fn bundles_dir() -> PathBuf {
+    paths::config_dir().map_or_else(|_| PathBuf::new(), |dir| dir.join("bundles"))
 }
 
 /// Drop the platform credential entry belonging to each cache folder GC just
@@ -173,7 +238,7 @@ pub(in crate::cli) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
         .filter(|path| {
             crate::auth::credentials::forget(path)
                 .inspect_err(|e| {
-                    tracing::debug!(
+                    tracing::warn!(
                         "could not drop credential entry for {}: {e}",
                         path.display()
                     );
@@ -188,19 +253,21 @@ pub(in crate::cli) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
 enum CacheUse {
     Unused,
     Live,
-    /// An `index_path` cannot be expanded, so the answer is not known.
+    /// An `index_path` or a bundle cannot be read, so the answer is not known.
     Unknown(String),
 }
 
-fn cache_use(config: &Config, dir: &Path) -> CacheUse {
+/// Check every `features.codebase_memory` `index_path`: the top-level entries and the entries of
+/// every configured bundle, active here or not. A bundle can be active in another folder, and its
+/// server then uses the folder (#2929).
+fn cache_use(config: &Config, bundles_dir: &Path, dir: &Path) -> CacheUse {
+    let raws = match configured_index_paths(config, bundles_dir) {
+        Ok(raws) => raws,
+        Err(cause) => return CacheUse::Unknown(cause),
+    };
     let canonical_dir = std::fs::canonicalize(dir).ok();
-    let raws = config
-        .features
-        .iter()
-        .flat_map(|f| &f.codebase_memory)
-        .filter_map(|cm| cm.index_path.as_deref());
     for raw in raws {
-        let expanded = match paths::expand_tilde(raw) {
+        let expanded = match paths::expand_tilde(&raw) {
             Ok(expanded) => PathBuf::from(expanded),
             Err(e) => return CacheUse::Unknown(format!("cannot expand index_path {raw}: {e:#}")),
         };
@@ -213,8 +280,27 @@ fn cache_use(config: &Config, dir: &Path) -> CacheUse {
     CacheUse::Unused
 }
 
+/// The raw `index_path` values of the top-level config and of each bundle's `bundle.yaml`.
+fn configured_index_paths(config: &Config, bundles_dir: &Path) -> Result<Vec<String>, String> {
+    let index_paths = |features: Option<&crate::config::Features>| -> Vec<String> {
+        features
+            .iter()
+            .flat_map(|f| &f.codebase_memory)
+            .filter_map(|cm| cm.index_path.clone())
+            .collect()
+    };
+    let mut raws = index_paths(config.features.as_ref());
+    for bundle in &config.bundle {
+        let caps = crate::merge::read_bundle_yaml(&bundles_dir.join(&bundle.name), &bundle.name)
+            .map_err(|e| format!("cannot read the index_path of a bundle: {e:#}"))?;
+        raws.extend(index_paths(caps.as_ref().and_then(|c| c.features.as_ref())));
+    }
+    Ok(raws)
+}
+
 /// Remove session-log rotations older than the retention (#2816). The active file is kept.
-fn prune_session_log(state_dir: &Path, retention: Duration, out: GcOutput<'_>) {
+/// Returns 1 when the pass failed.
+fn prune_session_log(state_dir: &Path, retention: Duration, out: GcOutput<'_>) -> usize {
     let path = session_log::file_sink::file_path_in(state_dir);
     match session_log::rotation::prune_rotations(&path, retention, out.dry_run) {
         Ok(removed) => {
@@ -225,8 +311,12 @@ fn prune_session_log(state_dir: &Path, retention: Duration, out: GcOutput<'_>) {
                 removed.len()
             );
             out.list(&removed);
+            0
         }
-        Err(e) => eprintln!("{} GC of session-log rotations failed: {e:#}", out.warn),
+        Err(e) => {
+            eprintln!("{} GC of session-log rotations failed: {e:#}", out.warn);
+            1
+        }
     }
 }
 
@@ -259,11 +349,59 @@ mod tests {
         };
         use super::{CacheUse, cache_use};
         assert_eq!(
-            cache_use(&with(&dir.display().to_string()), &dir),
+            cache_use(&with(&dir.display().to_string()), state.path(), &dir),
             CacheUse::Live
         );
-        assert_eq!(cache_use(&with("/elsewhere/cbm"), &dir), CacheUse::Unused);
-        assert_eq!(cache_use(&Config::default(), &dir), CacheUse::Unused);
+        assert_eq!(
+            cache_use(&with("/elsewhere/cbm"), state.path(), &dir),
+            CacheUse::Unused
+        );
+        assert_eq!(
+            cache_use(&Config::default(), state.path(), &dir),
+            CacheUse::Unused
+        );
+    }
+
+    #[test]
+    fn a_bundle_index_path_marks_the_folder_live() {
+        use super::{CacheUse, cache_use};
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("codebase-memory");
+        std::fs::create_dir(&dir).unwrap();
+        let bundles = state.path().join("bundles");
+        std::fs::create_dir_all(bundles.join("work")).unwrap();
+        std::fs::write(
+            bundles.join("work/bundle.yaml"),
+            format!(
+                "features:\n  codebase_memory:\n    - when: [work]\n      index_path: {}\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let config: Config = serde_yaml::from_str("bundle:\n  - name: work\n").unwrap();
+
+        assert_eq!(cache_use(&config, &bundles, &dir), CacheUse::Live);
+    }
+
+    #[test]
+    fn an_unreadable_bundle_leaves_the_folder_use_unknown() {
+        use super::{CacheUse, cache_use};
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("codebase-memory");
+        std::fs::create_dir(&dir).unwrap();
+        let bundles = state.path().join("bundles");
+        std::fs::create_dir_all(bundles.join("work")).unwrap();
+        std::fs::write(
+            bundles.join("work/bundle.yaml"),
+            "features: [not, a, mapping]\n",
+        )
+        .unwrap();
+        let config: Config = serde_yaml::from_str("bundle:\n  - name: work\n").unwrap();
+
+        assert!(matches!(
+            cache_use(&config, &bundles, &dir),
+            CacheUse::Unknown(_)
+        ));
     }
 
     #[test]
@@ -280,7 +418,7 @@ mod tests {
             .set_modified(SystemTime::now() - 30 * DAY)
             .unwrap();
 
-        sweep_state(state.path(), DAY * 7, OUT);
+        sweep_state(state.path(), &Config::default(), DAY * 7, OUT);
 
         assert!(!rotated.exists(), "the old rotation was kept");
         assert!(active.exists(), "the active log was removed");
@@ -302,7 +440,7 @@ mod tests {
             dry_run: true,
             ..OUT
         };
-        sweep_state(state.path(), DAY * 7, preview);
+        sweep_state(state.path(), &Config::default(), DAY * 7, preview);
 
         assert!(rotated.exists(), "a dry run removed an old rotation");
     }
@@ -310,7 +448,7 @@ mod tests {
     #[test]
     fn the_state_sweep_with_no_tmp_folder_and_no_log_changes_nothing() {
         let state = tempfile::tempdir().unwrap();
-        sweep_state(state.path(), DAY * 7, OUT);
+        sweep_state(state.path(), &Config::default(), DAY * 7, OUT);
         assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
     }
 
@@ -319,8 +457,9 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let entry = cache.path().join("fresh");
         std::fs::create_dir(&entry).unwrap();
-        sweep_cache(cache.path(), &Config::default(), DAY * 7, OUT);
+        let failures = sweep_cache(cache.path(), &Config::default(), DAY * 7, OUT);
         assert!(entry.exists(), "a fresh cache entry was removed");
+        assert_eq!(failures, 0);
     }
 
     #[test]
@@ -328,7 +467,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let not_a_dir = dir.path().join("file");
         std::fs::write(&not_a_dir, b"x").unwrap();
-        sweep_cache(&not_a_dir, &Config::default(), DAY * 7, OUT);
+        let failures = sweep_cache(&not_a_dir, &Config::default(), DAY * 7, OUT);
         assert!(not_a_dir.exists());
+        assert_eq!(
+            failures, 1,
+            "an unreadable cache must count as a failed sweep"
+        );
     }
 }

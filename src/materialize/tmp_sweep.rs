@@ -182,19 +182,6 @@ fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
     scan.failed.push(path.to_path_buf());
 }
 
-/// Sweep `<state_dir>/tmp` with the retention `older_than` (#2814).
-///
-/// # Errors
-/// Fails when the in-use list cannot be read. See [`open_paths`].
-pub fn sweep_state_tmp(
-    state_dir: &Path,
-    older_than: Duration,
-    dry_run: bool,
-) -> anyhow::Result<GcReport> {
-    let in_use = open_paths()?;
-    sweep(&state_dir.join("tmp"), older_than, &in_use, dry_run)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
