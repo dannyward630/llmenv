@@ -10,8 +10,6 @@ use std::path::Path;
 
 use anyhow::Context as _;
 
-use crate::git::secure_git;
-
 /// The repository name at the end of a git remote URL: HTTPS, `user@host:path`,
 /// or an SSH alias such as `alias:owner/repo.git`.
 fn repo_name_from_url(url: &str) -> Option<String> {
@@ -44,18 +42,9 @@ fn decode_git_stdout(dir: &Path, stdout: Vec<u8>) -> anyhow::Result<Option<Strin
 /// # Errors
 /// git cannot start in `dir`, or it fails for any other reason, such as "dubious ownership" or an
 /// unreadable `.git`. Any other failure would otherwise pick a different project name silently.
-/// A local git answers these queries in milliseconds.
-const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
-    let mut cmd = secure_git();
-    cmd.args(args)
-        .current_dir(dir)
-        .env("LC_ALL", "C")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
     // A hook waits for this, so a git that hangs on a stuck mount must not hang the hook (#2923).
-    let output = crate::process::run_with_timeout(cmd, GIT_TIMEOUT).map_err(|e| {
+    let output = crate::git::local_query(dir, args).map_err(|e| {
         anyhow::anyhow!(
             "cannot run git in {} to name the project: {e}. Check that git is installed and on \
              PATH, and that the folder is reachable.",

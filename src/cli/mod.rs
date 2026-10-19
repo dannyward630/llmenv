@@ -987,12 +987,7 @@ pub fn run() -> anyhow::Result<()> {
 /// git cannot start, or `git rev-parse` fails for a reason other than "not a git repository",
 /// such as dubious ownership. That failure must not read as "no repo" (#2710).
 fn is_git_repo(dir: &Path) -> anyhow::Result<bool> {
-    let output = git::secure_git()
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(dir)
-        // The "not a git repository" match below needs git's English message.
-        .env("LC_ALL", "C")
-        .output()
+    let output = git::local_query(dir, &["rev-parse", "--git-dir"])
         .with_context(|| format!("failed to run git in {}", dir.display()))?;
     if output.status.success() {
         return Ok(true);
