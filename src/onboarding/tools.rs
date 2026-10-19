@@ -43,6 +43,8 @@ struct Candidates {
 struct ToolStatus {
     #[serde(flatten)]
     tool: Tool,
+    /// The first runnable binary in an absolute `PATH` folder. A relative folder, such as `.`, is
+    /// not searched, so a binary that only a relative folder holds reads as `null`.
     found: Option<PathBuf>,
 }
 
@@ -94,14 +96,9 @@ fn find_on_path(name: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
+/// Whether the current user can run the file at `path`. `access(X_OK)` checks the owner, group,
+/// and other bits against this user, which a mode-bit test does not.
 fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+        && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
 }

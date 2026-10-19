@@ -12,7 +12,8 @@
 #   binaries        the names to look for on PATH; the first one found counts
 #   feature         the llmenv feature that a yes turns on, for a tool that runs an MCP server
 #   strong_default  shown first, with its yes preselected; still a per-item confirmation
-#   install         the install command per package manager
+#   install         the install command per package manager. A script install downloads the
+#                   script and opens it for reading before it runs, never `curl | sh`
 #
 # No version numbers: an install takes the current release.
 tools:
@@ -33,7 +34,7 @@ tools:
     feature: codebase_memory
     strong_default: true
     install:
-      script: curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+      script: curl -fsSLo cbm-install.sh https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh && less cbm-install.sh && bash cbm-install.sh
   - name: ripgrep
     purpose: Fast text search that skips ignored files.
     evidence: Every user.
@@ -84,7 +85,7 @@ tools:
     binaries: [uv]
     install:
       brew: brew install uv
-      script: curl -LsSf https://astral.sh/uv/install.sh | sh
+      script: curl -LsSfo uv-install.sh https://astral.sh/uv/install.sh && less uv-install.sh && sh uv-install.sh
   - name: ruff
     purpose: Python lint and format.
     evidence: A Python repository.
