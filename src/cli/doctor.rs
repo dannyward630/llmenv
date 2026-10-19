@@ -519,7 +519,7 @@ fn icm_server_check(version: &str) -> (CheckLevel, String) {
 
 /// The local `icm` version for a host that serves memory, or the reason it is unknown.
 fn local_icm_version() -> Result<String, String> {
-    if !crate::adapter::binary_on_path("icm").map_err(|e| format!("{e:#}"))? {
+    if !crate::adapter::binary_on_path("icm") {
         return Err("icm is not on PATH, but this host serves ICM memory".to_string());
     }
     tool_version("icm").ok_or_else(|| "`icm --version` failed or printed no version".to_string())
@@ -640,7 +640,7 @@ fn run_doctor_dependent_tools(use_color: bool) {
 
     let installed: Vec<_> = DEPENDENT_TOOLS
         .iter()
-        .filter(|(bin, _)| on_path(bin, &warn) == Some(true))
+        .filter(|(bin, _)| crate::adapter::binary_on_path(bin))
         .collect();
     if installed.is_empty() {
         return;
@@ -687,24 +687,21 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
     // icm — required when features.memory has entries
     // mcp-proxy or uvx — required when any memory server_host is remote
     if has_memory {
-        match on_path("icm", &fail) {
-            Some(true) => eprintln!("{pass} icm found on PATH"),
-            Some(false) => eprintln!(
-                "{fail} icm not found on PATH (required when features.memory is configured)"
-            ),
-            None => {}
+        if crate::adapter::binary_on_path("icm") {
+            eprintln!("{pass} icm found on PATH");
+        } else {
+            eprintln!("{fail} icm not found on PATH (required when features.memory is configured)");
         }
 
         if has_remote_memory_host(config) {
-            match (on_path("mcp-proxy", &fail), on_path("uvx", &fail)) {
-                (Some(true), _) | (_, Some(true)) => {
-                    eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
-                }
-                (Some(false), Some(false)) => eprintln!(
+            if crate::adapter::binary_on_path("mcp-proxy") || crate::adapter::binary_on_path("uvx")
+            {
+                eprintln!("{pass} mcp-proxy or uvx found on PATH (remote memory server_host)");
+            } else {
+                eprintln!(
                     "{fail} neither mcp-proxy nor uvx on PATH \
                      (remote memory server_host requires one for TCP proxying)"
-                ),
-                _ => {}
+                );
             }
         }
     }
@@ -715,14 +712,14 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         .as_ref()
         .is_some_and(|f| !f.codebase_memory.is_empty());
     if has_codebase_memory {
-        match on_path("codebase-memory-mcp", &fail) {
-            Some(true) => eprintln!("{pass} codebase-memory-mcp found on PATH"),
-            Some(false) => eprintln!(
+        if crate::adapter::binary_on_path("codebase-memory-mcp") {
+            eprintln!("{pass} codebase-memory-mcp found on PATH");
+        } else {
+            eprintln!(
                 "{fail} codebase-memory-mcp not found on PATH (required when \
                  features.codebase_memory is configured) — install: \
                  https://github.com/DeusData/codebase-memory-mcp"
-            ),
-            None => {}
+            );
         }
     }
 
@@ -732,13 +729,13 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
         .iter()
         .any(|e| e.eq_ignore_ascii_case("claude_code"));
     if !claude_disabled {
-        match on_path("claude", &fail) {
-            Some(true) => eprintln!("{pass} claude found on PATH"),
-            Some(false) => eprintln!(
+        if crate::adapter::binary_on_path("claude") {
+            eprintln!("{pass} claude found on PATH");
+        } else {
+            eprintln!(
                 "{fail} claude not found on PATH \
                  (claude_code engine is not disabled, but the `claude` binary is missing)"
-            ),
-            None => {}
+            );
         }
     }
 
@@ -750,22 +747,10 @@ fn run_doctor_tool_availability(use_color: bool, config: &Config) {
             continue; // reported above, where it is required rather than optional
         }
         let bin = adapter.binary_name();
-        match on_path(bin, &fail) {
-            Some(true) => eprintln!("{pass} {bin} found on PATH"),
-            Some(false) => eprintln!("{info} {bin} not found on PATH (optional engine)"),
-            None => {}
-        }
-    }
-}
-
-/// Whether `bin` is on `PATH`, or `None` after a `marker` line that names why the check could
-/// not run. A failed check must not read as "not installed" (#2753).
-fn on_path(bin: &str, marker: &str) -> Option<bool> {
-    match crate::adapter::binary_on_path(bin) {
-        Ok(found) => Some(found),
-        Err(e) => {
-            eprintln!("{marker} cannot check whether {bin} is on PATH: {e:#}");
-            None
+        if crate::adapter::binary_on_path(bin) {
+            eprintln!("{pass} {bin} found on PATH");
+        } else {
+            eprintln!("{info} {bin} not found on PATH (optional engine)");
         }
     }
 }
@@ -1396,14 +1381,7 @@ pub(super) fn run_doctor(
     // `--all`: "why isn't my permission rule working on opencode" is the
     // question doctor exists to answer.
     // Collected once: each `installed_adapters` call repeats its disabled_engines warning.
-    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> = super::installed_adapters(&config)
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "{} cannot list the installed engines, so the engine checks are skipped: {e:#}",
-                super::doctor_fail(use_color)
-            );
-            Vec::new()
-        });
+    let installed: Vec<Box<dyn crate::adapter::AgentAdapter>> = super::installed_adapters(&config);
     let claude_installed = has_engine(&installed, "claude_code");
     {
         let caps = doctor_manifest

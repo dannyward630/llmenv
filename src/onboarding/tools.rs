@@ -4,9 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context as _;
+
+use crate::path_lookup::find_on_path;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -82,23 +84,4 @@ pub(crate) fn report_json() -> anyhow::Result<String> {
     let path_var = std::env::var_os("PATH");
     let report = report(path_var.as_deref())?;
     serde_json::to_string_pretty(&report).context("serializing the tool report")
-}
-
-/// The first executable file named `name` in the folders of `path_var`. A name that holds a path
-/// separator is not looked up, so the data file cannot point at an arbitrary path.
-fn find_on_path(name: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
-    if name.is_empty() || name.contains(std::path::is_separator) {
-        return None;
-    }
-    std::env::split_paths(path_var?)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
-}
-
-/// Whether the current user can run the file at `path`. `access(X_OK)` checks the owner, group,
-/// and other bits against this user, which a mode-bit test does not.
-fn is_executable(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
-        && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
 }
