@@ -981,6 +981,8 @@ trackers share this one setting:
   already had something to say about the same call — the two aren't
   mutually exclusive, since a model can get stuck retrying a call the other
   feature already denied or warned about.
+  (changed in v3.13.0) Each subagent has its own counter, so parallel
+  subagents that each make the same call one time get no advisory.
 - **Task-tracker Stop reminder**: if `features.task_tracker` is on and the
   task tracker's "you still have a task in progress" reminder fires
   identically `threshold` times in a row, this appends a pointer to
@@ -1016,20 +1018,16 @@ features:
 
 (added in v3.8.0)
 
-Warn-only `PreToolUse` advisory for Bash commands that `cd`, **on by
-default** (opt-*out*, not opt-in — omitting `features.cd_guard` entirely
-resolves the same as `enabled: true`). Claude Code resets the working
-directory after every Bash call, so a `cd` — whether standalone or the
-leading step of a compound command (`cd X && …`) — silently breaks any
-*following* command that assumed the new directory. Prose guidance alone
-("prefer absolute paths") doesn't reliably stop this; the advisory
-mechanizes the reminder instead.
+Warn-only `PreToolUse` advisory for a Bash command that ends with `cd`, **on by default** (opt-*out*, not opt-in: omitting `features.cd_guard` entirely resolves the same as `enabled: true`).
+In the main agent, the Bash tool keeps its working directory between calls, so a command that ends with `cd` changes where the next call runs, and a subagent can start somewhere else.
 
-It splits the command with the same splitter as the task commit gate and flags
-any part whose first word is literally `cd`. A `cd` inside `$( )`, a subshell,
-or a brace group counts (changed in v3.12.2). A command nested more than 32
-levels deep gets no advisory. Never blocks — a deliberate `cd` still runs; the
-model just gets a one-line nudge toward absolute paths.
+(changed in v3.13.0) Only a command whose last part is `cd` gets the advisory.
+A `cd` followed by more commands in the same call (`cd /x && cargo test`), or inside `$( )`, a subshell, or a brace group that is followed by another command, changes nothing after the call and gets none.
+Before v3.13.0 any `cd` got it, and the text said that Claude Code resets the working directory, which is not what the main agent does.
+
+It splits the command with the same splitter as the task commit gate.
+A command nested more than 32 levels deep gets no advisory.
+It never blocks: a deliberate `cd` still runs, and the model gets a one-line note.
 
 ```yaml
 features:

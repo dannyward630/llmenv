@@ -495,6 +495,9 @@ and deletes the file when it succeeds.
 If the child dies, or ICM is down, the file stays.
 The next session start runs the job again, up to 3 attempts and at most 20 jobs for each start, and `llmenv doctor` lists what is left.
 llmenv deletes a checkpoint after 7 days.
+(changed in v3.13.0) A job runs in the working directory of its first run.
+When that directory is gone, the session start deletes the checkpoint and shows one notice that names the job.
+A failed start of a resumed job uses up one of its 3 attempts.
 Consolidation keeps the model summary in its checkpoint, so a resume never pays for the model twice.
 The index job is not resumed, because every session start runs the indexer anyway.
 See [Background work](troubleshooting.md#background-work-that-did-not-finish).
@@ -651,6 +654,14 @@ It chooses memories from the prompt, the recent tool calls, the newest tool erro
 A compaction or `/clear` resets the state, so the scope-tagged memories go out again.
 Set `features.memory[].adaptive_recall: false` to send the same scope-tagged memories on every prompt.
 See [`memory:`](configuration.md#featuresmemory) and [`hook-run`](commands.md#hook-run).
+
+### Fetched pages (added in v3.2.0)
+
+After a `WebFetch` or `WebSearch` call, a detached child stores the first 1,000 characters of the result in ICM at importance `low`.
+(changed in v3.13.0) The topic is `web-fetch-<project>`, with the project of the session, so only that project's own recall returns the page.
+A recall across all projects leaves out every `web-fetch` topic.
+A page from a session with no known project is stored under `web-fetch`.
+To remove the pages of one project, run `icm_memory_forget_topic` with its `web-fetch-<project>` topic.
 
 ### Post-session consolidation (added in v3.12.0)
 

@@ -48,6 +48,7 @@ pub(crate) mod task_nudge;
 pub(crate) mod task_tools;
 pub(crate) mod transcript;
 mod transcript_link;
+mod web_fetch;
 
 use std::io::Write;
 use std::str::FromStr;
@@ -70,6 +71,7 @@ use crate::mcp::resolve::{MemoryHookSettings, ResolvedKind, resolve_mcps};
 use crate::session_log::event::{EventKind, EventScope, SessionLogEvent, now_rfc3339};
 use crate::session_log::{ScopeContext, scope_header_content, scope_metadata_json, state};
 use llmenv_config::LogLevel;
+use web_fetch::{handle_web_fetch_post_tool_use, icm_store_command};
 
 /// A single cross-project, tag-scoped recall the TurnStart hook issues against
 /// ICM. Exposes the recall contract (#197) so it is testable without a live
@@ -2721,132 +2723,6 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Tool name constants for WebFetch and WebSearch tools.
-const TOOL_NAME_WEBFETCH: &str = "WebFetch";
-const TOOL_NAME_WEBSEARCH: &str = "WebSearch";
-
-/// Build ICM memory store arguments for a WebFetch/WebSearch PostToolUse event.
-/// Returns `None` if the payload is not a WebFetch/WebSearch tool result.
-///
-/// # Format
-/// The stored memory carries topic `web-fetch` and importance `low` so it decays
-/// quickly and can be bulk-cleared via `icm_memory_forget_topic("web-fetch")`.
-#[must_use]
-fn web_fetch_store_args(payload: &serde_json::Value) -> Option<serde_json::Value> {
-    let tool_name = payload["tool_name"].as_str()?;
-    if tool_name != TOOL_NAME_WEBFETCH && tool_name != TOOL_NAME_WEBSEARCH {
-        return None;
-    }
-    let is_search = tool_name == TOOL_NAME_WEBSEARCH;
-    let source_field = if is_search { "query" } else { "url" };
-    let source_value = payload["tool_input"][source_field]
-        .as_str()
-        .unwrap_or("unknown");
-    let label = if is_search { "Query" } else { "URL" };
-    let response = payload["tool_response"]
-        .as_str()
-        .map_or_else(|| json_or_empty(&payload["tool_response"]), String::from);
-    let needs_indicator = response.chars().count() > 1000;
-    let mut truncated: String = response.chars().take(1000).collect();
-    if needs_indicator {
-        truncated.push_str("... (truncated)");
-    }
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let content = format!(
-        "{label}: {source_value}\nTool: {tool_name}\nFetched at (epoch): {timestamp}\nContent preview:\n{truncated}"
-    );
-    // The id is derived from the event, so a re-spawn or a resumed job sends the same one (#2397).
-    let session = payload["session_id"].as_str().unwrap_or_default();
-    let event = payload["tool_use_id"]
-        .as_str()
-        .map_or_else(|| timestamp.to_string(), String::from);
-    // `content` holds the fetch time, so the id uses its stable parts: with a `tool_use_id` the
-    // same tool call gives the same id at any later second.
-    let request_id =
-        idempotency::request_id(&[session, "icm-store", &event, source_value, &truncated]);
-    Some(json!({
-        "content": content,
-        "topic": "web-fetch",
-        "importance": "low",
-        detached_store::REQUEST_ID_FIELD: request_id,
-        detached_store::REQUEST_KEY_FIELD: session,
-    }))
-}
-
-/// Handle PostToolUse for WebFetch/WebSearch by spawning a detached child
-/// that stores the fetched content in ICM with fast-falloff memory
-/// (importance: low, topic: web-fetch). The hook returns immediately instead of
-/// blocking on the MCP round trip. Best-effort — failures are logged at debug
-/// level and never propagated to the caller. The child's stderr goes to the
-/// shared bounded log rather than `/dev/null` so its own failures are
-/// diagnosable (#1133).
-///
-/// Returns the spawned [`std::process::Child`] purely so callers such as
-/// tests can reap it (#1095) — production intentionally drops it unwaited,
-/// identical to the previous behavior, since the child is
-/// process-group-detached and outlives this process regardless.
-fn handle_web_fetch_post_tool_use(payload: &serde_json::Value) -> Option<std::process::Child> {
-    handle_web_fetch_in(checkpoint::spawner_state_dir().as_deref(), payload)
-}
-
-/// The `llmenv icm-store` child, before its stderr log and process group are set.
-fn icm_store_command(
-    exe: std::path::PathBuf,
-    checkpoint: Option<&std::path::Path>,
-) -> std::process::Command {
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("icm-store")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null());
-    if let Some(path) = checkpoint {
-        cmd.arg("--checkpoint").arg(path);
-    }
-    cmd
-}
-
-/// [`handle_web_fetch_post_tool_use`] with the state dir for the checkpoint given (#2396).
-fn handle_web_fetch_in(
-    state_dir: Option<&std::path::Path>,
-    payload: &serde_json::Value,
-) -> Option<std::process::Child> {
-    let args = web_fetch_store_args(payload)?;
-    let Ok(payload_json) = serde_json::to_string(&args) else {
-        tracing::error!("icm-store: failed to serialize store args");
-        return None;
-    };
-    // Spawns this same binary as a detached child. The path is this process's own image, not input.
-    // nosemgrep: rust.lang.security.current-exe.current-exe
-    let Ok(exe) = std::env::current_exe() else {
-        tracing::error!("icm-store: cannot resolve current_exe for detached store");
-        return None;
-    };
-    let checkpoint = checkpoint::begin(
-        state_dir,
-        checkpoint::JobKind::IcmStore,
-        &args,
-        payload["session_id"].as_str(),
-    );
-    let mut cmd = icm_store_command(exe, checkpoint.as_deref());
-    redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
-    crate::mcp::proxy::detach_process_group(&mut cmd);
-    let Ok(mut child) = cmd.spawn() else {
-        tracing::error!("icm-store: failed to spawn detached store child");
-        return None;
-    };
-    if let Some(mut stdin) = child.stdin.take()
-        && let Err(e) = stdin.write_all(payload_json.as_bytes())
-    {
-        tracing::error!("icm-store: failed to pipe args to detached child: {e}");
-    }
-    // Not waited on by the caller: the child is process-group-detached and
-    // outlives us.
-    Some(child)
-}
-
 /// Where codebase-memory-mcp's index cache lives for `cm`/`state_dir`: the
 /// configured `index_path` override, or `state_dir/codebase-memory` by
 /// default. Single source of truth for both the spawned child's
@@ -3467,18 +3343,7 @@ fn respawn_job_with_exe(
         })?;
     // Spawns this same binary as a detached child. The path is this process's own image, not input.
     // nosemgrep: rust.lang.security.current-exe.current-exe
-    let exe = match current_exe() {
-        Ok(exe) => exe,
-        Err(e) => {
-            // Returning Ok keeps the bumped attempt count. A restore would retry this job on every
-            // session and never reach MAX_ATTEMPTS (#2720).
-            tracing::error!(
-                "background job {} not resumed, cannot resolve current_exe: {e}",
-                path.display()
-            );
-            return Ok(());
-        }
-    };
+    let exe = current_exe().context("cannot resolve current_exe")?;
     let stdin = cp.inputs.to_string();
     match cp.kind {
         JobKind::IcmStore => spawn_detached(icm_store_command(exe, Some(path)), Some(&stdin), cwd),
@@ -3659,6 +3524,7 @@ mod tests {
         }
     }
 
+    use super::web_fetch::handle_web_fetch_in;
     use super::*;
 
     /// Every event `from_str` accepts. Kept as strings so a new variant that
@@ -3769,13 +3635,18 @@ mod tests {
         let payload = json!({
             "session_id": "sess-1", "tool_use_id": "tu1", "tool_name": "WebFetch",
             "tool_input": {"url": "https://example.com"}, "tool_response": "body",
+            "cwd": dir.path().join("proj-a").display().to_string(),
         });
+        std::fs::create_dir(dir.path().join("proj-a")).unwrap();
         let child = handle_web_fetch_in(Some(dir.path()), &payload);
         let listed = checkpoint::checkpoint_entries_for_test(dir.path());
         assert_eq!(listed.len(), 1, "{listed:?}");
         let (kind, inputs, session) = &listed[0];
         assert_eq!(*kind, checkpoint::JobKind::IcmStore);
-        assert_eq!(inputs["topic"], "web-fetch");
+        assert_eq!(
+            inputs["topic"], "web-fetch-proj-a",
+            "the page keeps its project (#2911)"
+        );
         assert!(
             !inputs[detached_store::REQUEST_ID_FIELD]
                 .as_str()
@@ -3981,23 +3852,18 @@ mod tests {
     }
 
     #[test]
-    fn a_job_whose_image_cannot_be_resolved_is_logged_and_not_spawned() {
+    fn a_job_whose_image_cannot_be_resolved_is_a_failed_start() {
         let dir = tempfile::tempdir().unwrap();
         let mut cp = checkpoint::Checkpoint::new(checkpoint::JobKind::IcmStore, json!({}), None);
         cp.cwd = Some(dir.path().display().to_string());
-        let mut result = None;
-        let logs = crate::test_log_capture::capture_logs(|| {
-            result = Some(respawn_job_with_exe(
-                &cp,
-                std::path::Path::new("/s/x.json"),
-                || Err(std::io::Error::other("no image")),
-            ));
-        });
+        let err = respawn_job_with_exe(&cp, std::path::Path::new("/s/x.json"), || {
+            Err(std::io::Error::other("no image"))
+        })
+        .expect_err("a failed lookup is a failed start, which uses an attempt");
         assert!(
-            result.is_some_and(|r| r.is_ok()),
-            "a failed lookup settles as Ok"
+            format!("{err:#}").contains("cannot resolve current_exe"),
+            "{err:#}"
         );
-        assert!(logs.contains("cannot resolve current_exe"), "{logs}");
     }
 
     #[test]
@@ -5431,7 +5297,7 @@ mod tests {
         let config = crate::config::Config::default();
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
         assert!(
@@ -5452,7 +5318,7 @@ mod tests {
         };
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s1"), &config, false, state_dir.path());
         assert!(
@@ -5476,7 +5342,7 @@ mod tests {
         };
         let payload = serde_json::json!({
             "tool_name": "Bash",
-            "tool_input": { "command": "cd /tmp && ls" },
+            "tool_input": { "command": "ls && cd /tmp" },
         });
         let text = resolve_pre_tool_text(&payload, Some("s2"), &config, false, state_dir.path())
             .expect("test");
@@ -7007,174 +6873,6 @@ mod tests {
         assert!(
             out.contains("episodic"),
             "existing marker must survive: {out}"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_extracts_url_and_summary() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "# Hello\n\nThis is fetched content",
-        });
-        let args = web_fetch_store_args(&payload).expect("should detect WebFetch");
-        assert_eq!(args["topic"], "web-fetch");
-        assert_eq!(args["importance"], "low");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("https://example.com"), "url in content");
-        assert!(content.contains("WebFetch"), "tool name in content");
-        assert!(
-            content.contains("Fetched at (epoch)"),
-            "timestamp in content"
-        );
-        assert!(content.contains("Hello"), "content preview in content");
-    }
-
-    #[test]
-    fn web_fetch_request_id_is_stable_per_tool_call_and_keyed_by_session() {
-        let payload = |tool_use_id: &str, url: &str| {
-            json!({
-                "session_id": "sess-1", "tool_use_id": tool_use_id, "tool_name": "WebFetch",
-                "tool_input": {"url": url}, "tool_response": "body",
-            })
-        };
-        let a = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
-        let again = web_fetch_store_args(&payload("tu1", "https://a")).expect("args");
-        assert_eq!(
-            a[detached_store::REQUEST_ID_FIELD],
-            again[detached_store::REQUEST_ID_FIELD]
-        );
-        assert_eq!(a[detached_store::REQUEST_KEY_FIELD], "sess-1");
-        let other_call = web_fetch_store_args(&payload("tu2", "https://a")).expect("args");
-        assert_ne!(
-            a[detached_store::REQUEST_ID_FIELD],
-            other_call[detached_store::REQUEST_ID_FIELD]
-        );
-        let other_url = web_fetch_store_args(&payload("tu1", "https://b")).expect("args");
-        assert_ne!(
-            a[detached_store::REQUEST_ID_FIELD],
-            other_url[detached_store::REQUEST_ID_FIELD]
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_supports_web_search() {
-        let payload = json!({
-            "tool_name": "WebSearch",
-            "tool_input": {"query": "rust programming"},
-            "tool_response": "Search results here",
-        });
-        let args = web_fetch_store_args(&payload).expect("should detect WebSearch");
-        assert_eq!(args["topic"], "web-fetch");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("WebSearch"));
-        assert!(content.contains("Search results"));
-        assert!(content.contains("Query: rust programming"));
-        assert!(content.contains("Tool: WebSearch"));
-    }
-
-    #[test]
-    fn web_fetch_store_args_ignores_non_web_fetch_tools() {
-        let payload = json!({
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "tool_response": "result",
-        });
-        assert!(
-            web_fetch_store_args(&payload).is_none(),
-            "non-WebFetch tool should return None"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_missing_url_or_tool_input() {
-        // Missing url key within tool_input.
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {},
-            "tool_response": "content",
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle missing url");
-        let content = args["content"].as_str().unwrap();
-        assert!(content.contains("unknown"), "should fall back to 'unknown'");
-
-        // Missing entire tool_input key — same serde_json Null path.
-        let payload2 = json!({
-            "tool_name": "WebFetch",
-            "tool_response": "content",
-        });
-        let args2 = web_fetch_store_args(&payload2).expect("should handle missing tool_input");
-        let content2 = args2["content"].as_str().unwrap();
-        assert!(
-            content2.contains("unknown"),
-            "should fall back to 'unknown'"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_empty_response() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "",
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle empty response");
-        let content = args["content"].as_str().unwrap();
-        assert!(
-            content.contains("Content preview:\n"),
-            "empty content after preview header"
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_truncates_long_content() {
-        let long = "x".repeat(2000);
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": long,
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle long content");
-        let content = args["content"].as_str().unwrap();
-        let preview = content.split("Content preview:\n").nth(1).unwrap_or("");
-        assert!(
-            preview.ends_with("... (truncated)"),
-            "truncation indicator should be present, got: {preview:?}"
-        );
-        let truncated = preview.strip_suffix("... (truncated)").unwrap_or(preview);
-        assert!(
-            truncated.len() <= 1000,
-            "truncated content should be at most 1000 chars, got {}",
-            truncated.len()
-        );
-    }
-
-    #[test]
-    fn web_fetch_store_args_returns_none_for_null_payload() {
-        assert!(web_fetch_store_args(&serde_json::Value::Null).is_none());
-    }
-
-    #[test]
-    fn web_fetch_store_args_returns_none_for_missing_tool_name() {
-        let payload = json!({
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": "content",
-        });
-        assert!(web_fetch_store_args(&payload).is_none());
-    }
-
-    #[test]
-    fn web_fetch_store_args_handles_object_tool_response() {
-        let payload = json!({
-            "tool_name": "WebFetch",
-            "tool_input": {"url": "https://example.com"},
-            "tool_response": {"content": [{"type": "text", "text": "hello world"}]},
-        });
-        let args = web_fetch_store_args(&payload).expect("should handle object response");
-        let content = args["content"].as_str().unwrap();
-        assert!(
-            content.contains("hello world"),
-            "extracted text from object response"
         );
     }
 
