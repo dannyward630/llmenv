@@ -291,6 +291,7 @@ The language and environment bundles of `phaedrus1992/my-llmenv` are copied, unc
 The files stay byte for byte, so markdownlint skips the bundle folders.
 
 `src/onboarding/shipped/files.rs` embeds each file with `include_str!`, with a flag for the executable bit.
+The render keeps that bit too (#2967), so a skill can run its script from the rendered folder.
 A skill script that runs directly, such as `check-arc-ownership.sh`, needs that bit.
 A test compares the table with the folder: the file list, the text, and the bit.
 A build script could generate the table, but the table is short and a test catches drift with no build step.
@@ -307,6 +308,8 @@ A bundle fires when a scope emits any of its `when` tags, so each tag is a switc
 A plan bundle with `shipped: true` names a shipped bundle.
 It sets only `name` and, optionally, `when`, which defaults to the manifest tags.
 On load, its capabilities come from the embedded `bundle.yaml`, so the gate asks about each allow, hook, MCP server, language server, and plugin as for any plan bundle.
+The shipped capabilities pass the plan shape rules, with `env` allowed as a mapping.
+A later copy from the source repository that adds a key the gate cannot show, such as `permissions.default_mode`, fails the tests.
 
 A shipped `bundle.yaml` may set `env`, and a plan bundle may not.
 The plan rule exists because the agent writes the plan, and an `env` entry such as `BASH_ENV` can run code.
@@ -316,6 +319,9 @@ Each variable still gets its own question.
 
 With every answer yes, the shipped `bundle.yaml` is written byte for byte.
 After a no, it is written from the remaining entries under a one-line header, and its comments are lost.
+A list or a mapping that every no emptied is left out.
+A removal keeps the order of the entries that remain.
+Every file of the bundle is written, so a hook that gets a no leaves its script in the bundle, unused.
 A shipped hook can run a script of its bundle, such as `hooks/ruff-report.sh`, because the script also comes from the binary.
 
 `--apply` makes each folder in a bundle with the same create-only call as the bundle folder.
@@ -324,11 +330,12 @@ The written files are a copy: a later llmenv release does not change them.
 
 ### The personal-pattern check
 
-`bundles/personal-patterns.txt` lists named shapes: an email address, a home path, an mDNS host, a tailnet host, and an IPv4 address.
+`bundles/personal-patterns.txt` lists named shapes: an email address, a Unix or Windows home path, a private host name (`.local`, `.lan`, `.internal`, `.home.arpa`), a tailnet host, an IPv4 address, and an IPv6 unique local address.
 The test `shipped_bundles_hold_no_personal_pattern` scans every file under `bundles/` and `skills/`.
 Each regular expression matches a shape only, and code checks the meaning.
-An email at a documentation domain (RFC 2606 and RFC 6761) and the `git@` login of a Git host are allowed.
-An IPv4 address is personal only when `Ipv4Addr` reports it as private or link-local.
+An email at a documentation domain (RFC 2606 and RFC 6761) and the `git@` login of a public Git host are allowed.
+An IPv4 address is personal when `Ipv4Addr` reports it as private or link-local, or when it is in 100.64.0.0/10, the shared range that a tailnet uses.
+An IPv6 match is personal only when it parses in fc00::/7.
 The test runs in CI with the rest of the unit tests.
 
 ## Not in scope

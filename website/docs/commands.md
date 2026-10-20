@@ -1061,6 +1061,7 @@ Add other keys, such as `env` or `skills`, by hand after setup.
 It sets only `name`, `shipped`, and optionally `when`, which defaults to the shipped tags.
 Its `bundle.yaml` can set `env`, because llmenv ships and tests it, and each variable gets a question.
 After a no, `bundle.yaml` is written from the entries that remain, and its comments are lost.
+Every file of a shipped bundle is written, so a hook that gets a no leaves its script in the bundle, unused.
 Design: [`docs/design/issue-2773-onboarding.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/issue-2773-onboarding.md).
 
 `--apply` needs a terminal, so you run it yourself in a terminal window.
