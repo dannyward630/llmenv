@@ -122,7 +122,12 @@ fn copy_dir_owner_only_inner(
             let content =
                 crate::paths::dirfd::read_file_at(src_dir, &file_name, MAX_SKILL_FILE_BYTES)
                     .with_context(|| format!("reading '{}'", src_path.display()))?;
-            crate::paths::write_owner_only(&dest_path, &content)?;
+            // A skill can run its script directly, so the script keeps its executable bit.
+            if crate::paths::dirfd::is_executable_at(src_dir, &file_name)? {
+                crate::paths::write_owner_only_executable(&dest_path, &content)?;
+            } else {
+                crate::paths::write_owner_only(&dest_path, &content)?;
+            }
             written.push(dest_path);
         } else {
             eprintln!(
@@ -139,6 +144,30 @@ fn copy_dir_owner_only_inner(
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    /// A skill can run its script directly, so the copy keeps the executable bit.
+    #[test]
+    fn a_skill_script_keeps_its_executable_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let src = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("SKILL.md"), "x").unwrap();
+        std::fs::create_dir(src.path().join("scripts")).unwrap();
+        let script = src.path().join("scripts/run.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dest = out.path().join("skill");
+        copy_dir_owner_only(src.path(), &dest).unwrap();
+        let mode_of = |rel: &str| {
+            std::fs::metadata(dest.join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode_of("scripts/run.sh"), 0o700);
+        assert_eq!(mode_of("SKILL.md"), 0o600);
+    }
 
     proptest::proptest! {
         #[test]

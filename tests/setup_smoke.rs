@@ -206,10 +206,61 @@ fn setup_non_interactive_no_flags() {
         "setup should not panic in non-interactive mode (status={:?}): {stderr}",
         output.status.code()
     );
-    // A clear message should be shown (either requesting --no-launch or describing
-    // the fallback behaviour)
+    // The wizard stops before it writes anything, and names the fix.
     assert!(
-        !stderr.is_empty() || !output.stdout.is_empty(),
-        "setup should produce some output in non-interactive mode"
+        stderr.contains("needs a terminal") && stderr.contains("--no-launch"),
+        "{stderr}"
     );
+    assert!(
+        !dir.path().join("config.yaml").exists(),
+        "nothing is written"
+    );
+}
+
+/// `--apply` asks the user for each gated entry, so it refuses to run with no terminal, which
+/// is the state of an agent's shell (#2788).
+#[test]
+fn setup_apply_refuses_without_a_terminal() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("config.yaml"), "bundle: []\n").unwrap();
+    let plan = dir.path().join("plan.yaml");
+    fs::write(&plan, "bundles: [{name: x, when: [t]}]\n").unwrap();
+    llmenv_cmd(dir.path())
+        .arg("setup")
+        .arg("--apply")
+        .arg(&plan)
+        .timeout(TIMEOUT)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs a terminal"))
+        .stderr(predicate::str::contains("yourself in a terminal"));
+    assert!(!dir.path().join("bundles/x").exists());
+}
+
+/// A second `--no-launch` run cannot ask, so it takes the merge: it keeps config.yaml and
+/// refreshes the skill (#2789).
+#[test]
+fn setup_no_launch_on_an_existing_config_merges_and_keeps_it() {
+    let dir = TempDir::new().unwrap();
+    llmenv_cmd(dir.path())
+        .arg("setup")
+        .arg("--no-launch")
+        .timeout(TIMEOUT)
+        .assert()
+        .success();
+    let path = dir.path().join("config.yaml");
+    fs::write(
+        &path,
+        format!("# my edit\n{}", fs::read_to_string(&path).unwrap()),
+    )
+    .unwrap();
+    let edited = fs::read_to_string(&path).unwrap();
+    llmenv_cmd(dir.path())
+        .arg("setup")
+        .arg("--no-launch")
+        .timeout(TIMEOUT)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Config files were not modified"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }

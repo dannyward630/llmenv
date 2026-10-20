@@ -16,7 +16,7 @@
 /// saving" or "no memories found" mid-sentence must pass through unchanged, or
 /// it would be silently dropped from the injected context. Case-insensitive so
 /// a wording/case variant from the server is still recognized (#978).
-pub(super) fn strip_advisory(text: &str) -> String {
+pub(crate) fn strip_advisory(text: &str) -> String {
     text.lines()
         .filter(|line| {
             let lower = line.trim_start().to_ascii_lowercase();

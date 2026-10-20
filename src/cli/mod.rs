@@ -3029,10 +3029,10 @@ This directory contains your llmenv configuration.
         eprintln!("Created README at {}", readme_path.display());
     }
 
-    // Interactive first-run prompts (only when stdin is a TTY).
+    // Interactive first-run prompts, only on a terminal: dialoguer reads stdin and asks on stderr.
     // Intentionally Claude Code-only: Crush has no auth/settings concept yet.
     use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() {
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
         let adapter_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?)
             .join(ClaudeCodeAdapter.name());
         run_init_auth_prompt(&adapter_root)?;

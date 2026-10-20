@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 
+mod body;
 mod parse;
 mod request_headers;
 
@@ -221,17 +222,7 @@ impl McpHttpClient {
             .map_err(crate::proxy_note::with_proxy_note)?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .inspect_err(|e| {
-                    tracing::warn!(
-                        error = %e,
-                        url = %self.url,
-                        "failed to read MCP initialize error response body"
-                    )
-                })
-                .unwrap_or_else(|_| "(failed to read error body)".to_string());
+            let body = body::error_body(resp, "MCP initialize").await;
             return Err(anyhow!("MCP initialize returned HTTP {status}: {body}"));
         }
         let sid = resp
@@ -240,16 +231,9 @@ impl McpHttpClient {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if capture_info {
-            let text = resp
-                .text()
+            let text = body::read_capped(resp, body::MAX_REPLY_BYTES, "MCP initialize")
                 .await
-                .map_err(reqwest::Error::without_url)
-                .with_context(|| {
-                    format!(
-                        "reading the MCP initialize reply from {}",
-                        self.display_url()
-                    )
-                })?;
+                .with_context(|| format!("reading the reply from {}", self.display_url()))?;
             *self.init_info.lock().await = Some(parse_initialize_info(&text)?);
         }
 
@@ -443,17 +427,7 @@ impl McpHttpClient {
         // Capture status and body for detailed error reporting.
         let status = resp.status();
         if !status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .inspect_err(|e| {
-                    tracing::warn!(
-                        error = %e,
-                        request = %label,
-                        "failed to read MCP error response body"
-                    )
-                })
-                .unwrap_or_else(|_| "(failed to read error body)".to_string());
+            let body = body::error_body(resp, label).await;
             let err = anyhow!("{label} returned HTTP {}: {}", status, body);
             return Err(if is_stale_session_status(status) {
                 CallToolError::StaleSession(err)
@@ -462,11 +436,8 @@ impl McpHttpClient {
             });
         }
 
-        let text = resp
-            .text()
+        let text = body::read_capped(resp, body::MAX_REPLY_BYTES, label)
             .await
-            .map_err(reqwest::Error::without_url)
-            .with_context(|| format!("reading the response body for {label}"))
             .map_err(CallToolError::Fatal)?;
         let body = parse_rpc_body(&text)
             .ok_or_else(|| anyhow!("decoding JSON response for {label}: the reply is not JSON"))
