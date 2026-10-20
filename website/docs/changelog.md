@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 3.13.0 adds onboarding from a scan of your repositories, one cleanup command, and support for opencode 2.x.
 It also scopes memory recall to the session's project, hardens the hooks and the codebase-memory guard, and replaces many silent failures with notices that name the cause and the fix.
 
+**Breaking changes.**
+llmenv supports opencode 2.x only (#2840).
+The MCP HTTP client ignores the proxy variables, so an MCP server reachable only through a proxy no longer works (#2484).
+`llmenv setup --no-launch` on a configured machine merges instead of replacing `config.yaml` (#2789).
+codebase-memory allowed roots are no longer recorded automatically, and the `index_repository` guard denies a relative `repo_path` (#2916).
+A grant store from an earlier llmenv keeps its old roots until you delete or edit `<cache dir>/allowed_roots` (#2916).
+
 **Onboarding.**
 `llmenv setup --scan` and `llmenv setup --tools` print the evidence and the tools that onboarding can use (#2785, #2791).
 The `setup-llmenv` skill writes a plan, and `llmenv setup --apply` applies it with a yes for each change (#2786, #2788).
@@ -81,10 +88,10 @@ A non-UTF-8 environment variable fails with an error that names it (#2600, #2607
 - The `setup-llmenv` skill proposes bundles from a scan of your repositories, each with its evidence, and suggests tools with ICM and codebase-memory-mcp first. It shows the whole plan before it writes. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup) (#2786) [feat:cli]
 - The `llmenv clean` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
 - The codebase-memory-mcp floor is now 0.12.0, and `llmenv doctor` warns below it. The docs say a repo indexed from the CLI is not watched, and that 0.12.0 changes the index format from 1 to 2 (#2853) [fix:mcp]
-- llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]
+- **BREAKING:** llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]
 - Adaptive recall skips its keyword and topic fanouts when the project and global-topic recalls already fill the byte budget, so a full turn sends fewer recall calls with the same memories. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2920) [perf:hook]
 - After a tool error, llmenv injects a memory only when its summary or keywords share a distinctive word or an error code with the error, so an unrelated best match no longer shows up. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2921) [feat:hook]
-- `llmenv setup` on a machine with a config offers a merge by default: it keeps every file and lets the onboarding plan add what is new. Reset is a second choice, and `--no-launch` takes the merge instead of replacing `config.yaml`. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup) (#2789) [feat:setup]
+- **BREAKING:** `llmenv setup` on a machine with a config offers a merge by default: it keeps every file and lets the onboarding plan add what is new. Reset is a second choice, and `--no-launch` takes the merge instead of replacing `config.yaml`. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup) (#2789) [feat:setup]
 - The `setup-llmenv` skill writes a plan instead of config files, and asks you to run `llmenv setup --apply` on it in a terminal. A plan can add scope entries, so a new bundle can fire. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---apply) (#2788) [feat:setup]
 
 ### Deprecated
