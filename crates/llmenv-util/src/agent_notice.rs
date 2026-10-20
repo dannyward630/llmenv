@@ -92,6 +92,14 @@ pub fn current() -> Option<String> {
         .current()
 }
 
+/// Log `notice` at error level, which the default filter shows, and add it for the agent. The
+/// engine drops a hook's stderr, so the log alone reaches no one.
+pub fn record_logged(notice: impl Into<String>) {
+    let notice = notice.into();
+    tracing::error!("{notice}");
+    record(notice);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{NoticeList, clean, current, record};

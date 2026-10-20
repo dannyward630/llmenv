@@ -58,7 +58,7 @@ pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<(
 /// extremely unlikely to collide across processes (different pids).
 static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) fn write_owner_only_atomic_in_dir(
+fn write_owner_only_atomic_in_dir(
     parent: &Path,
     file_name: &std::ffi::OsStr,
     final_path: &Path,

@@ -5,9 +5,6 @@
 //! and added as segments, so the checks never recurse on their own. Split from `task_nudge` so
 //! the hook state code stays separate from the parsing (#2627, #2542).
 
-use std::iter::Peekable;
-use std::str::Chars;
-
 /// The deepest nesting that the splitter follows. The budget counts substitutions, `eval`
 /// arguments, and `sh -c` scripts together. Deeper input fails closed, so the hook process stack
 /// does not grow with the input (#2544).
@@ -97,41 +94,24 @@ fn split_at_depth(command: &str, depth: usize) -> Result<String, NestingTooDeep>
     Ok(out)
 }
 
+/// Whether `command` ends with a substitution and nothing after it, as in `ls && $(cd /x)`. The
+/// substitution runs in a subshell, but the split puts its command in the last segment, because
+/// the command that holds it is empty (#2937).
+///
+/// # Errors
+/// Returns [`NestingTooDeep`] when the nesting goes past the depth bound.
+pub(super) fn ends_with_substitution(command: &str) -> Result<bool, NestingTooDeep> {
+    let command = command.trim_end();
+    if !command.ends_with([')', '`']) {
+        return Ok(false);
+    }
+    Ok(split_at_depth(command, 0)?.trim_end().ends_with(';'))
+}
+
 /// One substitution as a `;`-terminated part. The `;` on each side is a segment boundary for
 /// the splitter. The part sits outside any quote, because it goes at a segment start.
 fn part(inner: &str) -> String {
     format!(";{inner};")
-}
-
-/// Take the text up to the `)` that closes a `$(` already read, counting nested parentheses.
-/// Quotes and escapes group as they do in the outer splitter, so a `)` inside quotes is text.
-pub(super) fn take_until_close(chars: &mut Peekable<Chars<'_>>) -> String {
-    let mut depth = 0_usize;
-    let (mut single, mut double) = (false, false);
-    let mut inner = String::new();
-    while let Some(c) = chars.next() {
-        if single {
-            single = c != '\'';
-        } else {
-            match c {
-                '\\' => {
-                    inner.push(c);
-                    if let Some(next) = chars.next() {
-                        inner.push(next);
-                    }
-                    continue;
-                }
-                '\'' if !double => single = true,
-                '"' => double = !double,
-                ')' if !double && depth == 0 => break,
-                ')' if !double => depth = depth.saturating_sub(1),
-                '(' if !double => depth = depth.saturating_add(1),
-                _ => {}
-            }
-        }
-        inner.push(c);
-    }
-    inner
 }
 
 /// Split `command` into segments at the shell operators `;`, `|`, `&`, and a newline, and each
@@ -258,106 +238,10 @@ pub(super) fn program(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// A wrapper runs the command that follows its options. Its entry is the name, the options that
-/// take a separate value word (`-u root`, `--user root`), and the count of plain operands before
-/// the command, such as the duration of `timeout`. An option missing from its entry hides the
-/// command word, so each entry lists every value option of the tool.
-type Wrapper = (&'static str, &'static [&'static str], usize);
-
-const TIMEOUT_OPTS: &[&str] = &["-s", "--signal", "-k", "--kill-after"];
-const STDBUF_OPTS: &[&str] = &["-i", "--input", "-o", "--output", "-e", "--error"];
-
-/// The wrappers that run a command with another environment, privilege, limit, or runner. Each
-/// one is skipped with its options, so the word after them is the program (#2542).
-const WRAPPERS: [Wrapper; 19] = [
-    (
-        "env",
-        &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
-        0,
-    ),
-    (
-        "sudo",
-        &[
-            "-u",
-            "--user",
-            "-g",
-            "--group",
-            "-C",
-            "--close-from",
-            "-p",
-            "--prompt",
-            "-U",
-            "--other-user",
-            "-r",
-            "--role",
-            "-t",
-            "--type",
-            "-D",
-            "--chdir",
-            "-R",
-            "--chroot",
-            "-T",
-            "--command-timeout",
-        ],
-        0,
-    ),
-    ("doas", &["-u", "-C"], 0),
-    ("nice", &["-n", "--adjustment"], 0),
-    ("gnice", &["-n", "--adjustment"], 0),
-    (
-        "ionice",
-        &[
-            "-c",
-            "--class",
-            "-n",
-            "--classdata",
-            "-p",
-            "--pid",
-            "-P",
-            "--pgid",
-            "-u",
-            "--uid",
-        ],
-        0,
-    ),
-    ("nohup", &[], 0),
-    ("gnohup", &[], 0),
-    ("time", &["-f", "--format", "-o", "--output"], 0),
-    ("exec", &["-a"], 0),
-    ("command", &[], 0),
-    ("timeout", TIMEOUT_OPTS, 1),
-    ("gtimeout", TIMEOUT_OPTS, 1),
-    ("stdbuf", STDBUF_OPTS, 0),
-    ("gstdbuf", STDBUF_OPTS, 0),
-    ("setsid", &[], 0),
-    (
-        "xargs",
-        &[
-            "-a",
-            "--arg-file",
-            "-d",
-            "--delimiter",
-            "-E",
-            "-I",
-            "--replace",
-            "-L",
-            "--max-lines",
-            "-n",
-            "--max-args",
-            "-P",
-            "--max-procs",
-            "-s",
-            "--max-chars",
-        ],
-        0,
-    ),
-    ("caffeinate", &["-t", "-w"], 0),
-    (
-        "flock",
-        &["-w", "--timeout", "-E", "--conflict-exit-code"],
-        1,
-    ),
-];
+mod scan;
+pub(super) use scan::take_until_close;
+mod wrappers;
+use wrappers::WRAPPERS;
 
 /// The words of one segment after its group openers, env assignments, and wrappers with their
 /// options. The first word is the program. The commit matcher and the task-end matcher both read a
@@ -531,7 +415,7 @@ mod tests {
 
     #[test]
     fn takes_value_reads_exact_options_and_short_clusters() {
-        let opts = TIMEOUT_OPTS;
+        let opts = wrappers::TIMEOUT_OPTS;
         assert!(takes_value("-s", opts));
         assert!(takes_value("--signal", opts));
         // A cluster that ends in a value option takes the next word.

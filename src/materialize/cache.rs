@@ -10,6 +10,10 @@ use sha2::{Digest, Sha256};
 use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
+mod gc_report;
+pub use gc_report::GcReport;
+pub(crate) use gc_report::{gc_remove_dir, gc_remove_link};
+
 /// Stable SHA-256 of the merged manifest. Each field is length-prefixed
 /// (little-endian u64) before its bytes so concatenation cannot ambiguate
 /// boundaries — i.e. `{agents_md="ABC", files={"DE":"FG"}}` and
@@ -102,7 +106,7 @@ pub fn hash_manifest(m: &MergedManifest) -> anyhow::Result<String> {
     for (rel, abs) in &m.files {
         let rel_str = rel.to_string_lossy();
         update_len_prefixed(&mut h, rel_str.as_bytes());
-        let bytes = std::fs::read(abs)?;
+        let bytes = crate::paths::bounded::asset(abs)?;
         update_len_prefixed(&mut h, &bytes);
     }
     // Note: the cache key is a function of (relative path, file contents) only.
@@ -206,15 +210,6 @@ fn hash_native_capability_map(
         update_len_prefixed(h, serialized.as_bytes());
     }
     Ok(())
-}
-
-#[derive(Debug, Default)]
-pub struct GcReport {
-    pub removed: Vec<PathBuf>,
-    pub kept: usize,
-    /// Entries gc tried to remove but couldn't. Same contract as
-    /// [`PruneReport::failed`] — never counted as `removed` (#1372).
-    pub(crate) failed: Vec<PathBuf>,
 }
 
 /// Selects which cache folders `prune` targets.
@@ -570,12 +565,15 @@ fn newest_mtime_or_record(p: &Path, failed: &mut Vec<PathBuf>) -> Option<SystemT
 ///   as a unit (they'll be collected entirely next upgrade).
 /// - [`HashingMode::Strict`] — each `{VERSION_TAG}-{content_hash}` folder is a
 ///   direct child; each is age-checked individually.
+///
+/// With `dry_run`, the report lists the same entries and nothing is removed (#2917).
 pub fn gc(
     cache_root: &Path,
     older_than: Duration,
     hashing: HashingMode,
+    dry_run: bool,
 ) -> anyhow::Result<GcReport> {
-    let mut report = GcReport::default();
+    let mut report = GcReport::new(dry_run);
     // #918: a missing cache dir → nothing to gc; a permission error propagates.
     let Some(entries) = crate::paths::read_dir_optional(cache_root)? else {
         return Ok(report);
@@ -638,40 +636,6 @@ pub fn gc(
         }
     }
     Ok(report)
-}
-
-/// Remove a directory for [`gc`], recording rather than propagating a failure.
-///
-/// Same reasoning as [`remove_dir`] (#1372): one undeletable entry must not
-/// abort collection of everything after it, since `doctor --gc` reported only
-/// the bare errno and left the rest of the cache untouched.
-pub(crate) fn gc_remove_dir(p: &Path, report: &mut GcReport) {
-    match remove_dir_all_forcing_writable(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
-        Err(e) => {
-            tracing::error!(
-                path = %p.display(),
-                error = %e,
-                "gc: failed to remove cache directory; skipping"
-            );
-            report.failed.push(p.to_path_buf());
-        }
-    }
-}
-
-/// Unlink a symlink for [`gc`], recording rather than propagating a failure.
-pub(crate) fn gc_remove_link(p: &Path, report: &mut GcReport) {
-    match std::fs::remove_file(p) {
-        Ok(()) => report.removed.push(p.to_path_buf()),
-        Err(e) => {
-            tracing::error!(
-                path = %p.display(),
-                error = %e,
-                "gc: failed to unlink cache entry; skipping"
-            );
-            report.failed.push(p.to_path_buf());
-        }
-    }
 }
 
 /// Age-check each per-shape leaf directory under a `<version_major>` generation
@@ -1061,7 +1025,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = touch_dir(tmp.path(), STATE_DIR_NAME);
         let stale = touch_dir(tmp.path(), &format!("{VERSION_TAG}-deadbeef"));
-        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict).unwrap();
+        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, false).unwrap();
         assert!(state.exists(), "state dir must survive gc");
         assert!(
             !report.removed.contains(&state),
@@ -1278,7 +1242,7 @@ mod tests {
         chmod(&cache_root, 0o555);
 
         // older_than=0 expires everything.
-        let result = gc(&cache_root, Duration::ZERO, HashingMode::Strict);
+        let result = gc(&cache_root, Duration::ZERO, HashingMode::Strict, false);
 
         chmod(&cache_root, 0o755);
         let report = result.expect("an unremovable entry is reported, not propagated");
@@ -1334,7 +1298,7 @@ mod tests {
         fs::create_dir_all(&unreadable).unwrap();
         chmod(&unreadable, 0o000);
 
-        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Strict);
+        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, false);
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable folder is not fatal");
@@ -1354,7 +1318,7 @@ mod tests {
         fs::create_dir_all(&unreadable).unwrap();
         chmod(&unreadable, 0o000);
 
-        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Normal);
+        let result = gc(tmp.path(), Duration::ZERO, HashingMode::Normal, false);
 
         chmod(&unreadable, 0o755);
         let report = result.expect("one unreadable leaf is not fatal");
@@ -1428,7 +1392,7 @@ mod tests {
             .status()
             .unwrap();
         // A clock that moved backward must not delete live data (#2860).
-        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict).unwrap();
+        let report = gc(tmp.path(), Duration::ZERO, HashingMode::Strict, false).unwrap();
         assert!(
             !report.removed.contains(&dir) && dir.exists(),
             "a future-mtime dir must be kept"
@@ -1475,7 +1439,7 @@ mod tests {
         // Use a 1-second retention so only the shape with backdated files is
         // collected; everything else was just created (mtime ≈ now) and survives.
         let retention = Duration::from_secs(1);
-        let report = gc(tmp.path(), retention, HashingMode::Normal).unwrap();
+        let report = gc(tmp.path(), retention, HashingMode::Normal, false).unwrap();
 
         // Stale shape was collected — the file inside had its mtime backdated.
         assert!(

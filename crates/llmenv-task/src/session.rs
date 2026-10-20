@@ -275,6 +275,19 @@ pub enum StartOutcome {
     },
 }
 
+mod checkpoint;
+pub use checkpoint::idle_display;
+use checkpoint::{checkpoint_error, engine_start, only_own_session, resume};
+
+/// The most a session file may hold, as the state cap of llmenv.
+const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Read a session file, refusing a FIFO or a file past the cap, with `NotFound` for no file.
+pub(crate) fn read_state_text(path: &Path) -> std::io::Result<String> {
+    llmenv_paths::read_text_bounded(path, MAX_SESSION_BYTES)?
+        .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+}
+
 fn sessions_dir(state_dir: &Path) -> PathBuf {
     tasks_dir(state_dir).join("sessions")
 }
@@ -302,7 +315,7 @@ fn save_session(state_dir: &Path, session: &Session) -> anyhow::Result<()> {
 
 fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
-    let content = std::fs::read_to_string(session_path(state_dir, id))?;
+    let content = read_state_text(&session_path(state_dir, id))?;
     Ok(serde_json::from_str(&content)?)
 }
 
@@ -312,7 +325,7 @@ fn load_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
 pub fn load_existing_session(state_dir: &Path, id: &str) -> anyhow::Result<Session> {
     ensure_plain_name(id)?;
     let path = session_path(state_dir, id);
-    let content = match std::fs::read_to_string(&path) {
+    let content = match read_state_text(&path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             anyhow::bail!("no session '{id}' found");
@@ -353,7 +366,7 @@ pub fn list_sessions_strict(state_dir: &Path) -> anyhow::Result<Vec<Session>> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let content = std::fs::read_to_string(&path)
+        let content = read_state_text(&path)
             .with_context(|| format!("reading session file {}", path.display()))?;
         let session: Session = serde_json::from_str(&content).with_context(|| {
             format!(
@@ -471,8 +484,9 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 /// session records `request.owner` as its owner (#2365).
 ///
 /// # Errors
-/// `Auto`: errors listing every existing open same-project session (with
-/// id/name/description/idle duration, and which ones `request.owner`
+/// `Auto`: resumes the one open same-project session that `request.owner`
+/// started. Otherwise errors listing every existing open same-project session
+/// (with id/name/description/idle duration, and which ones `request.owner`
 /// started) when one or more already exist.
 /// `Resume`: errors if the named session doesn't exist or isn't open.
 pub fn start_session_as(
@@ -486,21 +500,25 @@ pub fn start_session_as(
             // Fallible read: an unreadable store must not look empty and get a
             // duplicate session on top of it (#1112).
             let existing = open_sessions_strict(state_dir, project)?;
-            if !existing.is_empty() {
-                anyhow::bail!(checkpoint_error(&existing, request.owner));
+            if existing.is_empty() {
+                return Ok(StartOutcome::Created(create_session(state_dir, request)?));
             }
-            Ok(StartOutcome::Created(create_session(state_dir, request)?))
+            let engine_start = request.owner.pid.and_then(engine_start);
+            match only_own_session(existing.iter(), request.owner, engine_start) {
+                Some(own) => Ok(StartOutcome::Resumed(resume(
+                    state_dir,
+                    own.clone(),
+                    request,
+                )?)),
+                None => anyhow::bail!(checkpoint_error(&existing, request.owner)),
+            }
         }
         StartDecision::Resume(id) => {
-            let mut session = load_existing_session(state_dir, &id)?;
+            let session = load_existing_session(state_dir, &id)?;
             if !session.is_open() {
                 anyhow::bail!("session '{id}' is closed and cannot be resumed");
             }
-            session.last_activity = now_rfc3339();
-            session.claim(request.owner);
-            session.resume.apply(request.resume);
-            save_session(state_dir, &session)?;
-            Ok(StartOutcome::Resumed(session))
+            Ok(StartOutcome::Resumed(resume(state_dir, session, request)?))
         }
         StartDecision::Replace => {
             let existing = open_sessions_strict(state_dir, project)?;
@@ -561,86 +579,6 @@ fn create_session(state_dir: &Path, request: &StartRequest<'_>) -> anyhow::Resul
     session.claim(request.owner);
     save_session(state_dir, &session)?;
     Ok(session)
-}
-
-/// Human-readable idle duration since an RFC3339 `last_activity` timestamp
-/// (e.g. `"2h 5m 3s"`), for `session ls` and the `session start` checkpoint.
-/// `"unknown"` when the timestamp can't be parsed or is in the future.
-#[must_use]
-pub fn idle_display(last_activity: &str) -> String {
-    let now = std::time::SystemTime::now();
-    humantime::parse_rfc3339(last_activity)
-        .ok()
-        .and_then(|t| now.duration_since(t).ok())
-        .map(|d| {
-            humantime::format_duration(std::time::Duration::from_secs(d.as_secs())).to_string()
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Build the `session start` checkpoint error message: lists every existing
-/// open same-project session with enough detail (id, name, description,
-/// idle duration, and whether `owner` started it) that the agent or a human
-/// can decide `--resume`, `--replace`, or `--new` without needing to inspect
-/// anything further.
-fn checkpoint_error(existing: &[Session], owner: &EngineIdentity) -> String {
-    let lines: Vec<String> = existing
-        .iter()
-        .map(|s| {
-            let idle = idle_display(&s.last_activity);
-            format!(
-                "  - {} ({}){} — idle {idle}{}",
-                s.id,
-                s.name.as_deref().unwrap_or("unnamed"),
-                s.description
-                    .as_deref()
-                    .map(|d| format!(": {d}"))
-                    .unwrap_or_default(),
-                ownership_note(s, owner),
-            )
-        })
-        .collect();
-    let yours = existing
-        .iter()
-        .filter(|s| !ownership_note(s, owner).is_empty())
-        .count();
-    // `--replace` abandons every listed session, so it is only offered as the
-    // way to drop "yours" when every listed session is yours.
-    let hint = if yours == 0 {
-        String::new()
-    } else if yours == existing.len() {
-        "\nEvery listed session is yours: pass --resume <id> to continue one, or --replace \
-         to drop them all. Use --new only for a second, parallel window."
-            .to_string()
-    } else {
-        format!(
-            "\nA session marked as yours holds your own earlier work: pass --resume <id> to \
-             continue it, or close it with `llmenv task session finish <id>`. --replace \
-             abandons all {} listed sessions, including the ones that are not yours.",
-            existing.len()
-        )
-    };
-    format!(
-        "session(s) already open for this project:\n{}\n\
-         pass one of --resume <id>, --replace, or --new{hint}",
-        lines.join("\n")
-    )
-}
-
-/// The checkpoint's note on whether `owner` started `session`. The same
-/// engine process with a different conversation id is the state after a
-/// `/clear` or a compaction (#2365).
-fn ownership_note(session: &Session, owner: &EngineIdentity) -> &'static str {
-    let same_conversation = owner.session_id.is_some()
-        && session.owner_session.as_deref() == owner.session_id.as_deref();
-    let same_process = owner.pid.is_some() && session.owner_pid == owner.pid;
-    if same_conversation {
-        " — yours: started by this conversation"
-    } else if same_process {
-        " — yours: started by this engine process, most likely before a /clear or a compaction"
-    } else {
-        ""
-    }
 }
 
 /// [`tasks_in_session`], but a read error on the tasks directory or on any task file is an error
@@ -1561,19 +1499,86 @@ mod tests {
         assert!(PickError::NoneOpen.ambiguity_message("x").is_none());
     }
 
+    fn after_clear(name: Option<&'static str>) -> StartRequest<'static> {
+        static OWNER: std::sync::OnceLock<EngineIdentity> = std::sync::OnceLock::new();
+        static RESUME: std::sync::OnceLock<ResumeContext> = std::sync::OnceLock::new();
+        StartRequest {
+            name,
+            description: None,
+            project: PROJECT_A,
+            owner: OWNER.get_or_init(|| owner("conv-after-clear", std::process::id())),
+            resume: RESUME.get_or_init(ResumeContext::default),
+        }
+    }
+
+    #[test]
+    fn auto_resumes_the_one_session_this_process_started_before_a_clear() {
+        let dir = TempDir::new().expect("test");
+        let old = start_as(
+            dir.path(),
+            "old",
+            &owner("conv-before-clear", std::process::id()),
+            StartDecision::Auto,
+        );
+        let outcome = start_session_as(dir.path(), &after_clear(None), StartDecision::Auto)
+            .expect("the only own session must resume, not refuse (#2904)");
+        let StartOutcome::Resumed(resumed) = outcome else {
+            panic!("expected Resumed, got {outcome:?}");
+        };
+        assert_eq!(resumed.id, old.id);
+        assert_eq!(resumed.owner_session.as_deref(), Some("conv-after-clear"));
+    }
+
+    #[test]
+    fn auto_resumes_the_own_session_beside_another_windows_session() {
+        let dir = TempDir::new().expect("test");
+        let old = start_as(
+            dir.path(),
+            "old",
+            &owner("conv-before-clear", std::process::id()),
+            StartDecision::Auto,
+        );
+        let other = start_as(
+            dir.path(),
+            "unrelated",
+            &owner("conv-x", 4),
+            StartDecision::New,
+        );
+        let outcome =
+            start_session_as(dir.path(), &after_clear(Some("next")), StartDecision::Auto).unwrap();
+        let StartOutcome::Resumed(resumed) = outcome else {
+            panic!("expected Resumed, got {outcome:?}");
+        };
+        assert_eq!(resumed.id, old.id);
+        let untouched = load_session(dir.path(), &other.id).unwrap();
+        assert_eq!(untouched.owner_session.as_deref(), Some("conv-x"));
+    }
+
+    #[test]
+    fn auto_refuses_a_session_of_an_earlier_process_with_the_same_pid() {
+        let dir = TempDir::new().expect("test");
+        let mut old = start_as(
+            dir.path(),
+            "old",
+            &owner("conv-gone", std::process::id()),
+            StartDecision::Auto,
+        );
+        // A session last active before this process started belongs to an earlier process that
+        // had the same pid.
+        old.last_activity = "2000-01-01T00:00:00Z".to_string();
+        save_session(dir.path(), &old).unwrap();
+        let err = start_session_as(dir.path(), &after_clear(None), StartDecision::Auto)
+            .expect_err("a reused pid alone must not resume a session");
+        assert!(err.to_string().contains(&old.id), "{err}");
+    }
+
     #[test]
     fn checkpoint_offers_replace_only_when_every_session_is_yours() {
         let dir = TempDir::new().expect("test");
-        let me = owner("conv-before-clear", 9);
+        let me = owner("conv-before-clear", std::process::id());
         start_as(dir.path(), "old", &me, StartDecision::Auto);
-        let request = StartRequest {
-            name: None,
-            description: None,
-            project: PROJECT_A,
-            owner: &owner("conv-after-clear", 9),
-            resume: &ResumeContext::default(),
-        };
-        let err = start_session_as(dir.path(), &request, StartDecision::Auto)
+        start_as(dir.path(), "old-2", &me, StartDecision::New);
+        let err = start_session_as(dir.path(), &after_clear(None), StartDecision::Auto)
             .unwrap_err()
             .to_string();
         assert!(err.contains("Every listed session is yours"), "{err}");
@@ -1601,26 +1606,16 @@ mod tests {
     #[test]
     fn checkpoint_error_marks_same_process_session_after_clear() {
         let dir = TempDir::new().expect("test");
-        let old = start_as(
-            dir.path(),
-            "old",
-            &owner("conv-before-clear", 9),
-            StartDecision::Auto,
-        );
+        let before = owner("conv-before-clear", std::process::id());
+        let old = start_as(dir.path(), "old", &before, StartDecision::Auto);
+        start_as(dir.path(), "old-2", &before, StartDecision::New);
         start_as(
             dir.path(),
             "unrelated",
             &owner("conv-x", 4),
             StartDecision::New,
         );
-        let request = StartRequest {
-            name: Some("next"),
-            description: None,
-            project: PROJECT_A,
-            owner: &owner("conv-after-clear", 9),
-            resume: &ResumeContext::default(),
-        };
-        let err = start_session_as(dir.path(), &request, StartDecision::Auto)
+        let err = start_session_as(dir.path(), &after_clear(Some("next")), StartDecision::Auto)
             .unwrap_err()
             .to_string();
         let old_line = err
@@ -1632,7 +1627,7 @@ mod tests {
         assert!(!other_line.contains("yours"), "{err}");
         assert!(err.contains("--resume <id> to continue it"), "{err}");
         assert!(
-            err.contains("--replace abandons all 2 listed sessions"),
+            err.contains("--replace abandons all 3 listed sessions"),
             "mixed ownership must warn that --replace drops the other window's session: {err}"
         );
         assert!(!err.contains("--replace to drop"), "{err}");

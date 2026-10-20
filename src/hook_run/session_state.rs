@@ -14,21 +14,30 @@ const LOCK_POLL: Duration = Duration::from_millis(10);
 /// Lock `dir/<key>.lock`, creating the owner-only directory and the file. `label` names the
 /// state in log lines. `None` for an unsafe `key`, an I/O error, or a lock that stays busy.
 pub(crate) fn lock_state_file(dir: &Path, key: &str, label: &str) -> Option<File> {
+    lock_state_file_why(dir, key, label)
+        .inspect_err(|why| tracing::error!("{label} lock not taken: {why}"))
+        .ok()
+}
+
+/// [`lock_state_file`] with the reason for a lock that is not taken, for a caller that must name
+/// the cause, such as a deny text.
+///
+/// # Errors
+/// The `key` is not a plain name, the folder or the lock file cannot be made, or the lock stays
+/// busy past about 200 ms.
+pub(crate) fn lock_state_file_why(dir: &Path, key: &str, label: &str) -> Result<File, String> {
     // The key can come from hook stdin; an unsafe value must never reach a path join.
     if !crate::paths::is_valid_short_name(key) {
-        tracing::error!("key failed path-safety validation for {label}");
-        return None;
+        return Err(format!("the key for {label} is not a plain name"));
     }
-    if let Err(e) = crate::paths::create_dir_owner_only(dir) {
-        tracing::error!("cannot create {}: {e}", dir.display());
-        return None;
-    }
+    crate::paths::create_dir_owner_only(dir)
+        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let mut opts = OpenOptions::new();
     opts.create(true).truncate(false).write(true).mode(0o600);
+    let path = dir.join(format!("{key}.lock"));
     let file = crate::paths::refuse_symlink(&mut opts)
-        .open(dir.join(format!("{key}.lock")))
-        .inspect_err(|e| tracing::error!("cannot open {label} lock: {e}"))
-        .ok()?;
+        .open(&path)
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     for _ in 0..LOCK_ATTEMPTS {
         match file.try_lock() {
             Ok(()) => {
@@ -36,17 +45,16 @@ pub(crate) fn lock_state_file(dir: &Path, key: &str, label: &str) -> Option<File
                 if let Err(e) = file.set_modified(std::time::SystemTime::now()) {
                     tracing::error!("cannot refresh {label} lock age: {e}");
                 }
-                return Some(file);
+                return Ok(file);
             }
             Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
-            Err(e) => {
-                tracing::error!("{label} lock failed, access skipped: {e}");
-                return None;
-            }
+            Err(e) => return Err(format!("cannot lock {}: {e}", path.display())),
         }
     }
-    tracing::error!("{label} busy, access skipped");
-    None
+    Err(format!(
+        "{} stays locked by another hook of this session",
+        path.display()
+    ))
 }
 
 /// Scan `dir` and delete `.json` files older than `max_age_days`. Fail-soft:
@@ -109,6 +117,22 @@ fn note_prune_failure(what: &str, path: &Path, err: &std::io::Error) {
          file and its folder, or run `llmenv doctor` to check the state directory.",
         path.display()
     ));
+}
+
+/// The state file name for the agent that fired the hook. Parallel subagents share the session
+/// id, so each subagent gets its own state (#2901, #2936). The main agent keeps the bare session
+/// id, which the Stop handlers and the `/clear` reset also use. The agent part is a hash of the
+/// session id and the agent id, so any `agent_id` is safe in a path and no two keys are equal.
+/// A session id that is not a plain name comes back as it is, so the caller still rejects it.
+pub(crate) fn agent_state_key(session_id: &str, payload: &serde_json::Value) -> String {
+    let agent_id = match payload.get("agent_id") {
+        None | Some(serde_json::Value::Null) => return session_id.to_string(),
+        _ if !crate::paths::is_valid_short_name(session_id) => return session_id.to_string(),
+        Some(serde_json::Value::String(id)) => id.clone(),
+        Some(other) => other.to_string(),
+    };
+    let hash = super::record_hash::hash_prefix(format!("{session_id}\0{agent_id}").as_bytes());
+    format!("{session_id}.agent-{hash}")
 }
 
 /// Whether a `SessionStart` `source` means the model's context was emptied, so
@@ -242,6 +266,13 @@ pub(crate) fn unix_now() -> i64 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_key_hashes_the_session_and_the_agent_id_as_text() {
+        let key = agent_state_key("s1", &serde_json::json!({ "agent_id": "a7" }));
+        let hash = super::super::record_hash::hash_prefix(b"s1\0a7");
+        assert_eq!(key, format!("s1.agent-{hash}"));
+    }
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 

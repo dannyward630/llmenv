@@ -106,7 +106,7 @@ impl StatusData {
     /// filter shows, so an unreadable status file does not pass as no data (#2712).
     #[must_use]
     pub fn load(path: &std::path::Path) -> Self {
-        match std::fs::read(path) {
+        match crate::paths::bounded::state_bytes_io(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 tracing::error!("status file {} is not valid JSON: {e}", path.display());
                 Self::unreadable()
@@ -574,21 +574,7 @@ fn collect_session_log() -> Option<u64> {
             return None;
         }
     };
-    collect_session_log_from_path(&path)
-}
-
-/// Internal helper taking an injectable path so tests can point at a temp
-/// file instead of the real, ambient state dir.
-fn collect_session_log_from_path(path: &Path) -> Option<u64> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            tracing::debug!("session log stat collection failed (non-fatal): {e}");
-            return None;
-        }
-    };
-    Some(content.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+    crate::session_log::count::count_records(&path)
 }
 
 #[cfg(test)]
@@ -597,7 +583,6 @@ mod tests {
     use super::*;
     use crate::config::{Features, Marketplace, Memory, PluginCollection};
     use proptest::prelude::*;
-    use std::collections::BTreeMap;
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
         ts.iter().map(|s| (*s).to_string()).collect()
@@ -817,21 +802,12 @@ mod tests {
     #[test]
     fn collect_mcps_degrades_to_error_count_on_ambiguous_memory() {
         let mem = |host: &str| Memory {
-            always_load: None,
             server_host: host.into(),
             port: 9092,
             listen_host: "127.0.0.1".into(),
             when: vec!["t".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
-            mcp_permissions: None,
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..Memory::default()
         };
         let config = Config {
             features: Some(Features {
@@ -1169,14 +1145,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-log.jsonl");
         std::fs::write(&path, "line one\nline two\n\nline three\n").unwrap();
-        assert_eq!(collect_session_log_from_path(&path), Some(3));
+        assert_eq!(crate::session_log::count::count_records(&path), Some(3));
     }
 
     #[test]
     fn collect_session_log_from_path_missing_file_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.jsonl");
-        assert_eq!(collect_session_log_from_path(&missing), None);
+        assert_eq!(crate::session_log::count::count_records(&missing), None);
     }
 
     // --- collect_tasks (mandatory-sessions rework) ---

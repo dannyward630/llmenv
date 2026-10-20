@@ -151,4 +151,33 @@ mod tests {
             .expect("a detached child's stderr must reach the resolved log path");
         assert!(body.contains("boom"), "stderr not captured: {body}");
     }
+
+    // Pins the shared log name: the three detached children, the docs, and any
+    // operator told where to look must all agree on one path.
+    #[cfg(unix)]
+    #[test]
+    fn a_detached_child_stderr_reaches_the_log_it_is_given() -> anyhow::Result<()> {
+        let dir = tempfile::TempDir::new()?;
+        let log = dir.path().join("detached-hook.log");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo child-stderr-marker >&2"]);
+        redirect_stderr_to_detached_log(&mut cmd, || Ok(log.clone()));
+        anyhow::ensure!(cmd.status()?.success(), "the child must run");
+        let text = std::fs::read_to_string(&log)?;
+        anyhow::ensure!(
+            text.contains("child-stderr-marker"),
+            "the child's stderr must reach the log: {text}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_log_path_still_runs_the_detached_child() -> anyhow::Result<()> {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo discarded >&2"]);
+        redirect_stderr_to_detached_log(&mut cmd, || Err(anyhow::anyhow!("no state dir")));
+        anyhow::ensure!(cmd.status()?.success(), "the child must run without a log");
+        Ok(())
+    }
 }

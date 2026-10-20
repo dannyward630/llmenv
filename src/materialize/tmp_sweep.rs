@@ -50,16 +50,19 @@ pub struct StaleSummary {
 ///
 /// A failure on one entry is recorded and the sweep goes on, so one unreadable entry does not
 /// block the others (#1372).
+///
+/// With `dry_run`, the report lists the same entries and nothing is removed (#2917).
 pub fn sweep(
     tmp_root: &Path,
     older_than: Duration,
     in_use: &[PathBuf],
+    dry_run: bool,
 ) -> anyhow::Result<GcReport> {
     let scan = scan(tmp_root, older_than, in_use)?;
     let mut report = GcReport {
         kept: scan.kept,
         failed: scan.failed,
-        ..GcReport::default()
+        ..GcReport::new(dry_run)
     };
     for stale in &scan.stale {
         if stale.is_dir {
@@ -179,232 +182,6 @@ fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
     scan.failed.push(path.to_path_buf());
 }
 
-/// Sweep `<state_dir>/tmp` with the retention `older_than` (#2814).
-///
-/// # Errors
-/// Fails when the in-use list cannot be read. See [`open_paths`].
-pub fn sweep_state_tmp(state_dir: &Path, older_than: Duration) -> anyhow::Result<GcReport> {
-    let in_use = open_paths()?;
-    sweep(&state_dir.join("tmp"), older_than, &in_use)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use std::fs::{self, File};
-    use std::path::Path;
-    use std::time::{Duration, SystemTime};
-
-    use super::{StaleSummary, stale_summary_in, sweep};
-
-    pub(super) const DAY: Duration = Duration::from_secs(86_400);
-
-    /// Set the mtime of `path` and of everything under it, so the newest mtime is `when`.
-    pub(super) fn age_tree(path: &Path, when: SystemTime) {
-        if path.is_dir() {
-            for entry in fs::read_dir(path).unwrap() {
-                age_tree(&entry.unwrap().path(), when);
-            }
-        }
-        File::open(path).unwrap().set_modified(when).unwrap();
-    }
-
-    pub(super) fn old() -> SystemTime {
-        SystemTime::now() - 30 * DAY
-    }
-
-    #[test]
-    fn an_old_directory_and_an_old_file_are_removed_and_a_fresh_one_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let old_dir = root.path().join("cargo-old");
-        fs::create_dir(&old_dir).unwrap();
-        fs::write(old_dir.join("artifact"), b"x").unwrap();
-        age_tree(&old_dir, old());
-        let old_file = root.path().join("scratch.txt");
-        fs::write(&old_file, b"y").unwrap();
-        age_tree(&old_file, old());
-        let fresh = root.path().join("fresh");
-        fs::create_dir(&fresh).unwrap();
-
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
-
-        assert_eq!(report.removed.len(), 2, "removed: {:?}", report.removed);
-        assert_eq!(report.kept, 1);
-        assert!(!old_dir.exists());
-        assert!(!old_file.exists());
-        assert!(fresh.exists());
-    }
-
-    #[test]
-    fn an_old_entry_with_a_path_in_use_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let busy = root.path().join("cargo-busy");
-        fs::create_dir(&busy).unwrap();
-        let held = busy.join("open.log");
-        fs::write(&held, b"z").unwrap();
-        age_tree(&busy, old());
-
-        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&held)).unwrap();
-
-        assert!(
-            report.removed.is_empty(),
-            "removed a busy entry: {:?}",
-            report.removed
-        );
-        assert_eq!(report.kept, 1);
-        assert!(held.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_in_use_path_matches_when_the_root_is_reached_through_a_symlink() {
-        let real = tempfile::tempdir().unwrap();
-        let busy = real.path().join("cargo-busy");
-        fs::create_dir(&busy).unwrap();
-        let held = busy.join("open.log");
-        fs::write(&held, b"z").unwrap();
-        age_tree(&busy, old());
-        let linked_dir = tempfile::tempdir().unwrap();
-        let link = linked_dir.path().join("tmp-link");
-        std::os::unix::fs::symlink(real.path(), &link).unwrap();
-
-        // lsof reports the resolved path, so the in-use list holds it, not the link path.
-        let report = sweep(&link, DAY * 7, std::slice::from_ref(&held)).unwrap();
-
-        assert!(
-            report.removed.is_empty(),
-            "removed a busy entry: {:?}",
-            report.removed
-        );
-        assert!(held.exists());
-    }
-
-    #[test]
-    fn an_entry_with_a_future_mtime_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let future = root.path().join("future.txt");
-        fs::write(&future, b"f").unwrap();
-        File::open(&future)
-            .unwrap()
-            .set_modified(SystemTime::now() + DAY)
-            .unwrap();
-
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
-
-        assert!(report.removed.is_empty());
-        assert!(future.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_unreadable_entry_is_recorded_and_the_rest_are_still_swept() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let locked = root.path().join("locked");
-        fs::create_dir(&locked).unwrap();
-        fs::write(locked.join("inner"), b"i").unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        let old_file = root.path().join("old.txt");
-        fs::write(&old_file, b"o").unwrap();
-        age_tree(&old_file, old());
-
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
-
-        // Restore the mode before any assertion, so the tempdir can be removed.
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(
-            report.failed,
-            vec![root.path().canonicalize().unwrap().join("locked")]
-        );
-        assert_eq!(report.removed.len(), 1, "removed: {:?}", report.removed);
-        assert!(!old_file.exists());
-    }
-
-    /// The link is new, so only a zero retention makes it expired. The project's other GC
-    /// tests use the same zero retention.
-    #[cfg(unix)]
-    #[test]
-    fn an_expired_symlink_is_removed_and_its_target_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("keep-me");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("data"), b"d").unwrap();
-        let tmp = root.path().join("tmp");
-        fs::create_dir(&tmp).unwrap();
-        let link = tmp.join("link");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        let report = sweep(&tmp, Duration::ZERO, &[]).unwrap();
-
-        assert_eq!(
-            report.removed,
-            vec![tmp.canonicalize().unwrap().join("link")]
-        );
-        assert!(link.symlink_metadata().is_err(), "the link survived");
-        assert!(target.join("data").exists(), "the link target was followed");
-    }
-
-    #[test]
-    fn the_summary_counts_and_sizes_the_stale_entries_and_removes_nothing() {
-        let root = tempfile::tempdir().unwrap();
-        let old_dir = root.path().join("cargo-old");
-        fs::create_dir(&old_dir).unwrap();
-        fs::write(old_dir.join("a"), [0_u8; 300]).unwrap();
-        fs::write(old_dir.join("b"), [0_u8; 200]).unwrap();
-        age_tree(&old_dir, old());
-        let fresh = root.path().join("fresh");
-        fs::create_dir(&fresh).unwrap();
-        fs::write(fresh.join("x"), [0_u8; 999]).unwrap();
-
-        let summary = stale_summary_in(root.path(), DAY * 7, &[]).unwrap();
-
-        assert_eq!(
-            summary,
-            StaleSummary {
-                count: 1,
-                bytes: 500,
-                unreadable: 0
-            }
-        );
-        assert!(old_dir.join("a").exists(), "the summary removed an entry");
-    }
-
-    #[test]
-    fn the_summary_skips_a_claude_code_root_and_an_entry_in_use() {
-        let root = tempfile::tempdir().unwrap();
-        let claude = root.path().join("claude-501");
-        fs::create_dir(&claude).unwrap();
-        age_tree(&claude, old());
-        let busy = root.path().join("cargo-busy");
-        fs::create_dir(&busy).unwrap();
-        age_tree(&busy, old());
-
-        let summary = stale_summary_in(root.path(), DAY * 7, std::slice::from_ref(&busy)).unwrap();
-
-        assert_eq!(
-            summary,
-            StaleSummary {
-                count: 0,
-                bytes: 0,
-                unreadable: 0
-            }
-        );
-    }
-
-    #[test]
-    fn the_summary_of_a_missing_tmp_root_is_empty() {
-        let root = tempfile::tempdir().unwrap();
-        let missing = root.path().join("no-such-tmp");
-
-        let summary = stale_summary_in(&missing, DAY * 7, &[]).unwrap();
-
-        assert_eq!(
-            summary,
-            StaleSummary {
-                count: 0,
-                bytes: 0,
-                unreadable: 0
-            }
-        );
-    }
-}
+mod tests;

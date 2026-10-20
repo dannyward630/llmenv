@@ -28,9 +28,15 @@ pub(crate) struct IndexInputs {
 /// # Errors
 /// The checkpoint cannot be read, the indexer cannot start, or it exits non-zero.
 pub fn run_cbm_index(checkpoint_path: &Path) -> anyhow::Result<()> {
-    run_cbm_index_with(checkpoint_path, crate::hook_run::index_command).inspect_err(|e| {
-        tracing::error!("cbm-index-run: indexing failed: {e:#}");
-    })
+    crate::path_lookup::resolve_program("codebase-memory-mcp")
+        .and_then(|program| {
+            run_cbm_index_with(checkpoint_path, |root, index_path, budget| {
+                crate::hook_run::index_command(&program, root, index_path, budget)
+            })
+        })
+        .inspect_err(|e| {
+            tracing::error!("cbm-index-run: indexing failed: {e:#}");
+        })
 }
 
 /// [`run_cbm_index`] with the command builder injected, so a test can run a stub indexer.

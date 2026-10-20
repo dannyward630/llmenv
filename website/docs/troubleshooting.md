@@ -4,7 +4,7 @@ Start with the two diagnostic commands, then drill into the specific failure
 below.
 
 ```bash
-llmenv doctor       # validate config + wiring; --gc to also clean the cache
+llmenv doctor       # validate config + wiring; run llmenv clean to clean the cache
 llmenv context      # show resolved scopes/tags/bundles for the current dir
 ```
 
@@ -41,6 +41,9 @@ llmenv status tags     # marks active tags
   `LLMENV_PROJECT_ROOT` are set only when a marker matched.
 - Malformed marker YAML degrades to defaults (id/name from the folder basename)
   and logs a warning; it does not fail the whole resolution.
+- A marker that is a link to a file outside its folder is refused (changed in v3.13.0).
+  The notice names the marker and the target.
+  Replace the link with a regular file, or move the target into the folder.
 
 ## A bundle / MCP server / plugin won't fire
 
@@ -70,11 +73,10 @@ Restart the agent to pick up the new config.
 ## The cache is growing / I want a clean slate
 
 ```bash
-llmenv prune --dry-run            # preview
-llmenv prune                      # remove old-version folders + orphaned *.tmp
-llmenv prune --older-than 14d     # remove current-version folders older than 14d
-llmenv prune --all                # nuke everything (re-materializes on next export)
-llmenv doctor --gc                # diagnostics + GC in one pass
+llmenv clean --dry-run            # preview every item a real run removes
+llmenv clean                      # old-version folders, orphaned *.tmp, and old state files
+llmenv clean --older-than 14d     # also current-version folders older than 14d
+llmenv clean --all                # nuke everything (re-materializes on next export)
 ```
 
 ## Claude Code says CLAUDE.md is large
@@ -188,6 +190,24 @@ It names the bundle and the path, and it prints once for each bundle and path.
 The warning does not fire for an inline shell command.
 A `/` that is part of shell syntax, such as the jq `//` operator, `2>/dev/null`, or a URL, is not a script path.
 A path in a system folder, such as `/usr/bin/env`, is not a script path either.
+
+## A program is reported as not found
+
+(changed in v3.13.0)
+
+llmenv looks for a program only in the absolute folders of `PATH`.
+A relative folder such as `.` names a different place in each working folder.
+So a file in a cloned repository could stand in for the real program.
+This covers the engines, `icm`, `mcp-proxy`, `uvx`, `lsof`, and `codebase-memory-mcp`.
+It also covers a stdio MCP server, `git`, and the `gh` that the statusline runs.
+The network and SSID scope detectors are covered too.
+They are `route`, `arp`, `ip`, `networksetup`, `ipconfig`, `iw`, `nmcli`, and `netsh`.
+When one of them is not found, its scopes do not match.
+llmenv also gives `mcp-proxy` the absolute path of `icm`, because `mcp-proxy` would otherwise do its own `PATH` search.
+
+If a program is installed but reported as not found, run `llmenv doctor`.
+It names the relative `PATH` folders that llmenv skips.
+Add the program's folder to `PATH` as an absolute path.
 
 ## A task command refuses
 

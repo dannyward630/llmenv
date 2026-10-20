@@ -14,11 +14,13 @@ use crate::util::{dedup, merge_json};
 
 pub(crate) mod retired;
 mod seed;
+mod skill_copy;
 pub(crate) mod version;
 
 #[cfg(test)]
 use seed::classify_claude_path;
 pub(crate) use seed::{apply_seeded_settings, seed_install_method, seed_status_line};
+pub(crate) use skill_copy::copy_dir_owner_only;
 
 /// Command the auto-emitted SessionStart hook runs to inject source config paths
 /// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
@@ -347,36 +349,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         })?;
         let mut vars = vec![("CLAUDE_CONFIG_DIR".into(), dir.to_owned())];
 
-        // Temp dir: CLAUDE_CODE_TMPDIR + the standard POSIX temp vars, so
-        // subprocesses scratch inside llmenv's tree rather than the shared
-        // /tmp. Claude Code appends /claude-{uid}/ to the value on Unix.
-        //
-        // Lives in the durable state dir, not the per-hash cache folder (#1379).
-        // It used to be `cache_dir.join("tmp")`, which put it inside a directory
-        // that both `llmenv prune` and an ordinary config edit are allowed to
-        // delete — pruning a stale generation, or minting a new shape hash by
-        // editing config.yaml, left every already-running shell with TMPDIR
-        // pointing at nothing. The breakage was silent until something needed a
-        // temp file, and then surfaced as someone else's error: git, for one,
-        // fails an SSH-signed commit with "could not create temporary file:
-        // No such file or directory" / "failed to write commit object", which
-        // names neither llmenv nor TMPDIR. The state dir is never a prune
-        // candidate under any mode (#175), same as `plugins_dir` below, so the
-        // path stays valid for the life of the shell. Temp files have no reason
-        // to be shape-scoped: `mktemp` already keeps concurrent users apart by
-        // generating unique names.
-        let tmp_dir = state_dir.join("tmp");
-        std::fs::create_dir_all(&tmp_dir)?;
-        let tmp_str = tmp_dir.to_str().ok_or_else(|| {
-            anyhow::anyhow!(
-                "cache_dir tmp dir is not valid UTF-8: {}",
-                tmp_dir.display()
-            )
-        })?;
-        vars.push(("CLAUDE_CODE_TMPDIR".into(), tmp_str.to_owned()));
-        vars.push(("TMPDIR".into(), tmp_str.to_owned()));
-        vars.push(("TMP".into(), tmp_str.to_owned()));
-        vars.push(("TEMP".into(), tmp_str.to_owned()));
+        // Claude Code appends /claude-{uid}/ to CLAUDE_CODE_TMPDIR on Unix.
+        let (tmp, temp_vars) = crate::adapter::temp_dir::temp_dir_vars(state_dir)?;
+        vars.push(("CLAUDE_CODE_TMPDIR".into(), tmp));
+        vars.extend(temp_vars);
 
         // Durable plugin root in the state dir (#632): despite the misleading
         // "CACHE" in its name, CLAUDE_CODE_PLUGIN_CACHE_DIR controls the ENTIRE
@@ -463,7 +439,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 anyhow::bail!("path traversal in bundle file: {}", rel.display());
             }
             if is_hook_json(rel) {
-                let raw = std::fs::read_to_string(abs)?;
+                let raw = crate::paths::bounded::asset_text(abs)?;
                 let rendered = raw.replace("{{ICM_MCP}}", MEMORY_MCP_NAME);
                 // 0o600, matching `write_owner_only`'s own contract for this
                 // branch: this is llmenv's rendered content, not a pass-through
@@ -475,8 +451,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     rustix::fs::Mode::from(0o600),
                 )?;
             } else {
-                let bytes =
-                    std::fs::read(abs).with_context(|| format!("reading {}", abs.display()))?;
+                // A bundle file is user content, so a FIFO or a huge file must not hang the render.
+                let bytes = crate::paths::bounded::asset(abs)?;
                 let mode = crate::materialize::bundle_file_mode(abs)?;
                 crate::paths::dirfd::write_file_through_dirs(out, rel, &bytes, mode)?;
             }
@@ -493,9 +469,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // feature (task tracker, memory, context-mode, codebase-memory),
         // replacing the old task-tracker CLAUDE.md fragment. No-op when none
         // are enabled.
-        let features = manifest.capabilities.features.clone().unwrap_or_default();
         owned.extend(crate::adapter::llmenv_skill::materialize_llmenv_skill(
-            out, &features,
+            out, manifest,
         )?);
 
         // #317: write /diagnose skill when slippage is enabled with diagnose_command.
@@ -1045,7 +1020,7 @@ fn merge_mcp_into_claude_json(
 /// Returns an empty set when the file is absent or corrupt — a bad companion
 /// file must never prevent `.claude.json` from being written.
 fn read_owned_servers(path: &Path) -> std::collections::BTreeSet<String> {
-    let s = match std::fs::read_to_string(path) {
+    let s = match crate::paths::bounded::state_text_io(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return std::collections::BTreeSet::new();
@@ -1151,121 +1126,6 @@ pub(crate) fn starting_permission_mode(
         "auto".to_string(),
         "Claude Code 2.1.283+ built-in default for interactive sessions (claude -p starts in default)",
     ))
-}
-
-/// Copy files from a source directory into a destination recursively, writing
-/// each file owner-only (0o600). Non-UTF-8 paths are skipped (same policy as
-/// `scan_skill_files_for_hardcoded_paths`). Returns the list of relative paths
-/// written (relative to `dest_dir`), for inclusion in the `owned` set.
-pub(crate) fn copy_dir_owner_only(src: &Path, dest: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    // #1066: the walk descends by file descriptor, not by path. `src` is
-    // resolved exactly once, here; every step below opens an entry of a
-    // directory this process already holds open, so there is no window in
-    // which a directory can be swapped for a symlink between the check and the
-    // use. The `src` paths further down are carried for error messages only
-    // and are never handed back to the kernel.
-    use std::os::fd::AsFd as _;
-
-    let dir = crate::paths::dirfd::open_dir_nofollow(src)
-        .with_context(|| format!("opening source directory '{}'", src.display()))?;
-    copy_dir_owner_only_inner(dir.as_fd(), src, dest, true)
-}
-
-fn copy_dir_owner_only_inner(
-    src_dir: std::os::fd::BorrowedFd<'_>,
-    src: &Path,
-    dest: &Path,
-    is_root: bool,
-) -> anyhow::Result<Vec<PathBuf>> {
-    // #1341: a symlink already at `dest` (planted, or left behind by a prior
-    // run) is never legitimate — llmenv owns everything under the
-    // materialized output tree. Reject before create_dir_owner_only, which
-    // would otherwise follow it (chmod-ing and writing through the target).
-    // A stat error other than "not found" fails closed (propagated) rather
-    // than being treated as "nothing there, proceed" — the checked path
-    // being currently unreadable is not the same as it being absent
-    // (security-audit, #1341).
-    match std::fs::symlink_metadata(dest) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            anyhow::bail!(
-                "destination path '{}' is a symlink — a path llmenv owns and writes through \
-                 must never be a symlink",
-                dest.display()
-            );
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(e)
-                .with_context(|| format!("checking destination path '{}'", dest.display()));
-        }
-    }
-    use std::os::fd::AsFd as _;
-
-    let mut written: Vec<PathBuf> = Vec::new();
-    create_dir_owner_only(dest)?;
-    for entry in crate::paths::dirfd::read_dir_entries(src_dir)? {
-        let file_name = entry.name.clone();
-        let src_path = src.join(&file_name);
-        if entry.is_symlink() {
-            // #1341: a symlinked SKILL.md at the *skill's own root* is
-            // silently dropped by the skip below, producing a skill
-            // directory that only fails validation later with a misleading
-            // "missing SKILL.md" — the file *is* there in the source, it
-            // just never got copied. Fail loud here instead, where the real
-            // cause is still in scope. Root-only and case-insensitive
-            // (security-audit, #1341): a nested `SKILL.md` (a vendored
-            // sub-skill, an example file) isn't the manifest
-            // `validate_skills` checks, and macOS's default
-            // case-insensitive filesystem would otherwise let `skill.md`
-            // take the silent-skip branch and still satisfy
-            // `skill_md.exists()`.
-            if is_root && file_name.eq_ignore_ascii_case("SKILL.md") {
-                anyhow::bail!(
-                    "'{}' is a symlink — a skill's SKILL.md must be a real file, not a \
-                     symlink",
-                    src_path.display()
-                );
-            }
-            // Any other symlinked entry (reference file, helper script) is
-            // skipped, not fatal — no TOCTOU-safe way to follow it into a
-            // bounded dir. The skip prints to stderr (#1341): `tracing` warnings are off at
-            // the default log level, and the skill still validates as if the reference
-            // existed.
-            eprintln!(
-                "warning: skipping the symlink {} inside a skill; a skill folder copies real \
-                 files only",
-                src_path.display()
-            );
-            continue;
-        }
-        let dest_path = dest.join(&file_name);
-        if entry.is_dir() {
-            let child = crate::paths::dirfd::open_dir_at(src_dir, &file_name)
-                .with_context(|| format!("opening source directory '{}'", src_path.display()))?;
-            let sub_written =
-                copy_dir_owner_only_inner(child.as_fd(), &src_path, &dest_path, false)?;
-            written.extend(sub_written);
-        } else if entry.is_file() {
-            // #1341: a symlink already at `dest_path` is never legitimate —
-            // `write_owner_only` opens with `create(true).truncate(true)`,
-            // which follows a symlink and overwrites its target.
-            if let Ok(dest_meta) = std::fs::symlink_metadata(&dest_path)
-                && dest_meta.file_type().is_symlink()
-            {
-                anyhow::bail!(
-                    "destination path '{}' is a symlink — a path llmenv owns and writes \
-                     through must never be a symlink",
-                    dest_path.display()
-                );
-            }
-            let content = crate::paths::dirfd::read_file_at(src_dir, &file_name)
-                .with_context(|| format!("reading '{}'", src_path.display()))?;
-            crate::paths::write_owner_only(&dest_path, &content)?;
-            written.push(dest_path);
-        }
-    }
-    Ok(written)
 }
 
 // write_first_class_skills, validate_skills, validate_skill_frontmatter, and
@@ -4417,10 +4277,8 @@ mod tests {
                 disabled_tools: vec![],
                 mcp_permissions: None,
                 memory_hook: Some(crate::mcp::resolve::MemoryHookSettings {
-                    wakeup_max_tokens: None,
-                    adaptive_recall: false,
-                    default_type: None,
-                    default_importance: None,
+                    global_topics: vec![],
+                    ..crate::mcp::resolve::MemoryHookSettings::default()
                 }),
             }],
             ..Default::default()
@@ -4923,25 +4781,17 @@ mod tests {
             },
         )]);
         let memory = crate::config::Memory {
-            always_load: None,
             server_host: "still".into(),
             port: 7878,
             listen_host: "127.0.0.1".into(),
             when: vec!["home".into()],
-            default_topics: vec![],
-            default_type: None,
-            default_importance: None,
-            type_importance: std::collections::BTreeMap::new(),
-            retention: None,
-            auto_prune: false,
-            consolidation: None,
             mcp_permissions: Some(crate::config::McpPermissions {
                 read_only: None,
                 mutation: None,
                 destructive: Some(crate::config::McpPermissionAction::Deny),
             }),
-            wakeup_max_tokens: None,
-            adaptive_recall: true,
+            global_topics: vec![],
+            ..crate::config::Memory::default()
         };
         let active_tags = std::collections::BTreeSet::from(["home".to_string()]);
         let resolved = crate::mcp::resolve::resolve_mcps(&[], &[memory], &host, &active_tags)

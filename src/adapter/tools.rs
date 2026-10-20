@@ -20,6 +20,8 @@
 //! from, and [`ToolMapping`] makes that distinction explicit so the docs can
 //! state it (`website/docs/engines.md`).
 
+pub(crate) mod opencode_hooks;
+
 /// How one engine expresses a neutral tool in its permission config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolMapping {
@@ -76,12 +78,9 @@ pub(crate) struct NeutralTool {
 const CRUSH_ABSENT: &str = "not present in the crush tool set this mapping was verified against, so rules naming it \
      are dropped for crush. Use `native_permissions.crush` if crush gains an equivalent.";
 
-/// Note text for a tool absent from the opencode permission key set llmenv's
-/// mapping was source-verified against (`packages/core/src/v1/config/permission.ts`,
-/// #1326) — same reasoning as [`CRUSH_ABSENT`].
-const OPENCODE_ABSENT: &str = "not present in the opencode permission key set this mapping was verified against, so \
-     rules naming it are dropped for opencode. Rendering an unverified key is not an option: \
-     opencode discards its entire config file when one key fails schema decode. Use \
+/// Note text for a tool that opencode 2.x does not have (`packages/core/src/tool/plugin/` at
+/// v2.0.31, #2846). A rule for it could never match a tool call, so it is dropped.
+const OPENCODE_ABSENT: &str = "opencode 2.x has no such tool, so rules naming it are dropped for opencode. Use \
      `native_permissions.opencode` if opencode gains an equivalent.";
 
 /// crush's `edit`/`multiedit` are broader than Claude Code's: they create a
@@ -101,7 +100,7 @@ const CRUSH_EDIT_CREATES: &str = "crush's edit tools also create missing files a
 const NEUTRAL_TOOLS: &[NeutralTool] = &[
     NeutralTool {
         name: "Bash",
-        opencode: ToolMapping::Renamed("bash"),
+        opencode: ToolMapping::Renamed("shell"),
         crush: ToolMapping::Renamed("bash"),
     },
     NeutralTool {
@@ -151,7 +150,9 @@ const NEUTRAL_TOOLS: &[NeutralTool] = &[
     },
     NeutralTool {
         name: "LS",
-        opencode: ToolMapping::Renamed("list"),
+        opencode: ToolMapping::Unsupported {
+            note: OPENCODE_ABSENT,
+        },
         crush: ToolMapping::Renamed("ls"),
     },
     NeutralTool {
@@ -174,12 +175,14 @@ const NEUTRAL_TOOLS: &[NeutralTool] = &[
     },
     NeutralTool {
         name: "TodoWrite",
-        opencode: ToolMapping::Renamed("todowrite"),
+        opencode: ToolMapping::Unsupported {
+            note: OPENCODE_ABSENT,
+        },
         crush: ToolMapping::Renamed("todos"),
     },
     NeutralTool {
         name: "Task",
-        opencode: ToolMapping::Renamed("task"),
+        opencode: ToolMapping::Renamed("subagent"),
         crush: ToolMapping::Unsupported { note: CRUSH_ABSENT },
     },
     NeutralTool {

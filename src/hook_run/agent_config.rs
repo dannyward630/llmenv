@@ -248,7 +248,7 @@ fn read(state_dir: &Path, session_id: &str) -> Stored {
         tracing::debug!("agent config skipped: the session id is not safe in a path");
         return Stored::Missing;
     };
-    let text = match std::fs::read_to_string(&path) {
+    let text = match crate::paths::bounded::state_text_io(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Stored::Missing,
         Err(e) => {

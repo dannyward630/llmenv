@@ -165,11 +165,8 @@ fn detect_issue(branch: &str) -> Option<u32> {
 /// outside git. A missing directory is one such case. A detached HEAD and a directory outside git
 /// are not errors, and they return `Ok(None)`.
 pub fn git_branch(cwd: &Path) -> anyhow::Result<Option<String>> {
-    let output = llmenv_git::secure_git()
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(cwd)
-        .env("LC_ALL", "C")
-        .output()
+    // A hook waits for this, so a git on a stuck mount must not hang it.
+    let output = llmenv_git::local_query(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|e| {
             anyhow::anyhow!(
                 "cannot run git in {} to read the branch: {e}",
