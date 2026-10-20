@@ -161,8 +161,12 @@ fn print_plan(plan: &Plan, out: &mut dyn Write) -> anyhow::Result<()> {
     let items = plan.gated_items()?.len();
     writeln!(
         out,
-        "{items} entr{} need a separate yes.",
-        if items == 1 { "y" } else { "ies" }
+        "{items} {} a separate yes.",
+        if items == 1 {
+            "entry needs"
+        } else {
+            "entries need"
+        }
     )?;
     Ok(())
 }

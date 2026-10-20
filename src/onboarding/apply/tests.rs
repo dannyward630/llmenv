@@ -276,3 +276,39 @@ fn a_no_to_every_entry_of_an_entry_only_plan_writes_nothing() {
     assert!(out.contains("Every entry got a no"), "{out}");
     assert_eq!(s.config(), CONFIG);
 }
+
+#[test]
+fn the_plan_summary_lists_bundles_files_and_the_entry_count() {
+    let s = Setup::new(CONFIG, PLAN);
+    let (_, out) = s.run(&mut Script::new(&[false]));
+    for expected in [
+        "The plan adds:\n",
+        "  bundle rust-dev (fires on: lang-rust)\n",
+        "  file bundles/rust-dev/bundle.yaml\n",
+        "  file bundles/rust-dev/AGENTS.md\n",
+        "2 entries need a separate yes.\n",
+    ] {
+        assert!(out.contains(expected), "{expected:?} missing: {out}");
+    }
+    let s = Setup::new(CONFIG, "host: {still: {addr: still.local}}");
+    let (_, out) = s.run(&mut Script::new(&[false]));
+    assert!(out.contains("1 entry needs a separate yes.\n"), "{out}");
+}
+
+/// The limit is 4 MiB, as for every other read of config.yaml. The config with the plan added
+/// must also fit, so the accepted case stays well below the limit.
+#[test]
+fn a_large_config_is_read_and_one_over_the_limit_is_refused() {
+    let pad = |size: usize| format!("{CONFIG}#{}\n", "x".repeat(size - CONFIG.len() - 2));
+    let s = Setup::new(&pad(2 * 1024 * 1024), PLAN);
+    let (result, out) = s.run(&mut Script::new(&[false]));
+    assert!(!result.unwrap(), "a 2 MiB config is read: {out}");
+    let s = Setup::new(&pad(4 * 1024 * 1024 + 1), PLAN);
+    let (result, out) = s.run(&mut Script::new(&[false]));
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(
+        out.is_empty(),
+        "the read fails before the plan is shown: {out}"
+    );
+    assert!(err.contains("config.yaml"), "{err}");
+}
