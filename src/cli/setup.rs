@@ -454,6 +454,42 @@ fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
     Ok(())
 }
 
+/// What to do when `config.yaml` exists (#2789).
+#[derive(Debug, PartialEq, Eq)]
+enum ExistingConfig {
+    /// Keep every file, refresh the skill, and let the onboarding plan add to the config.
+    Merge,
+    /// Run the wizard again, which replaces `config.yaml`.
+    Reset,
+    Cancel,
+}
+
+/// Ask what to do with an existing config. The merge is the default, and the reset is a
+/// deliberate second choice. `--no-launch` cannot ask, so it refuses rather than overwrite.
+fn existing_config_choice(config_dir: &Path, no_launch: bool) -> Result<ExistingConfig> {
+    anyhow::ensure!(
+        !no_launch,
+        "{} exists, and `llmenv setup --no-launch` never overwrites it. Fix: run `llmenv setup \
+         --rescan` to keep your files, or move config.yaml away to start again",
+        config_dir.join("config.yaml").display()
+    );
+    let choice = dialoguer::Select::new()
+        .with_prompt(format!("A config exists at {}.", config_dir.display()))
+        .items([
+            "Merge: keep every file, and suggest additions",
+            "Reset: run setup again, and replace config.yaml",
+            "Cancel",
+        ])
+        .default(0)
+        .interact()
+        .context("reading the choice for the existing config")?;
+    Ok(match choice {
+        0 => ExistingConfig::Merge,
+        1 => ExistingConfig::Reset,
+        _ => ExistingConfig::Cancel,
+    })
+}
+
 /// Run the interactive setup wizard.
 pub(super) fn run_setup(
     path: Option<PathBuf>,
@@ -475,20 +511,14 @@ pub(super) fn run_setup(
         return run_rescan(&config_dir, no_launch);
     }
 
-    if !no_launch && config_dir.join("config.yaml").exists() {
-        use dialoguer::Select;
-        let overwrite = Select::new()
-            .with_prompt(format!(
-                "Config already exists at {}. Overwrite?",
-                config_dir.display()
-            ))
-            .items(["No, keep existing config", "Yes, re-run setup"])
-            .default(0)
-            .interact()
-            .context("overwrite prompt failed")?;
-        if overwrite == 0 {
-            eprintln!("Keeping existing config. Run `llmenv setup` again to reconfigure.");
-            return Ok(());
+    if config_dir.join("config.yaml").exists() {
+        match existing_config_choice(&config_dir, no_launch)? {
+            ExistingConfig::Merge => return run_rescan(&config_dir, no_launch),
+            ExistingConfig::Reset => {}
+            ExistingConfig::Cancel => {
+                eprintln!("Keeping the existing config. Nothing was changed.");
+                return Ok(());
+            }
         }
     }
 

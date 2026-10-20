@@ -233,3 +233,35 @@ fn setup_apply_refuses_without_a_terminal() {
         .stderr(predicate::str::contains("! llmenv setup --apply"));
     assert!(!dir.path().join("bundles/x").exists());
 }
+
+/// A second `--no-launch` run cannot ask, so it keeps the existing config and names the fix
+/// (#2789).
+#[test]
+fn setup_no_launch_never_overwrites_an_existing_config() {
+    let dir = TempDir::new().unwrap();
+    llmenv_cmd(dir.path())
+        .arg("setup")
+        .arg("--no-launch")
+        .timeout(TIMEOUT)
+        .assert()
+        .success();
+    let path = dir.path().join("config.yaml");
+    fs::write(
+        &path,
+        format!("# my edit\n{}", fs::read_to_string(&path).unwrap()),
+    )
+    .unwrap();
+    llmenv_cmd(dir.path())
+        .arg("setup")
+        .arg("--no-launch")
+        .timeout(TIMEOUT)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("never overwrites it"))
+        .stderr(predicate::str::contains("--rescan"));
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("# my edit\n")
+    );
+}
