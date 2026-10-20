@@ -2,5 +2,8 @@
 //! JSON for the onboarding skill, and makes no judgment. Design:
 //! docs/design/issue-2773-onboarding.md (Decision 2).
 
+pub(crate) mod apply;
+pub(crate) mod config_splice;
+pub(crate) mod plan;
 pub(crate) mod scan;
 pub(crate) mod tools;

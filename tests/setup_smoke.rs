@@ -213,3 +213,23 @@ fn setup_non_interactive_no_flags() {
         "setup should produce some output in non-interactive mode"
     );
 }
+
+/// `--apply` asks the user for each gated entry, so it refuses to run with no terminal, which
+/// is the state of an agent's shell (#2788).
+#[test]
+fn setup_apply_refuses_without_a_terminal() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("config.yaml"), "bundle: []\n").unwrap();
+    let plan = dir.path().join("plan.yaml");
+    fs::write(&plan, "bundles: [{name: x, when: [t]}]\n").unwrap();
+    llmenv_cmd(dir.path())
+        .arg("setup")
+        .arg("--apply")
+        .arg(&plan)
+        .timeout(TIMEOUT)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs a terminal"))
+        .stderr(predicate::str::contains("! llmenv setup --apply"));
+    assert!(!dir.path().join("bundles/x").exists());
+}

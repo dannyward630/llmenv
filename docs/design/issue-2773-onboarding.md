@@ -190,6 +190,77 @@ It has five parts, in this order.
 The user approves the plan as a whole, and then approves the items in part 4 one by one.
 Nothing is written before that approval.
 
+## The plan file and `llmenv setup --apply` (#2788, #2789)
+
+This section was added during implementation.
+It records the parts that the questions above left open.
+
+The skill writes the plan to a YAML file.
+`llmenv setup --apply PLAN` reads it, checks it, asks for the yes answers, and writes.
+The skill never writes the configuration itself.
+
+### Plan shape
+
+```yaml
+bundles:
+  - name: rust-dev
+    when: [lang-rust]
+    files:              # bundle-relative path -> text; created only when absent
+      AGENTS.md: "..."
+    capabilities:       # becomes bundles/<name>/bundle.yaml
+      permissions: {allow: [{tool: Bash, pattern: "cargo *"}]}
+      hooks: []
+      mcp: []
+features:               # added to config.yaml
+  memory: []
+  codebase_memory: []
+host: {}                # new host entries for features.memory
+```
+
+Unknown keys are errors.
+A plan bundle accepts these capability keys only: `permissions`, `hooks`, `plugins`, `mcp`, `lsp`, `skills`, `output_styles`, and `env`.
+The `native_*` keys, `features`, and the other bundle keys are added by hand after onboarding, because the gate cannot show what they do.
+A file path must be relative, must stay inside the bundle, and must not be `bundle.yaml`.
+
+### Checks before any prompt
+
+1. A bundle whose name is in `config.yaml` or whose folder exists is skipped, and the summary names it (Q5).
+2. Each new `bundle.yaml` passes the same check as a real one.
+3. The plan's `host` names must be new.
+4. The changed `config.yaml` must load, and the merge of every bundle, old and new, must succeed.
+   The merge treats every bundle as firing, so a scalar collision between any two bundles is found now, not on the day both fire.
+
+### The trust gate (Q4)
+
+`--apply` refuses to run unless stdin and stderr are terminals (owner decision on #2788).
+An agent's shell tool has no terminal, so the skill tells the user to type `! llmenv setup --apply PLAN`.
+The gate stops an agent that runs the command itself.
+It is not a sandbox: a process that makes a pseudo-terminal can still answer the prompts.
+
+The flow asks in this order:
+
+1. Approve the plan as a whole.
+2. Approve each gated item: each permission allow, hook, MCP server, language server, plugin, and memory or code-graph feature entry, with its command in full.
+   An item that gets a no is removed from the files that are written.
+3. Approve the `config.yaml` change, shown as the lines to add.
+   A no here writes nothing, because a bundle that `config.yaml` does not list never fires.
+
+### The config.yaml change
+
+The design above says that a change is appended.
+A pure append cannot add a bundle: a bundle fires only when the existing `bundle:` list names it.
+So the write inserts text into the `bundle:`, `features`, and `host:` blocks, and changes no other line.
+After the insert, the result must parse to the old configuration plus the additions.
+Any other shape, such as a flow-style list, is refused, and the error gives the lines to add by hand.
+The file is never re-serialized.
+
+### Re-run (Q5)
+
+On a configured machine, `llmenv setup` offers a merge as the default choice and the full reset as a second choice.
+The merge keeps every file, refreshes the skill and its state, and hands off to the engine.
+The skill then builds a plan, and `--apply` skips existing bundles and files as above.
+After a write, `--apply` runs `llmenv validate`, then `llmenv regenerate`.
+
 ## Not in scope
 
 - A scan of `$HOME`. The bounds above forbid it.
