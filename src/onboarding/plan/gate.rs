@@ -178,3 +178,17 @@ fn gated_list_mut<'a>(
     };
     value.as_sequence_mut()
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests {
+    use super::{Loc, Plan};
+
+    #[test]
+    fn a_position_past_the_end_of_a_list_removes_nothing() {
+        let mut plan = Plan::parse("features: {memory: [{server_host: a, port: 1}]}").unwrap();
+        assert!(!plan.remove(&Loc::Memory(1)));
+        assert!(plan.remove(&Loc::Memory(0)));
+        assert!(plan.is_empty());
+    }
+}

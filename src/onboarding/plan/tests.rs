@@ -288,3 +288,21 @@ proptest! {
         prop_assert_eq!(p.gated_items().unwrap(), expected);
     }
 }
+
+/// The limit is 1 MiB: a plan with long rules text loads, and a larger file is refused.
+#[test]
+fn a_plan_up_to_the_size_limit_loads_and_a_larger_one_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plan.yaml");
+    let plan_of = |rules: usize| {
+        format!(
+            "bundles: [{{name: a, agents_md: \"{}\"}}]\n",
+            "x".repeat(rules)
+        )
+    };
+    std::fs::write(&path, plan_of(512 * 1024)).unwrap();
+    assert_eq!(Plan::load(&path).unwrap().bundle_names(), ["a"]);
+    std::fs::write(&path, plan_of(1024 * 1024)).unwrap();
+    let err = format!("{:#}", Plan::load(&path).unwrap_err());
+    assert!(err.contains("reading the plan"), "{err}");
+}
