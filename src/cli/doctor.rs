@@ -1567,7 +1567,9 @@ pub(super) fn run_doctor(
             background::run_doctor_checkpoints(use_color, &state_dir);
             recall_health::run_doctor_recall_health(use_color, &state_dir);
         }
-        Err(e) => eprintln!("{warn} background work: cannot resolve the state folder: {e:#}"),
+        Err(e) => eprintln!(
+            "{warn} background work and memory recall: cannot resolve the state folder: {e:#}"
+        ),
     }
 
     // When context-mode is enabled, verify the marketplace clone exists so
