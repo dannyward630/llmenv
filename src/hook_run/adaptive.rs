@@ -113,9 +113,10 @@ async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow
     Some(Action::RecallQuery(q?).run(client, "", "").await)
 }
 
-/// The session project's own memories for the wake-up pack. The icm wake-up fills its budget
-/// with global records first, so this project-scoped recall runs beside it (#2756).
-async fn project_memories(client: &McpHttpClient, project: &str) -> String {
+/// The session project's own memories for the wake-up pack, and whether the call answered. The
+/// icm wake-up fills its budget with global records first, so this project-scoped recall runs
+/// beside it (#2756).
+async fn project_memories(client: &McpHttpClient, project: &str) -> (String, bool) {
     let q = RecallQuery {
         project: Some(project.to_string()),
         ..query(project, MAIN_LIMIT)
@@ -128,7 +129,7 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> String {
                 .collect();
             let (kept, cut) = drop_cut_items(&records.join("\n"));
             note_cut_items(cut);
-            kept
+            (kept, true)
         }
         Err(e) => {
             tracing::error!("session start: project memories not recalled for {project}: {e:#}");
@@ -137,7 +138,7 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> String {
                  Fix: run `llmenv doctor` to check the memory server.",
                 mcp_health::tidy_reason(&format!("{e:#}"))
             ));
-            String::new()
+            (String::new(), false)
         }
     }
 }
@@ -184,15 +185,23 @@ pub(super) async fn session_start(
     let (wake, own) = if super::continues_session(ctx.payload) {
         (Ok(String::new()), String::new())
     } else {
-        let own = match &recall_project {
-            Some(p) => project_memories(ctx.client, p).await,
-            None => String::new(),
+        let (own, own_ok) = match &recall_project {
+            Some(p) => {
+                let (text, ok) = project_memories(ctx.client, p).await;
+                (text, Some(ok))
+            }
+            None => (String::new(), None),
         };
         let wake = wake.run(ctx.client, "", "").await.map(|t| {
             let (kept, cut) = drop_cut_items(&t);
             note_cut_items(cut);
             join_sections(&kept, &own)
         });
+        // These two calls are not in the scope outcome, so the health ring counts them here.
+        let results = [Some(wake.is_ok()), own_ok];
+        let ok = results.iter().filter(|r| **r == Some(true)).count();
+        let failed = results.iter().filter(|r| **r == Some(false)).count();
+        crate::hook_run::recall_health::record(ctx.state_dir, ok, failed, unix_now());
         (wake, own)
     };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
