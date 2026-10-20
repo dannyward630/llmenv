@@ -43,48 +43,44 @@ happen.
 
 ### 2. Settings Review
 
-Walk through the settings found in `existing_configs.claude_code.settings`.
-For each non-llmenv-owned key (keys not in `init.seeded_settings`):
+You do not write any configuration file.
+Every change goes into one plan file, and `llmenv setup --apply` writes it after the user says yes (step 10).
 
-- Explain what the setting does
-- Ask: "Keep this in the `base` bundle? Move to a new bundle? Drop it?"
-- If they want to keep it, record it for inclusion in a native passthrough
-  section or in the bundle's own settings
+Walk through the settings found in `existing_configs.claude_code.settings`.
+For each key that llmenv does not own (keys not in `init.seeded_settings`):
+
+- Explain what the setting does.
+- Ask whether to keep it or drop it.
+- A plan cannot carry a native setting.
+  For a kept setting, show the exact `native:` lines and tell the user to add them to `config.yaml` by hand after step 10.
 
 ### 3. Plugins & Marketplaces
 
-For each plugin in `existing_configs.claude_code.plugins`:
+For each plugin in `existing_configs.claude_code.plugins` and each marketplace in `existing_configs.claude_code.marketplaces`:
 
-- Show the plugin name and its marketplace source
-- Ask: "This plugin came from `{marketplace}` — should I add that marketplace
-  to your llmenv config and add the plugin to a plugin-collection?"
-- If they say yes, record a marketplace entry and a plugin-collection entry
-- If the marketplace is already known (e.g. `dev-commons`, `claude-plugins-official`),
-  mention that and just add the plugin reference
-
-For each marketplace in `existing_configs.claude_code.marketplaces`:
-
-- Ask: "Add this marketplace to your llmenv config?"
-- If yes, record a marketplace entry
+- Show the plugin name and its marketplace source.
+- Ask whether to keep it.
+- A plan cannot carry a marketplace or a plugin collection.
+  For a kept plugin, show the exact `marketplace:` and `plugin-collection:` lines.
+  Tell the user to add them by hand after step 10.
+- A marketplace that is already in `config.yaml` needs only the plugin line.
 
 ### 4. Custom Instructions
 
 If `claude_md` or `gemini_md` is present:
 
-- Summarize the key directives
-- Ask: "These instructions were specific to Claude Code. Should I merge them
-  into your `base` bundle's AGENTS.md or create a separate bundle?"
-- If merge, go read and append to `{config_dir}/AGENTS.md`
-- If separate, create a new bundle name and directory
+- Summarize the key directives.
+- Propose a new bundle for them, such as `personal-rules`, with an `AGENTS.md` file in the plan.
+- `--apply` never changes a file that exists.
+  To add to the `AGENTS.md` of an existing bundle, show the text and tell the user to add it by hand.
 
 ### 5. Project Configs
 
 If `projects` is non-empty:
 
-- List each project and how many overrides it has
-- Explain: "Per-project overrides are very specific — they work best as
-  native passthrough entries in config.yaml"
-- Ask: "Keep these project configs or skip them?"
+- List each project and how many overrides it has.
+- Per-project overrides are native passthrough entries, which a plan cannot carry.
+- Ask whether to keep them. For each kept one, show the lines to add by hand after step 10.
 
 ### 6. Repository Scan
 
@@ -163,40 +159,72 @@ A tool that runs an MCP server also has `feature` and `strong_default`.
 
 ### 9. Scopes
 
-Ask about scope conditions:
+A bundle fires only when a scope emits one of its `when:` tags.
+Each suggested bundle needs a scope that emits its tag.
 
-- "What hostname does this machine use? (We'll auto-detect if you're not sure)"
-- "What WiFi networks do you switch between (home, office)?"
-- "Is this setup for just you, or multiple users?"
+- For a language bundle, propose a content scope, such as `{id: rust, match: {glob: Cargo.toml}, tags: [lang-rust]}`.
+- Ask about host, network, and user scopes.
+  Ask for the machine's hostname, the WiFi networks the user switches between, and whether other users share the machine.
 
-Based on answers, add scope entries to config.yaml (host, network, user scopes).
+Scopes go into the plan's `scope:` part.
 
-### 10. Configuration Writing
+### 10. Write the plan, then hand off to the user
 
-Show the plan before you write anything:
+Write the plan to `{config_dir}/.llmenv-setup-plan.yaml`.
+It is the only file you write.
+
+```yaml
+bundles:
+  - name: rust-dev
+    when: [lang-rust]
+    files:              # bundle-relative path -> text; created only when absent
+      AGENTS.md: "..."
+    capabilities:       # becomes bundles/<name>/bundle.yaml
+      permissions: {allow: [{tool: Bash, pattern: "cargo *"}]}
+      hooks: []
+      mcp: []
+features:
+  memory: []            # ICM entries; each needs server_host and port
+  codebase_memory: []
+host: {}                # new hosts that a memory entry names
+scope:
+  content: []
+  host: []
+  network: []
+  user: []
+```
+
+A plan bundle may set only `permissions`, `hooks`, `plugins`, `mcp`, `lsp`, `skills`, `output_styles`, and `env`.
+Leave every other key out, and show it as a line to add by hand.
+
+Before the hand-off, show the user the plan in this order:
 
 1. the scan summary,
 2. the accepted bundles, each with its evidence,
 3. the tool features to turn on, the rules to add, and the install commands for missing tools,
 4. each hook, MCP server, and permission allow, with its command or pattern in full,
-5. the files to create, and the change to `config.yaml`.
+5. the lines to add by hand from steps 2 to 5.
 
-Ask the user to approve the plan.
-Then ask for a separate yes for each item in part 4.
-Write nothing before both answers.
+Then tell the user to type this in the prompt, so it runs in their own terminal:
 
-Then write all recorded configuration:
+```text
+! llmenv setup --apply {config_dir}/.llmenv-setup-plan.yaml
+```
 
-- Update `config.yaml` with new bundles, marketplace entries, plugin-collections,
-  scopes, native passthrough settings, and the approved `features` entries
-- Write bundle-level `CLAUDE.md`/`AGENTS.md` files for any bundle with custom
-  instructions
-- Never overwrite a file that exists, and never replace a bundle that exists
-- Run `llmenv validate`, then `llmenv regenerate`, and report the result
+MUST NOT run `llmenv setup --apply` yourself.
+It refuses to run without a terminal, because only the user can give its yes answers.
+
+`--apply` checks the plan before it asks anything: the bundles must merge, and `config.yaml` with the plan added must load.
+It then asks for a yes for the plan, for each gated entry, and for the lines it adds to `config.yaml`.
+It skips a bundle whose name exists, never overwrites a file, and never re-serializes `config.yaml`.
+After a write, it runs `llmenv validate` and `llmenv regenerate`.
+If it reports an error, fix the plan file and ask the user to run it again.
 
 ### 11. Wrap-up
 
-- Summarize everything that was created
-- Recommend next steps (edit config.yaml, add project markers, run
-  `llmenv status` to verify)
+- Summarize what `--apply` created, from its output.
+- Remind the user of the lines to add by hand from steps 2 to 5.
+- On a machine that already has a config, `llmenv setup` offers a merge by default.
+  The same plan flow then adds only what is new.
+- Recommend next steps: run `llmenv status` to check the active scopes and bundles.
 - Point to the docs: <https://phaedrus1992.github.io/llmenv/>
