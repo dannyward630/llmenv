@@ -65,6 +65,26 @@ class RollChangelogTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.changelog.read_text(encoding="utf-8"), CHANGELOG)
 
+    def test_dry_run_fails_when_the_roll_would_fail(self) -> None:
+        broken = CHANGELOG.replace("<!-- 3.0 next-header -->\n", "")
+        self.changelog.write_text(broken, encoding="utf-8")
+
+        result = self._run("true")
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("next-header", result.stderr)
+        self.assertEqual(self.changelog.read_text(encoding="utf-8"), broken)
+
+    def test_real_run_fails_when_the_heading_has_no_release_date(self) -> None:
+        broken = CHANGELOG.replace("## [Unreleased] - ReleaseDate", "## [Unreleased]")
+        self.changelog.write_text(broken, encoding="utf-8")
+
+        result = self._run(None)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("ReleaseDate", result.stderr)
+        self.assertEqual(self.changelog.read_text(encoding="utf-8"), broken)
+
     def test_real_run_rolls_the_unreleased_section(self) -> None:
         result = self._run(None)
 
