@@ -189,3 +189,122 @@ proptest! {
         prop_assert_eq!(count, old_names.len() + new_names.len());
     }
 }
+
+#[test]
+fn a_crlf_file_keeps_crlf_and_a_mixed_file_is_refused() {
+    let old = "bundle:\r\n- name: base\r\n  when: [me]\r\n";
+    let (new, _) = run(old, &[bundle("x", "t")]);
+    assert_eq!(
+        new.matches("\r\n").count(),
+        new.matches('\n').count(),
+        "{new:?}"
+    );
+    assert!(new.starts_with(old), "{new:?}");
+    let mixed = "bundle:\r\n- name: base\n  when: [me]\n";
+    let err = format!("{:#}", splice(mixed, &[bundle("x", "t")]).unwrap_err());
+    assert!(err.contains("mixes CRLF and LF"), "{err}");
+}
+
+/// Each hunk's line number is where its first added line sits in the new text.
+#[test]
+fn hunk_numbers_point_into_the_new_text() {
+    let old = "features: null\nbundle:\n- name: base\n  when: [me]\n";
+    let (new, diff) = run(old, &[bundle("late", "t"), memory_entry()]);
+    let lines: Vec<&str> = new.lines().collect();
+    let mut hunks = diff.split("@@ line ").skip(1);
+    for hunk in hunks.by_ref() {
+        let (number, body) = hunk.split_once(" of the new config.yaml @@\n").unwrap();
+        let n: usize = number.parse().unwrap();
+        let first_added = body.lines().find_map(|l| l.strip_prefix("+ ")).unwrap();
+        assert_eq!(lines[n - 1], first_added, "{diff}\n{new}");
+    }
+}
+
+/// Only the four empty spellings replace a key line. A comment after the key keeps the block,
+/// and every other inline value is refused, never treated as empty.
+#[test]
+fn only_an_empty_spelling_is_replaced() {
+    // `{}` is an empty mapping, so list items cannot go there.
+    let replaced = ["null", "~", "[]", "null # note"];
+    let refused = ["{}", "[a]", "{a: b}", "x", "0", "''", "'null'", "\"[]\""];
+    for value in replaced.iter().chain(&["# note"]) {
+        let old = format!("bundle: {value}\nmcp: []\n");
+        let (new, _) = splice(&old, &[bundle("x", "t")])
+            .unwrap_or_else(|e| panic!("{value:?} must be replaced: {e:#}"));
+        assert_eq!(
+            yaml(&new)["bundle"].as_sequence().map_or(0, Vec::len),
+            1,
+            "{value}: {new}"
+        );
+    }
+    for value in refused {
+        let old = format!("bundle: {value}\nmcp: []\n");
+        assert!(
+            splice(&old, &[bundle("x", "t")]).is_err(),
+            "{value} must be refused"
+        );
+    }
+    let mut keys = Mapping::new();
+    keys.insert(Value::from("h"), yaml("{addr: x}"));
+    let host = Addition::Keys {
+        key: "host",
+        sub: None,
+        keys,
+    };
+    assert!(splice("host: {}\n", std::slice::from_ref(&host)).is_ok());
+    assert!(
+        splice("host: []\n", &[host]).is_err(),
+        "a list cannot take host keys"
+    );
+}
+
+proptest! {
+    /// New host keys go into any mapping block with comments around it, and keep every line.
+    #[test]
+    fn host_keys_go_into_any_mapping_block(
+        old_hosts in prop::collection::btree_set("[a-m]{1,6}", 0..4),
+        new_hosts in prop::collection::btree_set("[n-z]{1,6}", 1..3),
+        comment in any::<bool>(),
+    ) {
+        let mut old = String::from("host:\n");
+        for h in &old_hosts {
+            old.push_str(&format!("  {h}:\n    addr: 10.0.0.1\n"));
+        }
+        if comment {
+            old.push_str("# hosts end\n");
+        }
+        old.push_str("mcp: []\n");
+        let mut keys = Mapping::new();
+        for h in &new_hosts {
+            keys.insert(Value::from(h.as_str()), yaml("{addr: x.local}"));
+        }
+        let (new, _) = splice(&old, &[Addition::Keys { key: "host", sub: None, keys }]).unwrap();
+        prop_assert!(keeps_old_lines(&old, &new));
+        let count = yaml(&new)["host"].as_mapping().map_or(0, Mapping::len);
+        prop_assert_eq!(count, old_hosts.len() + new_hosts.len());
+    }
+
+    /// A sub key list grows under any `features` block shape the insert supports.
+    #[test]
+    fn a_sub_key_list_grows_under_any_features_block(
+        has_memory in any::<bool>(),
+        has_other in any::<bool>(),
+        items in 1usize..3,
+    ) {
+        let mut old = String::from("features:\n");
+        if has_other {
+            old.push_str("  codebase_memory: []\n");
+        }
+        if has_memory {
+            old.push_str("  memory:\n  - server_host: a\n    port: 1\n");
+        }
+        if !has_other && !has_memory {
+            old = "features: null\n".to_string();
+        }
+        let entries = vec![yaml("{server_host: s, port: 2}"); items];
+        let add = Addition::Items { key: "features", sub: Some("memory"), items: entries };
+        let (new, _) = splice(&old, &[add]).unwrap();
+        let count = yaml(&new)["features"]["memory"].as_sequence().map_or(0, Vec::len);
+        prop_assert_eq!(count, items + usize::from(has_memory));
+    }
+}

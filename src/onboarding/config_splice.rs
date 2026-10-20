@@ -65,7 +65,8 @@ impl Addition {
     }
 }
 
-/// One change: `removed` lines that start at 1-based `line` of the old text, and `added` lines.
+/// One change: `removed` lines replaced by `added` lines, which start at 1-based `line` of the
+/// new text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Hunk {
     line: usize,
@@ -77,7 +78,10 @@ struct Hunk {
 fn render(hunks: &[Hunk]) -> String {
     let mut out = String::new();
     for hunk in hunks {
-        out.push_str(&format!("@@ config.yaml line {} @@\n", hunk.line));
+        out.push_str(&format!(
+            "@@ line {} of the new config.yaml @@\n",
+            hunk.line
+        ));
         hunk.removed
             .iter()
             .for_each(|l| out.push_str(&format!("- {l}\n")));
@@ -96,16 +100,43 @@ fn render(hunks: &[Hunk]) -> String {
 /// the result does not parse to the old configuration plus the additions. The error gives the
 /// lines to add by hand.
 pub(crate) fn splice(old: &str, additions: &[Addition]) -> anyhow::Result<(String, String)> {
+    let eol = line_ending(old)?;
     let mut lines: Vec<String> = old.lines().map(str::to_string).collect();
-    let mut hunks = Vec::new();
+    let mut hunks: Vec<Hunk> = Vec::new();
     for addition in additions {
         let hunk = insert(&mut lines, addition).with_context(|| manual_fix(addition))?;
+        // An insert at or above an earlier hunk moves that hunk down in the new text.
+        let grew = hunk.added.len().saturating_sub(hunk.removed.len());
+        for earlier in hunks.iter_mut().filter(|h| h.line >= hunk.line) {
+            earlier.line = earlier.line.saturating_add(grew);
+        }
         hunks.push(hunk);
     }
-    let mut text = lines.join("\n");
-    text.push('\n');
-    verify(old, &text, additions).with_context(|| manual_fix_all(additions))?;
+    let mut text = lines.join(eol);
+    text.push_str(eol);
+    verify(old, &text, additions).with_context(|| {
+        additions
+            .iter()
+            .map(manual_fix)
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
     Ok((text, render(&hunks)))
+}
+
+/// The line ending of `text`, so the inserted lines match it. A file with both endings is
+/// refused, because a rewrite would change lines that the user did not approve.
+fn line_ending(text: &str) -> anyhow::Result<&'static str> {
+    let crlf = text.matches("\r\n").count();
+    if crlf == 0 {
+        return Ok("\n");
+    }
+    ensure!(
+        crlf == text.matches('\n').count(),
+        "config.yaml mixes CRLF and LF line endings. Fix: save it with one line ending, then \
+         apply the plan again"
+    );
+    Ok("\r\n")
 }
 
 /// The new configuration must be the old one plus the additions, and nothing else.
@@ -240,11 +271,7 @@ fn after_content(lines: &[String], start: usize, end: usize) -> usize {
 fn yaml_lines(value: &Value, indent: usize) -> anyhow::Result<Vec<String>> {
     let text = serde_yaml::to_string(value).context("encoding the addition as YAML")?;
     let pad = " ".repeat(indent);
-    Ok(text
-        .trim_start_matches("---\n")
-        .lines()
-        .map(|l| format!("{pad}{l}"))
-        .collect())
+    Ok(text.lines().map(|l| format!("{pad}{l}")).collect())
 }
 
 /// `{name: value}` as YAML lines at `indent`.
@@ -347,18 +374,14 @@ fn put(lines: &mut Vec<String>, pos: usize, remove: usize, new: Vec<String>) -> 
 
 /// The lines to add by hand for one addition.
 fn manual_fix(addition: &Addition) -> String {
-    let lines = keyed_lines(addition.key(), addition.under_key(), 0).unwrap_or_default();
+    let lines = keyed_lines(addition.key(), addition.under_key(), 0)
+        .unwrap_or_else(|e| vec![format!("(the lines cannot be shown: {e:#})")]);
     format!(
         "llmenv cannot add to `{}` in config.yaml safely. Fix: add these lines to config.yaml by \
          hand, merged into the existing key:\n{}",
         addition.name(),
         lines.join("\n")
     )
-}
-
-fn manual_fix_all(additions: &[Addition]) -> String {
-    let parts: Vec<String> = additions.iter().map(manual_fix).collect();
-    parts.join("\n")
 }
 
 #[cfg(test)]
