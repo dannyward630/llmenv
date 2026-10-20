@@ -1,0 +1,12 @@
+# Shapes of personal values that a shipped file must not hold (#2787).
+# Each line is a name, then whitespace, then a regular expression (Rust `regex` syntax).
+# The pattern matches the shape only. The test `shipped_bundles_hold_no_personal_pattern` then
+# checks the meaning in code:
+#   - email: a domain reserved for documentation (example.com, .example, .test, .invalid)
+#     and the `git@` login of a Git host are allowed.
+#   - ipv4: only a private or link-local address is personal.
+email          [A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+
+home-path      /(Users|home)/[A-Za-z0-9._-]+
+mdns-host      \b[A-Za-z0-9-]+\.local\b
+tailnet-host   \b[A-Za-z0-9-]+\.ts\.net\b
+ipv4           \b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b

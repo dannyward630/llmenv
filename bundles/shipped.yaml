@@ -1,0 +1,40 @@
+# The bundles that ship in the llmenv binary (#2787). `llmenv setup --bundles` prints this list,
+# and an onboarding plan names a bundle from it with `shipped: true`.
+#
+# Each entry: `name` is the folder under bundles/, `when` is the default tags that turn the
+# bundle on (any one of them is enough), and `purpose` is one line for the plan summary.
+# A test checks that every folder has one entry and every entry has one folder.
+
+- name: build
+  when: [lang-c, lang-cpp, macos]
+  purpose: CMake rules for C, C++, and macOS builds.
+- name: docker
+  when: [docker]
+  purpose: Dockerfile build and image rules, with read-only docker commands allowed.
+- name: go-dev
+  when: [lang-go]
+  purpose: Go style rules, go tool permissions, and a gofmt and go vet hook.
+- name: kubernetes
+  when: [kubernetes]
+  purpose: Kubernetes workload rules, and kube-rs operator and CRD design rules.
+- name: lang-c-cpp
+  when: [lang-c, lang-cpp]
+  purpose: C and C++ rules, and a C++ concurrency review skill.
+- name: lang-powershell
+  when: [lang-powershell]
+  purpose: PowerShell rules, PowerShell permissions, and a PSScriptAnalyzer hook.
+- name: mac-dev
+  when: [macos]
+  purpose: macOS bundle layout, linking, signing, and universal binary rules.
+- name: objc-dev
+  when: [lang-objc]
+  purpose: Objective-C rules and an ARC ownership check skill.
+- name: python-dev
+  when: [lang-python]
+  purpose: Python rules, Python environment settings, and a report-only ruff hook.
+- name: rust-dev
+  when: [lang-rust]
+  purpose: Rust API, hardening, and style rules, cargo permissions, and a clippy hook.
+- name: web-dev
+  when: [web, lang-typescript]
+  purpose: HTML-first web, htmx, accessibility, and TypeScript rules, with web tool permissions.

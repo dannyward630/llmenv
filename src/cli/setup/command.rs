@@ -33,13 +33,17 @@ pub(in crate::cli) struct SetupArgs {
     /// Makes no network call and installs nothing
     #[arg(long, conflicts_with_all = ["path", "repo", "rescan", "no_launch", "scan"])]
     tools: bool,
+    /// Print the bundles that ship in llmenv as JSON: each name, default tags, purpose, and
+    /// files. An onboarding plan adds one with `shipped: true`
+    #[arg(long, conflicts_with_all = ["path", "repo", "rescan", "no_launch", "scan", "tools"])]
+    bundles: bool,
     /// Apply an onboarding plan: check it, ask for a yes for the plan and for each hook, MCP
     /// server, and permission allow, then create the absent files and add to config.yaml.
     /// Needs a terminal
     #[arg(
         long,
         value_name = "PLAN",
-        conflicts_with_all = ["path", "repo", "rescan", "no_launch", "scan", "tools"]
+        conflicts_with_all = ["path", "repo", "rescan", "no_launch", "scan", "tools", "bundles"]
     )]
     apply: Option<PathBuf>,
 }
@@ -89,15 +93,20 @@ fn run_apply(plan: &std::path::Path) -> Result<()> {
     })
 }
 
-/// Run `llmenv setup`: a scan or a tool report prints its JSON and stops; otherwise the wizard
-/// runs.
+/// Run `llmenv setup`: a scan, a tool report, or the shipped bundle list prints its JSON and
+/// stops; otherwise the wizard runs.
 ///
 /// # Errors
-/// The scan, the tool report, or the wizard fails. See [`crate::onboarding::scan::scan_json`],
-/// [`crate::onboarding::tools::report_json`], and [`run_setup`](super::run_setup).
+/// The scan, the tool report, the bundle list, or the wizard fails. See
+/// [`crate::onboarding::scan::scan_json`], [`crate::onboarding::tools::report_json`],
+/// [`crate::onboarding::shipped::listing_json`], and [`run_setup`](super::run_setup).
 pub(in crate::cli) fn run_setup_command(args: SetupArgs) -> Result<()> {
     if args.tools {
         println!("{}", crate::onboarding::tools::report_json()?);
+        return Ok(());
+    }
+    if args.bundles {
+        println!("{}", crate::onboarding::shipped::listing_json()?);
         return Ok(());
     }
     if let Some(plan) = &args.apply {

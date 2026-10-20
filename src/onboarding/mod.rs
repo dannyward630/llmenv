@@ -2,7 +2,7 @@
 //! for the onboarding skill, and the guarded write that applies its plan. Design:
 //! docs/design/issue-2773-onboarding.md (Decision 2).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 
@@ -10,7 +10,18 @@ pub(crate) mod apply;
 pub(crate) mod config_splice;
 pub(crate) mod plan;
 pub(crate) mod scan;
+pub(crate) mod shipped;
 pub(crate) mod tools;
+
+/// A file that `llmenv setup --apply` creates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewFile {
+    /// The path relative to the config folder.
+    pub(crate) rel: PathBuf,
+    pub(crate) text: String,
+    /// Create the file with the executable bit, because a skill runs it directly.
+    pub(crate) executable: bool,
+}
 
 /// Whether anything, a link included, is at `path`.
 ///

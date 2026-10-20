@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
-use super::{Prompter, apply};
+use super::{Prompter, apply, make_files, undo};
 
 /// Answers from a list, and records each question.
 struct Script {
@@ -311,4 +311,46 @@ fn a_large_config_is_read_and_one_over_the_limit_is_refused() {
         "the read fails before the plan is shown: {out}"
     );
     assert!(err.contains("config.yaml"), "{err}");
+}
+
+/// objc-dev has no bundle.yaml, so the plan asks two questions only. Its skill script is three
+/// folders deep, and the skill runs it directly.
+#[test]
+fn a_shipped_bundle_is_created_with_its_folders_and_modes() {
+    let s = Setup::new(CONFIG, "bundles: [{name: objc-dev, shipped: true}]");
+    let mut script = Script::new(&[true, true]);
+    let (result, out) = s.run(&mut script);
+    assert!(result.unwrap(), "{out}");
+    assert_eq!(script.asked.len(), 2, "{:?}", script.asked);
+    for file in crate::onboarding::shipped::files("objc-dev") {
+        let path = s.path("bundles/objc-dev").join(file.path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), file.text);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o100 != 0, file.executable, "{}", path.display());
+        }
+    }
+    let config: serde_yaml::Value = serde_yaml::from_str(&s.config()).unwrap();
+    assert_eq!(
+        config["bundle"][1]["when"][0],
+        serde_yaml::Value::from("lang-objc")
+    );
+}
+
+/// The undo after a failure removes the nested folders of a shipped bundle, newest first.
+#[test]
+fn undo_removes_the_nested_folders_of_a_shipped_bundle() {
+    let s = Setup::new(CONFIG, "bundles: [{name: objc-dev, shipped: true}]");
+    let plan = crate::onboarding::plan::Plan::load(&s.path("plan.yaml")).unwrap();
+    let mut made = Vec::new();
+    make_files(&plan, s.dir.path(), &mut made).unwrap();
+    assert!(
+        s.path("bundles/objc-dev/skills/arc-ownership-check/scripts")
+            .is_dir()
+    );
+    let note = undo(&made);
+    assert!(note.contains("the files it made are removed"), "{note}");
+    assert!(!s.path("bundles/objc-dev").exists());
 }

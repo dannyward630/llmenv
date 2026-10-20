@@ -118,12 +118,12 @@ fn check(plan: &Plan, old: &str, config_dir: &Path) -> anyhow::Result<()> {
     let (new_text, _) = splice(old, &plan.additions())?;
     let tmp = tempfile::tempdir().context("making a folder to check the plan")?;
     std::fs::write(tmp.path().join("config.yaml"), &new_text).context("writing the check copy")?;
-    for (rel, text) in plan.files()? {
-        let path = tmp.path().join(&rel);
+    for file in plan.files()? {
+        let path = tmp.path().join(&file.rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("making the check copy")?;
         }
-        std::fs::write(&path, text).context("writing the check copy")?;
+        std::fs::write(&path, file.text).context("writing the check copy")?;
     }
     let config = Config::load(&tmp.path().join("config.yaml"))
         .context("the config with the plan added does not load")?;
@@ -155,8 +155,8 @@ fn print_plan(plan: &Plan, out: &mut dyn Write) -> anyhow::Result<()> {
     for line in plan.bundle_lines().into_iter().chain(plan.scope_lines()) {
         writeln!(out, "  {line}")?;
     }
-    for (rel, _) in plan.files()? {
-        writeln!(out, "  file {}", rel.display())?;
+    for file in plan.files()? {
+        writeln!(out, "  file {}", file.rel.display())?;
     }
     let items = plan.gated_items()?.len();
     writeln!(
@@ -233,30 +233,53 @@ fn write_all(
     Ok(())
 }
 
-/// Make each bundle folder with `create_dir`, which fails on anything already at the path, and
-/// each file with `create_new`. Each path made is pushed to `made`.
+/// Make each bundle folder and each folder in it with `create_dir`, which fails on anything
+/// already at the path, and each file with `create_new`. Each path made is pushed to `made`.
 fn make_files(plan: &Plan, config_dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     for name in plan.bundle_names() {
-        let dir = config_dir.join("bundles").join(name);
-        std::fs::create_dir(&dir).with_context(|| {
-            format!(
-                "making {}; llmenv never writes into a folder it did not make",
-                dir.display()
-            )
-        })?;
-        made.push(dir);
+        make_dir(&config_dir.join("bundles").join(name), made)?;
     }
-    for (rel, text) in plan.files()? {
-        let path = config_dir.join(rel);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+    for file in plan.files()? {
+        let path = config_dir.join(&file.rel);
+        let bundle_dir = file.rel.iter().take(2).collect::<PathBuf>();
+        let folders: Vec<&Path> = file
+            .rel
+            .ancestors()
+            .skip(1)
+            .take_while(|a| *a != bundle_dir)
+            .collect();
+        for folder in folders.into_iter().rev() {
+            let dir = config_dir.join(folder);
+            if !made.contains(&dir) {
+                make_dir(&dir, made)?;
+            }
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if file.executable {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o755);
+        }
+        let mut handle = options
             .open(&path)
             .with_context(|| format!("creating {}", path.display()))?;
         made.push(path.clone());
-        file.write_all(text.as_bytes())
+        handle
+            .write_all(file.text.as_bytes())
             .with_context(|| format!("writing {}", path.display()))?;
     }
+    Ok(())
+}
+
+fn make_dir(dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    std::fs::create_dir(dir).with_context(|| {
+        format!(
+            "making {}; llmenv never writes into a folder it did not make",
+            dir.display()
+        )
+    })?;
+    made.push(dir.to_path_buf());
     Ok(())
 }
 

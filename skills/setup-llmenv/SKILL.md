@@ -28,9 +28,10 @@ contains what `llmenv setup` found:
 
 The llmenv config directory is at `{config_dir}`.
 
-Two commands give more facts as JSON, and write nothing:
+Three commands give more facts as JSON, and write nothing:
 
 - `llmenv setup --scan <root>...` — the repositories under the roots (step 6).
+- `llmenv setup --bundles` — the bundles that ship in llmenv, with their tags and files (step 7).
 - `llmenv setup --tools` — the tools to suggest, with the binary found on `PATH` (step 8).
 
 ## Walkthrough
@@ -124,11 +125,19 @@ Use these themes, and only when the evidence supports them:
 - **CI policy**, such as `ci-policy`.
   Evidence: `workflows`.
 
+llmenv ships bundles for many languages and environments.
+Run `llmenv setup --bundles` and read the JSON.
+Each entry has `name`, `when`, `purpose`, and `files`.
+When a shipped bundle covers a theme, suggest it before you write a new bundle.
+Its rules are reviewed and tested in the llmenv repository.
+`--apply` copies its files into the config folder, so a later llmenv release does not change them.
+
 For each suggestion, show:
 
 - the bundle name and its `when:` tag, such as `lang-rust`,
 - the evidence: each repository path and the signal that it holds,
 - what the bundle will hold: rules text first.
+  For a shipped bundle, show its `purpose` and its `files`.
   A hook, an MCP server, or a permission allow is a separate item (see step 10).
 
 Ask the user to accept or reject each suggestion on its own.
@@ -175,8 +184,10 @@ It is the only file you write.
 
 ```yaml
 bundles:
-  - name: rust-dev
-    when: [lang-rust]
+  - name: rust-dev      # a shipped bundle: its files come from llmenv
+    shipped: true       # `when` is optional; it defaults to the shipped tags
+  - name: team-rules
+    when: [work]
     agents_md: "..."    # the bundle's rules text; the only file a plan writes
     capabilities:       # becomes bundles/<name>/bundle.yaml
       permissions: {allow: [{tool: Bash, pattern: "cargo *"}]}
@@ -193,7 +204,12 @@ scope:
   user: []
 ```
 
-A plan bundle may set only `permissions` (its `allow`, `ask`, and `deny` lists), `hooks`, `plugins`, `mcp`, and `lsp`.
+A shipped bundle sets only `name`, `shipped: true`, and optionally `when`.
+Its `bundle.yaml` can set `env` and run a script of its own, because llmenv ships and tests it.
+`--apply` still asks for a yes for each of its allows, hooks, and environment variables.
+
+Any other plan bundle may set only `permissions`, `hooks`, `plugins`, `mcp`, and `lsp`.
+In `permissions`, it may set only the `allow`, `ask`, and `deny` lists.
 Leave every other key out, such as `env`, `skills`, or `permissions.default_mode`.
 Show such a key as a line to add by hand.
 A plan writes no file except `bundle.yaml` and `AGENTS.md`.
@@ -220,6 +236,7 @@ It refuses to run without a terminal, because only the user can give its yes ans
 `--apply` checks the plan before it asks anything: the bundles must merge, and `config.yaml` with the plan added must load.
 It then asks for a yes for the plan, for each gated entry, and for the lines it adds to `config.yaml`.
 The gated entries are each allow, hook, MCP server, language server, plugin, feature entry, and host.
+Each environment variable of a shipped bundle is a gated entry too.
 It skips a bundle whose name exists, never overwrites a file, and never re-serializes `config.yaml`.
 After a write, it runs `llmenv validate` and `llmenv regenerate`.
 If it reports an error, fix the plan file and ask the user to run it again.
