@@ -309,8 +309,14 @@ pub(super) async fn turn_start(
     let mut main_ok = false;
     if !repeated && !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        let (wave, ok) = waves(ctx, &text, &keywords, ledger.project.as_deref()).await;
-        wave.texts.iter().for_each(|t| budget.add_text(t));
+        let (wave, ok) = waves(
+            ctx,
+            &text,
+            &keywords,
+            ledger.project.as_deref(),
+            &mut budget,
+        )
+        .await;
         main_ok = ok;
         outcome.merge(wave);
     }

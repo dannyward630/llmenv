@@ -183,7 +183,15 @@ async fn waves_count_every_failed_call() {
     let server = failing_server().await;
     let f = fixture(&server);
     let payload = serde_json::json!({});
-    let (outcome, main_ok) = waves(&ctx(&f, &payload), "q", &["k".to_string()], Some("proj")).await;
+    let mut budget = crate::hook_run::recall::RecallBudget::default();
+    let (outcome, main_ok) = waves(
+        &ctx(&f, &payload),
+        "q",
+        &["k".to_string()],
+        Some("proj"),
+        &mut budget,
+    )
+    .await;
     assert!(!main_ok);
     assert!(outcome.all_failed(), "{outcome:?}");
     // The project recall, the global topics, and one keyword fanout.

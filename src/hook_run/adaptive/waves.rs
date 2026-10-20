@@ -1,21 +1,27 @@
-//! The recall waves of one prompt: the project recall, the global topic recall, and the fanouts.
+//! The recall waves of one prompt: the project recall and the global topic recall, then the
+//! keyword and topic fanouts.
 
 use std::time::Instant;
 
 use super::{AdaptiveCtx, FANOUT_LIMIT, MAIN_LIMIT, Outcome, WAVE2_CUTOFF, query, recall};
 use crate::hook_run::action::{RecallQuery, split_recall_records};
+use crate::hook_run::recall::RecallBudget;
 use crate::hook_run::relevance;
 
-/// The recall texts for `text`, in budget order: the session project's main
-/// recall, the recall of the global topics, keyword fanout, topic fanout. The flag
-/// says whether the main recalls ran and none of them failed. Only the global topics are
-/// read across projects, so the records of another project stay out (#2950). With no
-/// session project, the fanouts do not run.
+/// Recalls `text` into `budget`, in budget order: the session project's main recall, the
+/// recall of the global topics, keyword fanout, topic fanout. The flag says whether the main
+/// recalls ran and none of them failed. Only the global topics are read across projects, so
+/// the records of another project stay out (#2950). With no session project, the fanouts do
+/// not run.
+///
+/// The fanouts run only when the main recalls leave room in `budget`. Their records come
+/// after the main records, so a full budget would drop them all (#2920).
 pub(super) async fn waves(
     ctx: &AdaptiveCtx<'_>,
     text: &str,
     keywords: &[String],
     project: Option<&str>,
+    budget: &mut RecallBudget,
 ) -> (Outcome, bool) {
     let in_project = |q: RecallQuery| {
         project.map(|p| RecallQuery {
@@ -23,7 +29,26 @@ pub(super) async fn waves(
             ..q
         })
     };
-    let scoped = in_project(query(text, MAIN_LIMIT));
+    let client = ctx.client;
+    let start = Instant::now();
+    let (own, main) = tokio::join!(
+        recall(client, in_project(query(text, MAIN_LIMIT))),
+        crate::hook_run::global_topics::recall(client, text, ctx.global_topics, MAIN_LIMIT),
+    );
+    // A failed project recall is not a finished query, even when a global topic answered: the
+    // skip rule would reuse it and the project's records would stay missing.
+    let main_ok = (own.is_some() || main.is_some())
+        && !matches!(own, Some(Err(_)))
+        && !matches!(main, Some(Err(_)));
+    let mut outcome = Outcome::default();
+    push_into(&mut outcome, budget, [own, main]);
+    let topics: Vec<String> = outcome
+        .texts
+        .iter()
+        .flat_map(|t| split_recall_records(t))
+        .filter_map(|r| relevance::record_topic(&r).map(str::to_string))
+        .collect();
+    let siblings = relevance::sibling_topics(&topics);
     let keyword = |i: usize| {
         keywords.get(i).and_then(|k| {
             in_project(RecallQuery {
@@ -32,44 +57,41 @@ pub(super) async fn waves(
             })
         })
     };
-    let client = ctx.client;
-    let start = Instant::now();
-    let (own, main, kw0, kw1) = tokio::join!(
-        recall(client, scoped),
-        crate::hook_run::global_topics::recall(client, text, ctx.global_topics, MAIN_LIMIT),
-        recall(client, keyword(0)),
-        recall(client, keyword(1)),
-    );
-    // A failed project recall is not a finished query, even when a global topic answered: the
-    // skip rule would reuse it and the project's records would stay missing.
-    let main_ok = (own.is_some() || main.is_some())
-        && !matches!(own, Some(Err(_)))
-        && !matches!(main, Some(Err(_)));
-    let mut outcome = Outcome::default();
-    [own, main, kw0, kw1]
-        .into_iter()
-        .for_each(|r| outcome.push(r));
-    if start.elapsed() < WAVE2_CUTOFF {
-        let topics: Vec<String> = outcome
-            .texts
-            .iter()
-            .flat_map(|t| split_recall_records(t))
-            .filter_map(|r| relevance::record_topic(&r).map(str::to_string))
-            .collect();
-        let siblings = relevance::sibling_topics(&topics);
-        let topic = |i: usize| {
-            siblings.get(i).and_then(|t| {
-                in_project(RecallQuery {
-                    topic: Some(t.clone()),
-                    ..query(text, FANOUT_LIMIT)
-                })
+    let topic = |i: usize| {
+        siblings.get(i).and_then(|t| {
+            in_project(RecallQuery {
+                topic: Some(t.clone()),
+                ..query(text, FANOUT_LIMIT)
             })
-        };
-        let (t0, t1) = tokio::join!(recall(client, topic(0)), recall(client, topic(1)));
-        outcome.push(t0);
-        outcome.push(t1);
+        })
+    };
+    let fanouts = [keyword(0), keyword(1), topic(0), topic(1)];
+    if budget.is_full() {
+        budget.skip_actions(fanouts.iter().flatten().count());
+    } else if start.elapsed() < WAVE2_CUTOFF {
+        let [k0, k1, t0, t1] = fanouts;
+        let (k0, k1, t0, t1) = tokio::join!(
+            recall(client, k0),
+            recall(client, k1),
+            recall(client, t0),
+            recall(client, t1),
+        );
+        push_into(&mut outcome, budget, [k0, k1, t0, t1]);
     }
     (outcome, main_ok)
+}
+
+/// Records each result in `outcome`, and adds the text of each new one to `budget`.
+fn push_into(
+    outcome: &mut Outcome,
+    budget: &mut RecallBudget,
+    results: impl IntoIterator<Item = Option<anyhow::Result<String>>>,
+) {
+    let before = outcome.texts.len();
+    results.into_iter().for_each(|r| outcome.push(r));
+    outcome.texts[before..]
+        .iter()
+        .for_each(|t| budget.add_text(t));
 }
 
 #[cfg(test)]
@@ -83,9 +105,11 @@ mod tests {
 
     use super::*;
     use crate::hook_run::mcp_client::McpHttpClient;
+    use crate::hook_run::recall::RECALL_BUDGET_BYTES;
 
     async fn run(server: &MockServer, project: Option<&str>, topics: &[String]) -> (Outcome, bool) {
-        run_with_keywords(server, project, topics, &[]).await
+        let (outcome, ok, _) = run_with_keywords(server, project, topics, &[]).await;
+        (outcome, ok)
     }
 
     async fn run_with_keywords(
@@ -93,7 +117,7 @@ mod tests {
         project: Option<&str>,
         topics: &[String],
         keywords: &[String],
-    ) -> (Outcome, bool) {
+    ) -> (Outcome, bool, RecallBudget) {
         let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store = crate::hook_run::session_ledger::LedgerStore::new(dir.path());
@@ -105,7 +129,9 @@ mod tests {
             payload: &payload,
             global_topics: topics,
         };
-        waves(&ctx, "q", keywords, project).await
+        let mut budget = RecallBudget::default();
+        let (outcome, ok) = waves(&ctx, "q", keywords, project, &mut budget).await;
+        (outcome, ok, budget)
     }
 
     /// Matches a request whose body names no topic.
@@ -242,7 +268,8 @@ mod tests {
         .await;
 
         let keywords = topics(&["k1", "k2"]);
-        let (outcome, main_ok) = run_with_keywords(&server, Some("proj-b"), &[], &keywords).await;
+        let (outcome, main_ok, _) =
+            run_with_keywords(&server, Some("proj-b"), &[], &keywords).await;
         assert!(main_ok);
         let all = outcome.texts.join("\n");
         assert!(all.contains("own fact"), "{all}");
@@ -264,7 +291,7 @@ mod tests {
         .await;
 
         let keywords = topics(&["k1"]);
-        let (outcome, main_ok) =
+        let (outcome, main_ok, _) =
             run_with_keywords(&server, None, &topics(&["preferences"]), &keywords).await;
         assert!(main_ok);
         assert_eq!(outcome.calls, 1, "{outcome:?}");
@@ -291,5 +318,24 @@ mod tests {
         let (outcome, main_ok) = run(&server, Some("proj-b"), &topics(&["preferences"])).await;
         assert!(!main_ok, "{outcome:?}");
         assert!(outcome.texts.join("\n").contains("be terse"));
+    }
+
+    /// Fanout records only fill the bytes that the main recalls leave, so a full budget skips
+    /// the fanouts and counts them as skipped (#2920).
+    #[tokio::test]
+    async fn a_full_budget_skips_the_fanouts() {
+        let server = MockServer::start().await;
+        mount(&server, "initialize", "").await;
+        let big = format!("[context-proj-b] {}", "x".repeat(RECALL_BUDGET_BYTES));
+        let fill = format!("[context-proj-b] {}", "y".repeat(RECALL_BUDGET_BYTES - 150));
+        mount(&server, r#""project":"proj-b""#, &format!("{fill}\n{big}")).await;
+
+        let keywords = topics(&["k1", "k2"]);
+        let (outcome, main_ok, budget) =
+            run_with_keywords(&server, Some("proj-b"), &[], &keywords).await;
+        assert!(main_ok);
+        assert_eq!(outcome.calls, 1, "calls={}", outcome.calls);
+        let notice = budget.notice().unwrap_or_default();
+        assert!(notice.contains("4 recall queries skipped"), "{notice}");
     }
 }

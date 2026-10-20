@@ -69,8 +69,14 @@ pub(in crate::hook_run) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow
     let mut outcome = Outcome::default();
     if !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        (outcome, _) = waves(ctx, &text, &keywords, ledger.project.as_deref()).await;
-        outcome.texts.iter().for_each(|t| budget.add_text(t));
+        (outcome, _) = waves(
+            ctx,
+            &text,
+            &keywords,
+            ledger.project.as_deref(),
+            &mut budget,
+        )
+        .await;
     }
     report("subagent_start", &outcome, &budget);
     let kept = budget.kept_hashes();
