@@ -982,8 +982,7 @@ Merge is the default: it keeps every file, refreshes the setup skill, and hands 
 Reset runs the wizard again and replaces `config.yaml`.
 
 - `--no-launch` skips the AI engine handoff at the end.
-  (changed in v3.13.0) On an existing `config.yaml` it refuses and names `--rescan`.
-  It cannot ask before it replaces the file.
+  (changed in v3.13.0) On an existing `config.yaml` it takes the merge, because it cannot ask before a reset.
 - `--rescan` re-scans existing configs without overwriting files.
 
 ### `setup --scan`
@@ -1038,13 +1037,13 @@ llmenv setup --apply PLAN
 ```
 
 `--apply` reads an onboarding plan, a YAML file that the setup skill writes to `.llmenv-setup-plan.yaml` in the config folder.
-A plan adds new bundles, each with its files and its `bundle.yaml` capabilities.
+A plan adds new bundles, each with its `AGENTS.md` text and its `bundle.yaml` capabilities.
 It also adds `features.memory`, `features.codebase_memory`, `host`, and `scope` entries.
-A plan bundle may set only `permissions`, `hooks`, `plugins`, `mcp`, `lsp`, `skills`, `output_styles`, and `env`.
+A plan bundle may set only `permissions` (its `allow`, `ask`, and `deny` lists), `hooks`, `plugins`, `mcp`, and `lsp`.
+Add other keys, such as `env` or `skills`, by hand after setup.
 Design: [`docs/design/issue-2773-onboarding.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/issue-2773-onboarding.md).
 
-`--apply` needs a terminal, so you run it yourself.
-In Claude Code, type `! llmenv setup --apply <plan>` in the prompt.
+`--apply` needs a terminal, so you run it yourself in a terminal window.
 The terminal check stops an agent that runs the command itself, but it is not a sandbox.
 
 Before it asks anything, `--apply` checks the plan:
@@ -1052,17 +1051,18 @@ Before it asks anything, `--apply` checks the plan:
 1. A bundle whose name is in `config.yaml`, or whose folder exists, is skipped, and the output names it.
 2. `config.yaml` with the plan added must load, and every bundle, old and new, must merge.
    A scalar that two bundles set to different values fails here.
-3. A host that `config.yaml` already has is refused.
+3. A host that `config.yaml` or a bundle already has is refused.
 
 It then asks, with no as the default answer:
 
 1. Apply this plan?
 2. Allow it? This question comes once for each gated entry.
-   The gated entries are each permission allow, hook, MCP server, language server, plugin, and feature entry.
+   The gated entries are each permission allow, hook, MCP server, language server, plugin, feature entry, and host.
    The entry is shown in full, and an entry that gets a no is left out.
 3. Add these lines to `config.yaml`? The lines are shown as a diff. A no writes nothing.
 
 `--apply` creates only files that do not exist, and never overwrites one.
+If a write fails, it removes the files it made, and `config.yaml` stays as it was.
 It inserts the new lines into the `bundle:`, `features`, `host:`, and `scope:` blocks of `config.yaml`.
 So comments and key order stay.
 The result must parse to the old configuration plus the new entries.
