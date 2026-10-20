@@ -400,7 +400,7 @@ Unlike Crush, opencode is a full-featured target: it supports plugins, LSP,
 custom agents/commands, and six hook events, so it reaches near-parity with the
 Claude Code adapter.
 
-(changed in v3.13.0) llmenv supports opencode 2.x only.
+(changed in v3.13.0) The opencode adapter is updated for opencode 2.x, and llmenv no longer supports opencode 1.x.
 The llmenv plugin uses the opencode 2.0 plugin API, which opencode 1.x cannot load.
 `llmenv doctor` reports an installed opencode older than 2.0 as unsupported, with `opencode upgrade` as the fix.
 context-mode has no opencode 2.x plugin yet, so opencode gets its MCP server and its hooks, and not its native plugin.

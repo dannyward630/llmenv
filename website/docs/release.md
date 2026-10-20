@@ -56,9 +56,11 @@ bump. It atomically renames `[Unreleased]` → `[X.Y.Z] - YYYY-MM-DD`, re-seeds 
 fresh `[Unreleased]`, bumps `Cargo.toml`, updates `Cargo.lock`, and makes a
 single `chore(release): X.Y.Z` commit.
 
+Before the bump, write the release summary at the top of `[Unreleased]`, as RELEASING.md step 1a describes.
+
 ```bash
-cargo release <patch|minor|major>            # dry-run preview (default)
-cargo release <patch|minor|major> --execute  # apply
+cargo release <patch|minor|major> --workspace            # dry run: checks the changelog, writes nothing
+cargo release <patch|minor|major> --workspace --execute  # apply
 ```
 
 It is configured (in `release.toml`) to **not** tag, publish, or push — all
@@ -72,8 +74,10 @@ After merge, tag the merged commit and push the tag — **that is what fires the
 release workflow.**
 
 ```bash
-# 1. Create a prep branch, run cargo-release, open a PR, merge it.
-git switch main && git pull
+# 1. Create a chore/release-X.Y.Z prep branch from the branch you release
+#    (main, or release/X.x for an older major), run cargo-release, open a PR
+#    against that branch, merge it.
+git switch main && git pull   # or: git switch release/X.x && git pull
 
 # 2. Tag the merged commit and push the tag.
 git tag -a "vX.Y.Z" -m "vX.Y.Z"

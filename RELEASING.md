@@ -203,19 +203,27 @@ major increments.
 
 ### Cutting a patch or minor release from a release branch
 
+`release/X.x` requires status checks before a change lands.
+So the bump goes through a short-lived `chore/release-<version>` branch cut from `release/X.x`.
+Its PR targets `release/X.x`.
+On the prep branch and before the bump, review `[Unreleased]` as step 1 of [Cutting a release](#cutting-a-release) says.
+Do not run the `main` commands of step 1.
+Then write the release summary as step 1a says.
+
 ```bash
 git switch release/2.x && git pull
-cargo release patch --workspace            # dry-run preview (patch: 2.0.0 → 2.0.1)
+git switch -c chore/release-2.0.1
+cargo release patch --workspace            # dry run: checks the changelog, writes nothing
 cargo release patch --workspace --execute  # bump all crates + roll CHANGELOG + commit
 git push -u origin HEAD
 gh pr create --base release/2.x --fill
-# After merge, tag the merged commit:
+# After merge, tag the merge commit on release/2.x:
 git switch release/2.x && git pull
 git tag -a "v2.0.1" -m "v2.0.1"
 git push origin "v2.0.1"
 ```
 
-Use `cargo release minor` instead of `patch` when the accumulated changes on
+Use `cargo release minor --workspace` instead of `patch` when the accumulated changes on
 `release/X.x` warrant a minor bump (e.g. `2.0.x` → `2.1.0`).
 
 After the patch tag is pushed, merge forward into the next release branch (or
@@ -268,6 +276,36 @@ turns the `[Unreleased]` CHANGELOG section into a dated `[<version>]` section,
 re-seeds a fresh `[Unreleased]` + compare link, and makes one
 `chore(release): <version>` commit. The `--workspace` flag is required — without
 it only the root crate is bumped, leaving sub-crates at the old version.
+The `pre-release-hook` in `release.toml` runs `scripts/roll-changelog.sh` and `scripts/sync-changelog-doc.sh`.
+So the commit also changes `Cargo.lock`, each crate's `Cargo.toml`, and the generated `website/docs/changelog.md`.
+The new crate versions in `Cargo.lock` make both attribution files stale.
+After the bump, run `scripts/gen-attribution.sh` and commit `THIRD-PARTY-LICENSES.md` and `website/docs/third-party-licenses.md`.
+
+### 1a. Write the release summary
+
+Before the bump, write a prose summary at the top of `[Unreleased]`, above the first `###` section.
+The summary tells a reader what the release delivers without the full entry list.
+It moves with the entries into the versioned section when `cargo release` rolls the changelog.
+
+The example below shows the shape: opening sentences, then one bold-led paragraph for each category.
+
+- Put one sentence on each line, and end each sentence with the issue numbers it covers.
+- Cover the major changes only. The `###` sections keep the full list.
+- Name each breaking change in the summary too, not only in its `**BREAKING:**` entry.
+
+```markdown
+## [Unreleased] - ReleaseDate
+
+3.12.2 is a bug-fix release for 3.12.1.
+It makes the task commit gate harder to slip past, and replaces a set of silent failures with errors that name the problem.
+
+**Task tracker.**
+`llmenv task` refuses to act on another session's task unless you pass `--other-session` (#2584, #2591).
+
+### Fixed
+
+- ...
+```
 
 ### 2. PR and merge
 
@@ -291,8 +329,11 @@ git push origin "v<version>"
 ### 4. Watch the release
 
 ```bash
-gh run watch
+RUN_ID="$(gh run list --workflow release.yml --branch "v<version>" --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh run watch "$RUN_ID" --exit-status
 ```
+
+`--exit-status` makes the watch exit non-zero when the run fails. Without it, a failed publish looks like a success.
 
 CI publishes to crates.io, creates the GitHub Release, and updates Homebrew. The
 crates.io publish runs exactly once per tag — re-pushing an existing tag will
@@ -362,7 +403,8 @@ gh pr create --fill  # Create PR w/ title "chore(release): 3.0.0-rc.1"
 git switch main && git pull
 git tag -a "v3.0.0-rc.1" -m "v3.0.0-rc.1"   # Prerelease tag
 git push origin "v3.0.0-rc.1"
-gh run watch                                           # Release workflow executes
+gh run watch "$(gh run list --workflow release.yml --branch v3.0.0-rc.1 --limit 1 \
+  --json databaseId --jq '.[0].databaseId')" --exit-status   # Release workflow executes
 ```
 
 After the RC test period:
