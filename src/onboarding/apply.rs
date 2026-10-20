@@ -215,9 +215,6 @@ fn write_all(
          again",
         config_path.display()
     );
-    let bundles_dir = config_dir.join("bundles");
-    std::fs::create_dir_all(&bundles_dir)
-        .with_context(|| format!("making {}", bundles_dir.display()))?;
     let mut made = Vec::new();
     let result = make_files(plan, config_dir, &mut made).and_then(|()| {
         llmenv_paths::write_user_file_atomic(&config_path, new_text.as_bytes())
@@ -236,19 +233,16 @@ fn write_all(
 /// Make each bundle folder and each folder in it with `create_dir`, which fails on anything
 /// already at the path, and each file with `create_new`. Each path made is pushed to `made`.
 fn make_files(plan: &Plan, config_dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    let bundles_dir = config_dir.join("bundles");
+    if !path_exists(&bundles_dir)? {
+        make_dir(&bundles_dir, made)?;
+    }
     for name in plan.bundle_names() {
         make_dir(&config_dir.join("bundles").join(name), made)?;
     }
     for file in plan.files()? {
         let path = config_dir.join(&file.rel);
-        let bundle_dir = file.rel.iter().take(2).collect::<PathBuf>();
-        let folders: Vec<&Path> = file
-            .rel
-            .ancestors()
-            .skip(1)
-            .take_while(|a| *a != bundle_dir)
-            .collect();
-        for folder in folders.into_iter().rev() {
+        for folder in new_folders(&file.rel) {
             let dir = config_dir.join(folder);
             if !made.contains(&dir) {
                 make_dir(&dir, made)?;
@@ -256,10 +250,8 @@ fn make_files(plan: &Plan, config_dir: &Path, made: &mut Vec<PathBuf>) -> anyhow
         }
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)]
         if file.executable {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o755);
+            set_executable(&mut options);
         }
         let mut handle = options
             .open(&path)
@@ -271,6 +263,29 @@ fn make_files(plan: &Plan, config_dir: &Path, made: &mut Vec<PathBuf>) -> anyhow
     }
     Ok(())
 }
+
+/// The folders between the bundle folder and the file at `rel`, outermost first. `rel` starts
+/// with `bundles/<name>`, and that folder is made before any file.
+fn new_folders(rel: &Path) -> Vec<&Path> {
+    let bundle_dir: PathBuf = rel.iter().take(2).collect();
+    let mut folders: Vec<&Path> = rel
+        .ancestors()
+        .skip(1)
+        .take_while(|a| *a != bundle_dir)
+        .collect();
+    folders.reverse();
+    folders
+}
+
+#[cfg(unix)]
+fn set_executable(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.mode(0o755);
+}
+
+/// A file off Unix has no executable bit, so there is nothing to set.
+#[cfg(not(unix))]
+fn set_executable(_options: &mut std::fs::OpenOptions) {}
 
 fn make_dir(dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     std::fs::create_dir(dir).with_context(|| {
