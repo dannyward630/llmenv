@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv task list` is an alias of `llmenv task ls`, `llmenv task session list` of `llmenv task session ls`, and `llmenv memory ls` of `llmenv memory list` (#2905) [feat:task]
 - At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv clean` (#2815) [feat:hooks]
 - A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
+- `llmenv doctor` prints a `Memory recall:` section with the failure rate of the last 200 adaptive recall calls. It warns above 20% failed and says the memory server is stuck when the last 10 calls all failed, with no network call. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2919) [feat:doctor]
 - `llmenv setup --apply PLAN` applies an onboarding plan. It asks for a yes for the plan, for each permission allow, hook, MCP server, and feature entry, and for the `config.yaml` lines. It needs a terminal, creates only absent files, and adds to `config.yaml` without re-serializing it. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---apply) (#2788) [feat:setup]
 
 ### Changed
@@ -28,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The `llmenv clean` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
 - The codebase-memory-mcp floor is now 0.12.0, and `llmenv doctor` warns below it. The docs say a repo indexed from the CLI is not watched, and that 0.12.0 changes the index format from 1 to 2 (#2853) [fix:mcp]
 - llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]
+- Adaptive recall skips its keyword and topic fanouts when the project and global-topic recalls already fill the byte budget, so a full turn sends fewer recall calls with the same memories. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2920) [perf:hook]
+- After a tool error, llmenv injects a memory only when its summary or keywords share a distinctive word or an error code with the error, so an unrelated best match no longer shows up. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2921) [feat:hook]
 - `llmenv setup` on a machine with a config offers a merge by default: it keeps every file and lets the onboarding plan add what is new. Reset is a second choice, and `--no-launch` takes the merge instead of replacing `config.yaml`. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup) (#2789) [feat:setup]
 - The `setup-llmenv` skill writes a plan instead of config files, and asks you to run `llmenv setup --apply` on it in a terminal. A plan can add scope entries, so a new bundle can fire. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---apply) (#2788) [feat:setup]
 
@@ -194,6 +197,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Update `rustls` to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and RUSTSEC-2026-0349. They cover TLS secrets in `Debug` output, application data sent after an ECH rejection, unbounded Brotli certificate decompression, and a key-exchange downgrade [fix:deps]
 - The MCP HTTP client ignores the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), so a request to a private address cannot leave through a proxy. An MCP server that is reachable only through a proxy no longer works. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2484) [fix:hook]
+- llmenv stops reading an MCP reply larger than 8 MiB and reports it as an error, so a faulty server cannot use up the memory of a hook. An error reply is cut at 4 KiB in the message (#2960) [fix:mcp]
 
 ## [3.12.2] - 2026-10-10
 

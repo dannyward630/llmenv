@@ -303,7 +303,9 @@ See [`memory`](commands.md#memory).
 - **Old ICM server** (added in v3.12.0) — on the host that serves memory, `llmenv doctor`
   reports the `icm` version under `ICM server:`. It warns below 0.10.60, where recall filters by
   keyword and topic after the limit, so adaptive recall returns little or nothing. It warns again
-  below 0.10.64, where recall ranking is weaker. Run `icm upgrade --apply` on that host. On a
+  below 0.10.64, where recall ranking is weaker. (changed in v3.13.0) It warns below 0.11.3, where
+  recall cannot answer in JSON, so the tool-failure recall matches the memory summary only, not its
+  keywords. Run `icm upgrade --apply` on that host. On a
   memory client, doctor cannot read the server version, because `mcp-proxy` does not forward it;
   run `icm --version` on the server host.
 - **`mcp-proxy` missing** — the server host needs `mcp-proxy` or `uvx` on
