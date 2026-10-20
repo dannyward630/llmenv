@@ -289,19 +289,26 @@ mod tests {
             files,
             ..Default::default()
         };
-        for mode in [HashingMode::Strict, HashingMode::Normal] {
+        // Normal mode writes in place on every call, so its second pass writes over files that
+        // already have the bit.
+        for (mode, pass) in [
+            (HashingMode::Strict, 1),
+            (HashingMode::Normal, 1),
+            (HashingMode::Normal, 2),
+        ] {
             let cache = tmp.path().join(format!("cache-{mode:?}"));
             let out = materialize_with_mode(&m, &cache, mode, "")
                 .expect("render")
                 .path;
+            let mode = format!("{mode:?} pass {pass}");
             let mode_of = |rel: &str| {
                 std::fs::metadata(out.join(rel))
                     .expect("rendered file")
                     .permissions()
                     .mode()
             };
-            assert_ne!(mode_of("skills/s/scripts/run.sh") & 0o100, 0, "{mode:?}");
-            assert_eq!(mode_of("skills/s/notes.md") & 0o111, 0, "{mode:?}");
+            assert_ne!(mode_of("skills/s/scripts/run.sh") & 0o100, 0, "{mode}");
+            assert_eq!(mode_of("skills/s/notes.md") & 0o111, 0, "{mode}");
         }
     }
 

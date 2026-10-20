@@ -286,7 +286,8 @@ pub(crate) fn is_regular_file_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Resul
 /// # Errors
 /// `name` is not a single component, or the entry exists but cannot be read.
 pub(crate) fn is_executable_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<bool> {
-    let execute = Mode::XUSR | Mode::XGRP | Mode::XOTH;
+    // 0o111: the owner, group, and other execute bits.
+    let execute = Mode::from_raw_mode(0o111);
     Ok(stat_at_nofollow(dir, name)?
         .is_some_and(|st| Mode::from_raw_mode(st.st_mode).intersects(execute)))
 }
