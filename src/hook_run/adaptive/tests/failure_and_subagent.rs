@@ -1,8 +1,20 @@
 use super::*;
 
+/// A JSON recall reply: one memory per `(topic, summary, keywords)`.
+fn memories(items: &[(&str, &str, &[&str])]) -> String {
+    let list: Vec<serde_json::Value> = items
+        .iter()
+        .map(|(topic, summary, keywords)| {
+            json!({"topic": topic, "summary": summary, "keywords": keywords, "score": 1.0})
+        })
+        .collect();
+    serde_json::Value::Array(list).to_string()
+}
+
 #[tokio::test]
 async fn tool_failure_injects_errors_once() {
-    let server = server_with(&[("errors-resolved", "[errors-resolved] fix: pin mcp<2")]).await;
+    let fix = memories(&[("errors-resolved", "fix: pin mcp<2", &["request_ctx"])]);
+    let server = server_with(&[("errors-resolved", &fix)]).await;
     let f = fixture(&server);
     let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
     let first = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
@@ -16,7 +28,8 @@ async fn tool_failure_injects_errors_once() {
 /// tool failure (#2950).
 #[tokio::test]
 async fn tool_failure_reads_errors_resolved_only_as_a_global_topic() {
-    let server = server_with(&[("errors-resolved", "[errors-resolved] fix: pin mcp<2")]).await;
+    let fix = memories(&[("errors-resolved", "fix: pin mcp<2", &["request_ctx"])]);
+    let server = server_with(&[("errors-resolved", &fix)]).await;
     let mut f = fixture(&server);
     f.topics = vec!["preferences".to_string()];
     let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
@@ -33,9 +46,11 @@ async fn tool_failure_reads_errors_resolved_only_as_a_global_topic() {
 
 #[tokio::test]
 async fn tool_failure_ranks_the_session_project_first() {
+    let own = memories(&[("own", "fix for proj-a: ImportError", &[])]);
+    let shared = memories(&[("fix", "shared fix", &["importerror"])]);
     let server = server_with(&[
-        ("\"project\":\"proj-a\"", "[own] fix for proj-a"),
-        ("errors-resolved", "[fix] shared fix"),
+        ("\"project\":\"proj-a\"", &own),
+        ("errors-resolved", &shared),
     ])
     .await;
     let f = fixture(&server);
@@ -48,6 +63,32 @@ async fn tool_failure_ranks_the_session_project_first() {
     assert!(
         matches!((own, fix), (Some(o), Some(f)) if o < f),
         "the project record must come first, and both must be present: {out}"
+    );
+}
+
+/// ICM ranks the best of a bad set near 1.0, so only a shared token lets a memory in (#2921).
+#[tokio::test]
+async fn tool_failure_drops_a_memory_that_shares_no_token_with_the_error() {
+    let reply = memories(&[
+        (
+            "errors-resolved",
+            "Semgrep rules need a pinned ruleset",
+            &["semgrep"],
+        ),
+        ("errors-resolved", "pin mcp<2 for request_ctx", &[]),
+    ]);
+    let server = server_with(&[("errors-resolved", &reply)]).await;
+    let f = fixture(&server);
+    let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
+    let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
+    assert!(out.contains("pin mcp<2"), "{out}");
+    assert!(!out.contains("Semgrep"), "{out}");
+    let asked = server.received_requests().await.unwrap();
+    assert!(
+        asked
+            .iter()
+            .any(|r| String::from_utf8_lossy(&r.body).contains(r#""format":"json""#)),
+        "the failure recall asks for JSON"
     );
 }
 
@@ -73,7 +114,8 @@ fn tool_failure_logs_when_the_error_cannot_be_recorded() {
 
 #[tokio::test]
 async fn invalid_agent_id_records_nothing() {
-    let server = server_with(&[("errors-resolved", "[errors-resolved] fix")]).await;
+    let fix = memories(&[("errors-resolved", "fix for boom", &[])]);
+    let server = server_with(&[("errors-resolved", &fix)]).await;
     let f = fixture(&server);
     let payload = json!({"tool_name": "Bash", "error": "boom", "agent_id": "../evil"});
     let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
@@ -269,4 +311,26 @@ fn an_agent_call_without_an_id_or_a_prompt_is_not_queued() {
     }
     let mut ledger = store.load("s1").unwrap();
     assert!(ledger.take_subagent("Explore", unix_now()).is_none());
+}
+
+/// An error with no distinctive token cannot pass the gate, so no recall runs (#2921).
+#[tokio::test]
+async fn a_failure_with_no_distinctive_token_sends_no_recall() {
+    let server = server_with(&[]).await;
+    let f = fixture(&server);
+    let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nerror: failed with 2"});
+    let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
+    assert!(out.is_empty(), "{out}");
+    let asked = server.received_requests().await.unwrap_or_default();
+    assert!(
+        asked
+            .iter()
+            .all(|r| !String::from_utf8_lossy(&r.body).contains("icm_memory_recall")),
+        "no recall request"
+    );
+    assert_eq!(
+        f.store.load("s1").unwrap().errors().len(),
+        1,
+        "the error is still recorded"
+    );
 }

@@ -81,6 +81,7 @@ fn lsof_paths(program: &std::path::Path, timeout: Duration) -> anyhow::Result<Ve
     // lsof reports partial results on stderr, for example for a mount it cannot stat. Those
     // results are routine on some hosts, so they are logged, not fatal (#2814). The in-use list
     // may then miss an entry that is open on that mount.
+    // Design: docs/design/issue-2865-lsof-stderr-policy.md
     if !stderr.is_empty() {
         tracing::warn!(
             stderr,

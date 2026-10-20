@@ -1,6 +1,6 @@
 #![expect(clippy::expect_used, reason = "test scaffolding")]
-//! `llmenv setup --scan` and `--tools` print onboarding facts as JSON and write nothing (#2785,
-//! #2791).
+//! `llmenv setup --scan`, `--tools`, and `--bundles` print onboarding facts as JSON and write
+//! nothing (#2785, #2791, #2787).
 
 mod support;
 
@@ -75,6 +75,37 @@ fn the_tool_report_lists_the_strong_defaults_first_and_reads_path() {
     assert!(
         report["tools"][0]["found"].is_null(),
         "an empty PATH found a binary"
+    );
+}
+
+#[test]
+fn the_bundle_list_prints_each_shipped_bundle_and_writes_nothing() {
+    let home = tempfile::TempDir::new().expect("home");
+    let output = isolated_llmenv_cmd(home.path())
+        .args(["setup", "--bundles"])
+        .output()
+        .expect("run llmenv");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let list: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON stdout");
+    let names: Vec<&str> = list
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|b| b["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"rust-dev") && names.contains(&"python-dev"),
+        "{names:?}"
+    );
+    assert_eq!(
+        fs::read_dir(home.path()).expect("list").count(),
+        0,
+        "it wrote a file"
     );
 }
 

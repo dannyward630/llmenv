@@ -104,10 +104,10 @@ A rule is personal when it names one of those.
   A templating layer is speculative until a rule cannot be split without it.
 - Each shipped component carries four fields: a name, a scope (its tags), a one-line purpose, and a switch.
   The switch is the tag that enables it in a scope.
+  The implementation keeps three fields: any tag in `when` is a switch (see "Shipped bundles").
 
 A CI check fails when a shipped bundle contains a personal pattern.
-The pattern list is a file in the repository.
-This check is a follow-up issue.
+The pattern list is a file in the repository: `bundles/personal-patterns.txt` (#2787).
 
 ### Q4. Trust
 
@@ -189,6 +189,154 @@ It has five parts, in this order.
 
 The user approves the plan as a whole, and then approves the items in part 4 one by one.
 Nothing is written before that approval.
+
+## The plan file and `llmenv setup --apply` (#2788, #2789)
+
+This section was added during implementation.
+It records the parts that the questions above left open.
+
+The skill writes the plan to a YAML file.
+`llmenv setup --apply PLAN` reads it, checks it, asks for the yes answers, and writes.
+The skill never writes the configuration itself.
+
+### Plan shape
+
+```yaml
+bundles:
+  - name: rust-dev
+    when: [lang-rust]
+    agents_md: "..."    # the bundle's rules text, written to AGENTS.md
+    capabilities:       # becomes bundles/<name>/bundle.yaml
+      permissions: {allow: [{tool: Bash, pattern: "cargo *"}]}
+      hooks: []
+      mcp: []
+features:               # added to config.yaml
+  memory: []
+  codebase_memory: []
+host: {}                # new host entries for features.memory
+scope:                  # new scope entries, so a new bundle's tags can fire
+  content: []
+```
+
+Unknown keys are errors, and so is a YAML tag anywhere in the plan.
+A tag on a key hides it from the gate's exact lookup, while the loader of the written file still reads the plain key.
+
+A plan bundle accepts these capability keys only: `permissions`, `hooks`, `plugins`, `mcp`, and `lsp`.
+Its `permissions` accepts only the `allow`, `ask`, and `deny` lists, and each gated key must hold a list.
+Every other key is added by hand after onboarding, because the gate cannot show what it does.
+`env` can run code (`BASH_ENV`, `NODE_OPTIONS`), `skills` and `output_styles` can grant tools, and `default_mode` and `preset` change what the agent may do without a list entry.
+
+A plan writes no file except each bundle's `bundle.yaml` and `AGENTS.md`.
+A hook therefore runs an installed tool, and the gate shows its whole command.
+A script in the bundle would run code that the user never saw.
+
+### Checks before any prompt
+
+1. A bundle whose name is in `config.yaml` or whose folder exists is skipped, and the summary names it (Q5).
+2. Each new `bundle.yaml` passes the same check as a real one.
+3. The plan's `host` names must be new to `config.yaml` and to every bundle, so no existing memory server is pointed elsewhere.
+4. The changed `config.yaml` must load, and the merge of every bundle, old and new, must succeed.
+   The merge treats every bundle as firing.
+   The keys a plan may set are all lists, which merge without a conflict, so this check mainly catches an entry that does not load.
+
+`llmenv validate` runs after the write.
+Its other checks cover keys that a plan cannot set, such as `enable_bundles` and `disabled_engines`.
+
+### The trust gate (Q4)
+
+`--apply` refuses to run unless stdin and stderr are terminals (owner decision on #2788).
+An agent's shell tool has no terminal, so the skill tells the user to run `llmenv setup --apply PLAN` in a separate terminal window.
+The gate stops an agent that runs the command itself.
+It is not a sandbox: a process that makes a pseudo-terminal can still answer the prompts.
+
+The flow asks in this order:
+
+1. Approve the plan as a whole.
+2. Approve each gated item: each permission allow, hook, MCP server, language server, plugin, memory or code-graph feature entry, and host, shown in full.
+   Text from the plan is printed with control characters escaped, so an escape code cannot hide what follows it.
+   An item that gets a no is removed from the files that are written.
+3. Approve the `config.yaml` change, shown as the lines to add.
+   A no here writes nothing, because a bundle that `config.yaml` does not list never fires.
+
+The write makes each bundle folder with a call that fails on anything already at the path, and each file with one that never replaces a file.
+`config.yaml` is written last.
+If any step fails, the files and folders that the run made are removed, so a second run starts from the same state.
+
+### The config.yaml change
+
+The design above says that a change is appended.
+A pure append cannot add a bundle: a bundle fires only when the existing `bundle:` list names it.
+So the write inserts text into the `bundle:`, `features`, and `host:` blocks, and changes no other line.
+After the insert, the result must parse to the old configuration plus the additions.
+Any other shape, such as a flow-style list, is refused, and the error gives the lines to add by hand.
+The file is never re-serialized.
+
+### Re-run (Q5)
+
+On a configured machine, `llmenv setup` offers a merge as the default choice and the full reset as a second choice.
+`--no-launch` cannot ask, so it takes the merge.
+The merge keeps every file, refreshes the skill and its state, and hands off to the engine.
+The skill then builds a plan, and `--apply` skips existing bundles and files as above.
+After a write, `--apply` runs `llmenv validate`, then `llmenv regenerate`.
+
+## Shipped bundles (#2787)
+
+This section was added during implementation.
+
+### Where they live
+
+The owner chose to embed the bundles in the binary (decision on #2787).
+The language and environment bundles of `phaedrus1992/my-llmenv` are copied, unchanged, into `bundles/` at the repository root.
+`bundles/README.md` records the source commit, so a later copy can diff against it.
+The files stay byte for byte, so markdownlint skips the bundle folders.
+
+`src/onboarding/shipped/files.rs` embeds each file with `include_str!`, with a flag for the executable bit.
+The render keeps that bit too (#2967), so a skill can run its script from the rendered folder.
+A skill script that runs directly, such as `check-arc-ownership.sh`, needs that bit.
+A test compares the table with the folder: the file list, the text, and the bit.
+A build script could generate the table, but the table is short and a test catches drift with no build step.
+
+### The manifest
+
+`bundles/shipped.yaml` gives each bundle a `name`, its default `when` tags, and a one-line `purpose`.
+Q3 asked for a separate switch field.
+A bundle fires when a scope emits any of its `when` tags, so each tag is a switch, and a fourth field would repeat `when`.
+`llmenv setup --bundles` prints the manifest and the file list of each bundle as JSON, for the skill.
+
+### Shipped bundles in a plan
+
+A plan bundle with `shipped: true` names a shipped bundle.
+It sets only `name` and, optionally, `when`, which defaults to the manifest tags.
+On load, its capabilities come from the embedded `bundle.yaml`, so the gate asks about each allow, hook, MCP server, language server, and plugin as for any plan bundle.
+The shipped capabilities pass the plan shape rules, with `env` allowed as a mapping.
+A later copy from the source repository that adds a key the gate cannot show, such as `permissions.default_mode`, fails the tests.
+
+A shipped `bundle.yaml` may set `env`, and a plan bundle may not.
+The plan rule exists because the agent writes the plan, and an `env` entry such as `BASH_ENV` can run code.
+llmenv reviews and tests a shipped bundle, so the same risk does not apply.
+Each variable still gets its own question.
+`rust-dev` sets `RUSTC_WRAPPER: sccache`, and on a machine without sccache, cargo fails.
+
+With every answer yes, the shipped `bundle.yaml` is written byte for byte.
+After a no, it is written from the remaining entries under a one-line header, and its comments are lost.
+A list or a mapping that every no emptied is left out.
+A removal keeps the order of the entries that remain.
+Every file of the bundle is written, so a hook that gets a no leaves its script in the bundle, unused.
+A shipped hook can run a script of its bundle, such as `hooks/ruff-report.sh`, because the script also comes from the binary.
+
+`--apply` makes each folder in a bundle with the same create-only call as the bundle folder.
+A failure removes the files and folders, newest first.
+The written files are a copy: a later llmenv release does not change them.
+
+### The personal-pattern check
+
+`bundles/personal-patterns.txt` lists named shapes: an email address, a Unix or Windows home path, a private host name (`.local`, `.lan`, `.internal`, `.home.arpa`), a tailnet host, an IPv4 address, and an IPv6 unique local address.
+The test `shipped_bundles_hold_no_personal_pattern` scans every file under `bundles/` and `skills/`.
+Each regular expression matches a shape only, and code checks the meaning.
+An email at a documentation domain (RFC 2606 and RFC 6761) and the `git@` login of a public Git host are allowed.
+An IPv4 address is personal when `Ipv4Addr` reports it as private or link-local, or when it is in 100.64.0.0/10, the shared range that a tailnet uses.
+An IPv6 match is personal only when it parses in fc00::/7.
+The test runs in CI with the rest of the unit tests.
 
 ## Not in scope
 
