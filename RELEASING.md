@@ -168,13 +168,19 @@ major increments.
 
 ### Cutting a patch or minor release from a release branch
 
+`release/X.x` requires status checks before a change lands.
+So the bump goes through a short-lived `chore/release-<version>` branch cut from `release/X.x`.
+Its PR targets `release/X.x`.
+Do steps 1 and 1a of [Cutting a release](#cutting-a-release) first: curate `[Unreleased]` and write the release summary.
+
 ```bash
 git switch release/2.x && git pull
+git switch -c chore/release-2.0.1
 cargo release patch --workspace            # dry-run preview (patch: 2.0.0 → 2.0.1)
 cargo release patch --workspace --execute  # bump all crates + roll CHANGELOG + commit
 git push -u origin HEAD
 gh pr create --base release/2.x --fill
-# After merge, tag the merged commit:
+# After merge, tag the merge commit on release/2.x:
 git switch release/2.x && git pull
 git tag -a "v2.0.1" -m "v2.0.1"
 git push origin "v2.0.1"
@@ -233,6 +239,37 @@ turns the `[Unreleased]` CHANGELOG section into a dated `[<version>]` section,
 re-seeds a fresh `[Unreleased]` + compare link, and makes one
 `chore(release): <version>` commit. The `--workspace` flag is required — without
 it only the root crate is bumped, leaving sub-crates at the old version.
+The `pre-release-hook` in `release.toml` runs `scripts/roll-changelog.sh` and `scripts/sync-changelog-doc.sh`.
+So the commit also changes `Cargo.lock`, each crate's `Cargo.toml`, and the generated `website/docs/changelog.md`.
+
+### 1a. Write the release summary
+
+Before the bump, write a prose summary at the top of `[Unreleased]`, above the first `###` section.
+The summary tells a reader what the release delivers without the full entry list.
+It moves with the entries into the versioned section when `cargo release` rolls the changelog.
+
+- Start with one or two sentences that name the release and its main themes.
+- Then write one short paragraph for each category of major change.
+  Open each paragraph with the category name in bold, such as `**Memory recall.**`.
+- Put one sentence on each line, and end each sentence with the issue numbers it covers.
+- Cover the major changes only. The `###` sections keep the full list.
+- Name each breaking change in the summary too, not only in its `**BREAKING:**` entry.
+
+```markdown
+## [Unreleased] - ReleaseDate
+
+3.12.2 is a bug-fix release for 3.12.1.
+It makes the task commit gate harder to slip past, and replaces a set of silent failures with errors that name the problem.
+
+**Task tracker.**
+`llmenv task` refuses to act on another session's task unless you pass `--other-session` (#2584, #2591).
+
+### Fixed
+
+- ...
+```
+
+A patch release with one or two fixes can use the opening sentences alone.
 
 ### 2. PR and merge
 

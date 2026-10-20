@@ -56,9 +56,11 @@ bump. It atomically renames `[Unreleased]` → `[X.Y.Z] - YYYY-MM-DD`, re-seeds 
 fresh `[Unreleased]`, bumps `Cargo.toml`, updates `Cargo.lock`, and makes a
 single `chore(release): X.Y.Z` commit.
 
+Before the bump, write a prose summary at the top of `[Unreleased]`, above the first `###` section: one or two opening sentences, then one short paragraph for each category of major change, with issue numbers. RELEASING.md gives the format.
+
 ```bash
-cargo release <patch|minor|major>            # dry-run preview (default)
-cargo release <patch|minor|major> --execute  # apply
+cargo release <patch|minor|major> --workspace            # dry-run preview (default)
+cargo release <patch|minor|major> --workspace --execute  # apply
 ```
 
 It is configured (in `release.toml`) to **not** tag, publish, or push — all
