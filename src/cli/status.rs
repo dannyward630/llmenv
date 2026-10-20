@@ -540,7 +540,7 @@ fn run_read_once_status(_use_color: bool) -> anyhow::Result<()> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let content = match std::fs::read_to_string(&path) {
+        let content = match crate::paths::bounded::state_text_io(&path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!(

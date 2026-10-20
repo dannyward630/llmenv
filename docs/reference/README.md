@@ -27,3 +27,6 @@ future design docs and err on the side of too much detail.
 - [crush-gap-report.md](./crush-gap-report.md) — gaps between the Claude Code
   engine and the Crush engine under Crush v0.98.1, compared with v0.81.0 (when
   the Crush adapter landed), and the improvements filed for v3.14.0.
+- [unattended-run-2026-10-19.md](./unattended-run-2026-10-19.md) — report of
+  the unattended run over milestone v3.13.0: the work merged, the blocked
+  issues and their open decisions, the review, and the lessons.

@@ -51,7 +51,9 @@ async fn probe_stdio(
     env: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let mut child = Command::new(command)
+    let program = crate::path_lookup::resolve_program(command)
+        .with_context(|| format!("cannot start `{command}`"))?;
+    let mut child = Command::new(program)
         .args(args)
         .envs(env)
         .stdin(Stdio::piped())
@@ -199,15 +201,13 @@ pub(crate) fn managed_servers(
             .into_iter()
             .filter(|m| m.name == MEMORY_MCP_NAME)
             .collect();
-    let entries = config
-        .features
-        .as_ref()
-        .map(|f| f.codebase_memory.as_slice())
-        .unwrap_or_default();
+    // The entries of the firing bundles count too, so a bundle-only server is probed (#2944).
+    let entries = super::cbm_index_guard::codebase_memory_entries(config, config_dir, active)?;
     if !entries.is_empty() {
         let (project_root, state_dir) = codebase_memory_paths()?;
-        let cbm = resolve_codebase_memory_entries(entries, &active.tags, &project_root, &state_dir)
-            .context("cannot resolve the codebase-memory MCP server")?;
+        let cbm =
+            resolve_codebase_memory_entries(&entries, &active.tags, &project_root, &state_dir)
+                .context("cannot resolve the codebase-memory MCP server")?;
         servers.extend(cbm);
     }
     Ok(servers)
@@ -348,6 +348,7 @@ mod tests {
     use crate::mcp::resolve::ResolvedMcp;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    mod managed;
 
     /// For a server that must answer: long enough that CPU load cannot fail the test.
     const GENEROUS: Duration = Duration::from_secs(10);
@@ -385,39 +386,6 @@ mod tests {
 
     fn answers(reply: &str) -> ResolvedMcp {
         sh(&format!("read line; printf '%s\\n' '{reply}'"))
-    }
-
-    #[test]
-    fn an_unrelated_mcp_entry_does_not_hide_the_memory_server() {
-        // A public-IP `http://` entry fails resolution (#2483), and it must not stop the
-        // health check from seeing the memory server.
-        let config: crate::config::Config = serde_yaml::from_str(
-            r#"
-host:
-  still: { addr: "10.0.0.4" }
-features:
-  memory:
-    - server_host: still
-      port: 7878
-      when: [t]
-mcp:
-  - name: ctx7
-    when: [t]
-    type: http
-    url: http://93.184.216.34/mcp
-"#,
-        )
-        .unwrap();
-        let active = crate::scope::ActiveScopes {
-            tags: ["t".to_string()].into(),
-            ..Default::default()
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let servers = managed_servers(&config, dir.path(), &active).unwrap();
-        assert!(
-            servers.iter().any(|s| s.name == MEMORY_MCP_NAME),
-            "{servers:?}"
-        );
     }
 
     #[tokio::test]

@@ -175,7 +175,7 @@ The daemon is a **pure optimization**. Correctness must never depend on it.
 **Bucket 3 — CLI-only one-shots, never in the daemon, but signal invalidation:**
 
 - `init`, `setup`, `edit`, `login`, `upgrade`, `completions`, `plugin-sync`,
-  `prune`, `doctor --gc`, `regenerate`
+  `clean` (formerly `prune` and `doctor --gc`), `regenerate`
 
 ### Agent-facing stdio MCP surface
 

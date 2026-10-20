@@ -23,7 +23,7 @@ pub(super) fn usage_delta(state_dir: Option<&Path>, key: &str, pct: f64, now: i6
 }
 
 fn read_usage_state(path: &Path) -> Option<(f64, i64)> {
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match crate::paths::bounded::state_text_io(path) {
         Ok(contents) => contents,
         // A missing file is the first sample. Any other read error is logged, not hidden.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,

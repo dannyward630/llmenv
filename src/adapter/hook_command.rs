@@ -150,11 +150,11 @@ pub(crate) fn resolve_hook_command(
 /// characters, and does not point into a system directory. Shell syntax such as the jq `//`
 /// operator, `2>/dev/null`, and `$(...)` does not count.
 fn unresolved_path_tokens(command: &str, cache: &Path) -> Vec<String> {
-    let cache = cache.to_string_lossy();
     command
         .split_whitespace()
         .map(|word| split_word(word).1)
-        .filter(|word| is_script_path(word) && !word.starts_with(cache.as_ref()))
+        // Components, not text: `/cache/../etc/x` and `/cache2/x` are outside `/cache` (#2923).
+        .filter(|word| is_script_path(word) && !crate::util::is_within(cache, word))
         .map(str::to_string)
         .collect()
 }
@@ -176,11 +176,16 @@ fn strip_path_root(word: &str) -> Option<&str> {
         return Some(rest);
     }
     let var = word.strip_prefix('$')?;
-    let after_var = if let Some(braced) = var.strip_prefix('{') {
-        braced.split_once('}')?.1
+    let (name, after_var) = if let Some(braced) = var.strip_prefix('{') {
+        braced.split_once('}')?
     } else {
-        var.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        let after = var.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        (&var[..var.len() - after.len()], after)
     };
+    // `$/x` names no variable, so it is not a rooted path.
+    if name.is_empty() {
+        return None;
+    }
     after_var.strip_prefix('/')
 }
 
@@ -192,6 +197,29 @@ fn is_system_path(rest: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        #[test]
+        fn a_root_needs_a_tilde_a_slash_or_a_named_variable(word in "[~$/{}A-Za-z_0-9.]{0,12}") {
+            let named = |name: &str| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            };
+            let expected = if let Some(rest) = word.strip_prefix("~/") {
+                Some(rest)
+            } else if let Some(rest) = word.strip_prefix('/') {
+                Some(rest)
+            } else if let Some(var) = word.strip_prefix("${") {
+                var.split_once('}')
+                    .filter(|(name, _)| !name.is_empty())
+                    .and_then(|(_, after)| after.strip_prefix('/'))
+            } else if let Some(var) = word.strip_prefix('$') {
+                var.split_once('/').filter(|(name, _)| named(name)).map(|(_, rest)| rest)
+            } else {
+                None
+            };
+            proptest::prop_assert_eq!(strip_path_root(&word), expected);
+        }
+    }
 
     const CACHE: &str = "/cache";
 
@@ -229,6 +257,13 @@ mod tests {
         ] {
             assert_eq!(tokens(command), [token], "{command}");
         }
+    }
+
+    #[test]
+    fn a_path_that_only_looks_like_it_is_in_the_cache_is_named() {
+        assert!(tokens("sh /cache/hooks/x.sh").is_empty());
+        assert_eq!(tokens("sh /cache/../etc/x.sh"), ["/cache/../etc/x.sh"]);
+        assert_eq!(tokens("sh /cache2/x.sh"), ["/cache2/x.sh"]);
     }
 
     #[test]

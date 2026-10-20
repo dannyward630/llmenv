@@ -1,0 +1,61 @@
+//! Whether a configured codebase-memory `index_path` uses a cache folder (#2929).
+
+use std::path::{Path, PathBuf};
+
+use crate::config::Config;
+use crate::paths;
+
+/// The folder of the bundles.
+pub(super) fn bundles_dir() -> anyhow::Result<PathBuf> {
+    Ok(paths::config_dir()?.join("bundles"))
+}
+
+/// Whether a configured `index_path` names the codebase-memory folder.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CacheUse {
+    Unused,
+    Live,
+    /// An `index_path` or a bundle cannot be read, so the answer is not known.
+    Unknown(String),
+}
+
+/// Check every `features.codebase_memory` `index_path`: the top-level entries and the entries of
+/// every configured bundle, active here or not. A bundle can be active in another folder, and its
+/// server then uses the folder (#2929).
+pub(super) fn cache_use(config: &Config, bundles_dir: &Path, dir: &Path) -> CacheUse {
+    let raws = match configured_index_paths(config, bundles_dir) {
+        Ok(raws) => raws,
+        Err(cause) => return CacheUse::Unknown(cause),
+    };
+    let canonical_dir = std::fs::canonicalize(dir).ok();
+    for raw in raws {
+        let expanded = match paths::expand_tilde(&raw) {
+            Ok(expanded) => PathBuf::from(expanded),
+            Err(e) => return CacheUse::Unknown(format!("cannot expand index_path {raw}: {e:#}")),
+        };
+        let same = expanded == dir
+            || (canonical_dir.is_some() && std::fs::canonicalize(&expanded).ok() == canonical_dir);
+        if same {
+            return CacheUse::Live;
+        }
+    }
+    CacheUse::Unused
+}
+
+/// The raw `index_path` values of the top-level config and of each bundle's `bundle.yaml`.
+fn configured_index_paths(config: &Config, bundles_dir: &Path) -> Result<Vec<String>, String> {
+    let index_paths = |features: Option<&crate::config::Features>| -> Vec<String> {
+        features
+            .iter()
+            .flat_map(|f| &f.codebase_memory)
+            .filter_map(|cm| cm.index_path.clone())
+            .collect()
+    };
+    let mut raws = index_paths(config.features.as_ref());
+    for bundle in &config.bundle {
+        let caps = crate::merge::read_bundle_yaml(&bundles_dir.join(&bundle.name), &bundle.name)
+            .map_err(|e| format!("cannot read the index_path of a bundle: {e:#}"))?;
+        raws.extend(index_paths(caps.as_ref().and_then(|c| c.features.as_ref())));
+    }
+    Ok(raws)
+}

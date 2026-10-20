@@ -2,6 +2,7 @@
 //! independent sinks — a local JSONL file and ICM's transcript store via the
 //! ICM MCP. See `docs/superpowers/specs/2026-06-30-icm-transcript-session-logging-design.md`.
 
+pub(crate) mod count;
 pub(crate) mod detached;
 pub(crate) mod detached_log;
 pub(crate) mod dispatch;

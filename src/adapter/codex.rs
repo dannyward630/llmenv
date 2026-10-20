@@ -322,9 +322,8 @@ impl AgentAdapter for CodexAdapter {
             out,
             &manifest.capabilities.skills,
         )?);
-        let features = manifest.capabilities.features.clone().unwrap_or_default();
         owned.extend(super::llmenv_skill::materialize_llmenv_skill(
-            out, &features,
+            out, manifest,
         )?);
         super::skills::validate_skills(out)?;
 

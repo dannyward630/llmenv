@@ -11,6 +11,9 @@ repository = "https://github.com/phaedrus1992/llmenv"
 workspace = true
 
 [dependencies]
+llmenv-paths = { path = "../llmenv-paths", version = "5.0.0-alpha.1" }
+llmenv-util = { path = "../llmenv-util", version = "5.0.0-alpha.1" }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

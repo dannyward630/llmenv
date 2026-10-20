@@ -116,7 +116,7 @@ fn try_read_cache(cache_file: &std::path::Path, cache_ttl: u64) -> Option<UsageS
     if age >= Duration::from_secs(cache_ttl) {
         return None;
     }
-    let bytes = std::fs::read(cache_file)
+    let bytes = crate::paths::bounded::state_bytes(cache_file)
         .inspect_err(|e| unusable("cannot be read", e))
         .ok()?;
     match serde_json::from_slice::<UsageSnapshot>(&bytes) {
@@ -209,8 +209,7 @@ struct UmansPriority {
 impl ThrottleBackend for UmansBackend {
     fn fetch_usage(&self) -> anyhow::Result<UsageSnapshot> {
         let config_path = crate::paths::expand_tilde("~/.umans/config.json")?;
-        let raw = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("reading umans config: {config_path}"))?;
+        let raw = crate::paths::bounded::state_text(Path::new(&config_path))?;
         let umans_cfg: UmansConfig = serde_json::from_str(&raw).context("parsing umans config")?;
 
         let url = format!("{}/v1/usage", umans_cfg.api_endpoint.trim_end_matches('/'));

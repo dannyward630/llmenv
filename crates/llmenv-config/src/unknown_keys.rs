@@ -48,8 +48,7 @@ fn non_string_key_text(key: &serde_yaml::Value) -> String {
 /// # Errors
 /// Returns an error if the file cannot be read or is not valid YAML.
 pub fn unknown_top_level_keys(path: &Path) -> anyhow::Result<Vec<String>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file: {}", path.display()))?;
+    let text = crate::read_config_text(path)?;
     let doc: serde_yaml::Value = serde_yaml::from_str(&text)
         .with_context(|| format!("failed to parse config file: {}", path.display()))?;
     let Some(mapping) = doc.as_mapping() else {

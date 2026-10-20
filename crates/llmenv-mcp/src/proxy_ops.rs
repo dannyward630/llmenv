@@ -108,30 +108,53 @@ pub enum StopOutcome {
     StillRunning,
 }
 
-/// A command line that starts the memory proxy: `mcp-proxy … -- icm serve`. A script runs
-/// through its interpreter, and `uvx` runs the tool by name, so `mcp-proxy` is the first or the
-/// second word.
+/// A command line that starts the memory proxy: `mcp-proxy … -- <icm> serve`, where `<icm>` is
+/// `icm` or an absolute path to it (#2948). A script runs through its interpreter, and `uvx` runs
+/// the tool by name, so `mcp-proxy` is the first or the second word.
 fn is_proxy_command(command: &str) -> bool {
-    let mut words = command.split_whitespace();
-    let leading: Vec<&str> = words.by_ref().take(2).collect();
-    let names_proxy = leading
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let names_proxy = words
         .iter()
+        .take(2)
         .any(|w| w.rsplit('/').next() == Some("mcp-proxy"));
-    names_proxy && command.trim_end().ends_with("-- icm serve")
+    let serves_icm = matches!(
+        words.as_slice(),
+        [.., "--", icm, "serve"] if icm.rsplit('/').next() == Some("icm")
+    );
+    names_proxy && serves_icm
 }
 
 /// The command line of `pid`, or `None` when the process is gone. `-ww` stops `ps` from cutting
 /// a long line, which would hide the `-- icm serve` tail.
 fn command_of(pid: u32) -> anyhow::Result<Option<String>> {
     // An absolute path: a `ps` earlier on PATH could answer for any pid.
-    let out = std::process::Command::new("/bin/ps")
-        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .output()
+    let mut cmd = std::process::Command::new("/bin/ps");
+    cmd.args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = crate::process::run_with_timeout(cmd, PS_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the command of pid {pid}: {e}"))?;
+    ps_command(pid, &out)
+}
+
+/// `ps` answers in milliseconds. A stuck `ps` must not hold the proxy check (#2923).
+const PS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read the `ps` result for `pid`. `ps -p` exits 1 with no output for a pid that does not exist.
+/// Any other failure is an error, so a broken `ps` does not read as "pid gone" (#2923).
+fn ps_command(pid: u32, out: &std::process::Output) -> anyhow::Result<Option<String>> {
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // `ps -p` exits 1 with no output for a pid that does not exist.
-    Ok((!text.is_empty()).then_some(text))
+    if out.status.success() {
+        return Ok((!text.is_empty()).then_some(text));
+    }
+    if out.status.code() == Some(1) && text.is_empty() && out.stderr.is_empty() {
+        return Ok(None);
+    }
+    anyhow::bail!(
+        "/bin/ps failed to read the command of pid {pid} ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
 }
 
 /// Whether `pid` is a running process that this user can signal.
@@ -190,6 +213,41 @@ mod tests {
     use crate::proxy::is_alive;
     use proptest::prelude::*;
 
+    fn ps_output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn a_successful_ps_gives_its_trimmed_output(out in "\\PC{0,40}", err in "\\PC{0,20}") {
+            let read = ps_command(7, &ps_output(0, &out, &err)).unwrap();
+            let trimmed = out.trim();
+            prop_assert_eq!(read, (!trimmed.is_empty()).then(|| trimmed.to_string()));
+        }
+
+        #[test]
+        fn a_failed_ps_never_panics(code in 1i32..128, out in "\\PC{0,20}", err in "\\PC{0,20}") {
+            let _ = ps_command(7, &ps_output(code, &out, &err));
+        }
+    }
+
+    #[test]
+    fn a_ps_failure_is_an_error_and_not_a_gone_pid() {
+        assert_eq!(
+            ps_command(7, &ps_output(0, "icm serve\n", "")).unwrap(),
+            Some("icm serve".to_string())
+        );
+        assert_eq!(ps_command(7, &ps_output(1, "", "")).unwrap(), None);
+        let err = ps_command(7, &ps_output(1, "", "ps: bad option")).unwrap_err();
+        assert!(format!("{err:#}").contains("bad option"), "{err:#}");
+        assert!(ps_command(7, &ps_output(2, "", "")).is_err());
+    }
+
     fn spawner() -> Spawner {
         Spawner {
             parent: 10,
@@ -236,6 +294,12 @@ mod tests {
                 "/venv/bin/python3 /venv/bin/mcp-proxy --host 1 --port 2 -- icm serve",
                 true,
             ),
+            (
+                "mcp-proxy --host 1 --port 2 -- /opt/homebrew/bin/icm serve",
+                true,
+            ),
+            ("mcp-proxy --host 1 --port 2 -- /x/icm-fake serve", false),
+            ("mcp-proxy --host 1 --port 2 icm serve", false),
             ("sh -c echo mcp-proxy -- icm serve", false),
             ("/bin/other /x/mcp-proxy-fake --host 1 -- icm serve", false),
             ("mcp-proxy --host 1 --port 2 -- other serve", false),
@@ -310,7 +374,16 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut child = std::process::Command::new(&script)
-            .args(["--host", "127.0.0.1", "--port", "1", "--", "icm", "serve"])
+            // The proxy gets an absolute `icm` (#2948), so the stop must still know it.
+            .args([
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "1",
+                "--",
+                "/usr/local/bin/icm",
+                "serve",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

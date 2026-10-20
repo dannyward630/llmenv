@@ -159,7 +159,7 @@ pub(crate) fn build_manifest(
                 tracing::error!("failed to persist bundle-merge cache: {e}");
             }
         }
-        Err(e) => tracing::warn!("failed to compute merge signature for cache: {e}"),
+        Err(e) => tracing::error!("failed to compute merge signature for cache: {e}"),
     }
 
     let resolved = crate::plugins::resolve::resolve_plugins(config, &host_tags, true)
