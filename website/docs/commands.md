@@ -962,6 +962,7 @@ or to re-authenticate.
 llmenv setup [PATH] [--repo URL] [--no-launch] [--rescan]
 llmenv setup --scan ROOT...
 llmenv setup --tools
+llmenv setup --apply PLAN
 ```
 
 Interactive setup wizard for new llmenv users. Walks through auth setup (login
@@ -974,8 +975,15 @@ guide, then optionally hands off to the AI engine for further configuration.
 It runs `setup --scan` on them, and proposes one bundle per language or practice, each with the files that support it.
 It runs `setup --tools` and recommends ICM memory and codebase-memory-mcp first.
 You accept or reject each suggestion, and the skill writes nothing before you approve the plan.
+(changed in v3.13.0) The skill writes no config file itself: it writes a plan, and you apply it with `setup --apply`.
+
+(changed in v3.13.0) When `config.yaml` exists, `setup` asks what to do.
+Merge is the default: it keeps every file, refreshes the setup skill, and hands off, so the plan adds only what is new.
+Reset runs the wizard again and replaces `config.yaml`.
 
 - `--no-launch` skips the AI engine handoff at the end.
+  (changed in v3.13.0) On an existing `config.yaml` it refuses and names `--rescan`.
+  It cannot ask before it replaces the file.
 - `--rescan` re-scans existing configs without overwriting files.
 
 ### `setup --scan`
@@ -1020,6 +1028,46 @@ ICM and codebase-memory-mcp come first as the recommended default, each with the
 The report reads only absolute `PATH` folders, makes no network call, and installs nothing.
 A binary counts as found only when the current user can run it.
 A script install downloads the script and prints the command to run it, so you read the script before you run it.
+
+### `setup --apply`
+
+(added in v3.13.0)
+
+```text
+llmenv setup --apply PLAN
+```
+
+`--apply` reads an onboarding plan, a YAML file that the setup skill writes to `.llmenv-setup-plan.yaml` in the config folder.
+A plan adds new bundles, each with its files and its `bundle.yaml` capabilities.
+It also adds `features.memory`, `features.codebase_memory`, `host`, and `scope` entries.
+A plan bundle may set only `permissions`, `hooks`, `plugins`, `mcp`, `lsp`, `skills`, `output_styles`, and `env`.
+Design: [`docs/design/issue-2773-onboarding.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/issue-2773-onboarding.md).
+
+`--apply` needs a terminal, so you run it yourself.
+In Claude Code, type `! llmenv setup --apply <plan>` in the prompt.
+The terminal check stops an agent that runs the command itself, but it is not a sandbox.
+
+Before it asks anything, `--apply` checks the plan:
+
+1. A bundle whose name is in `config.yaml`, or whose folder exists, is skipped, and the output names it.
+2. `config.yaml` with the plan added must load, and every bundle, old and new, must merge.
+   A scalar that two bundles set to different values fails here.
+3. A host that `config.yaml` already has is refused.
+
+It then asks, with no as the default answer:
+
+1. Apply this plan?
+2. Allow it? This question comes once for each gated entry.
+   The gated entries are each permission allow, hook, MCP server, language server, plugin, and feature entry.
+   The entry is shown in full, and an entry that gets a no is left out.
+3. Add these lines to `config.yaml`? The lines are shown as a diff. A no writes nothing.
+
+`--apply` creates only files that do not exist, and never overwrites one.
+It inserts the new lines into the `bundle:`, `features`, `host:`, and `scope:` blocks of `config.yaml`.
+So comments and key order stay.
+The result must parse to the old configuration plus the new entries.
+A flow-style list, such as `bundle: [...]`, is refused, and the error gives the lines to add by hand.
+After a write, it runs `llmenv validate` and `llmenv regenerate`.
 
 ## `config-context`
 
