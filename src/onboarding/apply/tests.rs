@@ -39,7 +39,7 @@ const PLAN: &str = r#"
 bundles:
   - name: rust-dev
     when: [lang-rust]
-    files: {AGENTS.md: "Use cargo nextest."}
+    agents_md: "Use cargo nextest."
     capabilities:
       permissions:
         allow:
@@ -147,7 +147,7 @@ fn a_no_to_the_config_change_writes_nothing() {
 
 #[test]
 fn an_existing_bundle_is_skipped_and_reported() {
-    let plan = "bundles: [{name: base, when: [me], files: {AGENTS.md: x}}]";
+    let plan = "bundles: [{name: base, when: [me], agents_md: x}]";
     let s = Setup::new(CONFIG, plan);
     let mut script = Script::new(&[]);
     let (result, out) = s.run(&mut script);
@@ -176,19 +176,16 @@ fn a_config_edited_during_the_run_is_not_overwritten() {
     let err = format!("{:#}", result.unwrap_err());
     assert!(err.contains("changed while the plan ran"), "{err}");
     assert!(s.config().ends_with("# edited\n"));
+    assert!(
+        !s.path("bundles/rust-dev").exists(),
+        "nothing is made before the config check"
+    );
 }
 
 #[test]
-fn a_scalar_collision_with_an_existing_bundle_fails_before_any_question() {
-    let s = Setup::new(
-        CONFIG,
-        "bundles: [{name: two, when: [x], capabilities: {permissions: {default_mode: plan}}}]",
-    );
-    std::fs::write(
-        s.path("bundles/base/bundle.yaml"),
-        "permissions:\n  default_mode: acceptEdits\n",
-    )
-    .unwrap();
+fn a_bundle_that_does_not_load_fails_before_any_question() {
+    let plan = "bundles: [{name: two, when: [x], capabilities: {hooks: [{event: Stop}]}}]";
+    let s = Setup::new(CONFIG, plan);
     let mut script = Script::new(&[true]);
     let (result, _) = s.run(&mut script);
     let err = format!("{:#}", result.unwrap_err());
@@ -220,7 +217,7 @@ fn a_missing_config_names_the_fix() {
 
 #[test]
 fn a_scope_makes_the_new_bundle_fire_and_needs_no_item_question() {
-    let plan = "bundles: [{name: rust-dev, when: [lang-rust], files: {AGENTS.md: x}}]\n\
+    let plan = "bundles: [{name: rust-dev, when: [lang-rust], agents_md: x}]\n\
                 scope: {content: [{id: rust, match: {glob: Cargo.toml}, tags: [lang-rust]}]}\n";
     let s = Setup::new(CONFIG, plan);
     let mut script = Script::new(&[true, true]);
@@ -235,4 +232,47 @@ fn a_scope_makes_the_new_bundle_fire_and_needs_no_item_question() {
         config["scope"]["content"][0]["tags"][0],
         serde_yaml::Value::from("lang-rust")
     );
+}
+
+#[test]
+fn a_failed_write_removes_what_it_made_and_keeps_the_config() {
+    let s = Setup::new(CONFIG, PLAN);
+    let blocker = s.path("bundles/rust-dev");
+    let mut script = Script::new(&[true, true, true, true]);
+    // Something takes the bundle path while the user answers.
+    script.on_last = Some(Box::new(move || std::fs::write(&blocker, "x").unwrap()));
+    let (result, _) = s.run(&mut script);
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(
+        err.contains("never writes into a folder it did not make"),
+        "{err}"
+    );
+    assert!(err.contains("config.yaml is unchanged"), "{err}");
+    assert_eq!(s.config(), CONFIG);
+    assert_eq!(
+        std::fs::read_to_string(s.path("bundles/rust-dev")).unwrap(),
+        "x"
+    );
+}
+
+#[test]
+fn a_host_that_a_bundle_declares_is_refused() {
+    let s = Setup::new(CONFIG, "host: {still: {addr: evil.example}}");
+    std::fs::write(
+        s.path("bundles/base/bundle.yaml"),
+        "host:\n  still:\n    addr: 10.0.0.1\n",
+    )
+    .unwrap();
+    let err = format!("{:#}", s.run(&mut Script::new(&[])).0.unwrap_err());
+    assert!(err.contains("config.yaml or a bundle already has"), "{err}");
+}
+
+#[test]
+fn a_no_to_every_entry_of_an_entry_only_plan_writes_nothing() {
+    let s = Setup::new(CONFIG, "features: {codebase_memory: [{when: [me]}]}");
+    let mut script = Script::new(&[true, false]);
+    let (result, out) = s.run(&mut script);
+    assert!(!result.unwrap());
+    assert!(out.contains("Every entry got a no"), "{out}");
+    assert_eq!(s.config(), CONFIG);
 }

@@ -3,10 +3,10 @@
 //! and the `config.yaml` additions to write.
 //! Design: docs/design/issue-2773-onboarding.md ("The plan file and `llmenv setup --apply`").
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, bail, ensure};
+use anyhow::Context as _;
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
@@ -16,27 +16,15 @@ use super::config_splice::Addition;
 /// runaway file before it fills memory.
 const MAX_PLAN_BYTES: u64 = 1024 * 1024;
 
-/// The capability keys that a plan bundle may set. The gate cannot show what the other keys do,
-/// so they are added by hand after onboarding.
-const PLAN_CAPABILITY_KEYS: [&str; 8] = [
-    "permissions",
-    "hooks",
-    "plugins",
-    "mcp",
-    "lsp",
-    "skills",
-    "output_styles",
-    "env",
-];
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlanBundle {
     name: String,
     #[serde(default)]
     when: Vec<String>,
+    /// The bundle's rules text. It is the only file a plan writes besides `bundle.yaml`.
     #[serde(default)]
-    files: BTreeMap<String, String>,
+    agents_md: String,
     #[serde(default)]
     capabilities: Mapping,
 }
@@ -87,16 +75,14 @@ pub(crate) struct Plan {
     host: Mapping,
     #[serde(default)]
     scope: PlanScopes,
-    #[serde(skip)]
-    skipped: Vec<String>,
 }
 
 impl Plan {
     /// Read and check the plan at `path`.
     ///
     /// # Errors
-    /// The file cannot be read, is not a valid plan, or breaks a shape rule: a bad bundle name,
-    /// a repeated name, an unsafe file path, or a capability key that a plan may not set.
+    /// The file cannot be read, is not a valid plan, or breaks a shape rule. See
+    /// docs/design/issue-2773-onboarding.md ("Plan shape").
     pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
         let text = llmenv_paths::read_text_bounded(path, MAX_PLAN_BYTES)
             .with_context(|| format!("reading the plan {}", path.display()))?
@@ -105,133 +91,110 @@ impl Plan {
     }
 
     fn parse(text: &str) -> anyhow::Result<Self> {
-        let plan: Self = serde_yaml::from_str(text)?;
+        let raw: Value = serde_yaml::from_str(text)?;
+        shape::check_no_tags(&raw, "the plan")?;
+        let plan: Self = serde_yaml::from_value(raw)?;
         plan.check_shape()?;
         Ok(plan)
     }
 
-    fn check_shape(&self) -> anyhow::Result<()> {
-        let mut seen = BTreeSet::new();
-        for bundle in &self.bundles {
-            let name = &bundle.name;
-            ensure!(
-                llmenv_paths::is_valid_short_name(name),
-                "bundle name {name:?} is not a plain name (letters, digits, `.`, `_`, `-`)"
-            );
-            ensure!(
-                seen.insert(name.clone()),
-                "bundle {name:?} is in the plan twice"
-            );
-            for file in bundle.files.keys() {
-                check_file_path(name, file)?;
-            }
-            for key in bundle.capabilities.keys() {
-                let key = key.as_str().unwrap_or_default();
-                ensure!(
-                    PLAN_CAPABILITY_KEYS.contains(&key),
-                    "bundle {name:?}: an onboarding plan cannot set `{key}`. Fix: leave it out, and \
-                     add it to bundle.yaml by hand after setup. Allowed keys: {}",
-                    PLAN_CAPABILITY_KEYS.join(", ")
-                );
+    /// Remove each bundle whose name is in `existing`, or whose folder is under `bundles_dir`,
+    /// and return their names (Q5).
+    ///
+    /// # Errors
+    /// The folder of a bundle cannot be checked, for a reason other than that it is absent.
+    pub(crate) fn skip_existing(
+        &mut self,
+        existing: &BTreeSet<String>,
+        bundles_dir: &Path,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut skipped = Vec::new();
+        let mut keep = Vec::new();
+        for bundle in std::mem::take(&mut self.bundles) {
+            let dir = bundles_dir.join(&bundle.name);
+            if existing.contains(&bundle.name) || super::path_exists(&dir)? {
+                skipped.push(bundle.name);
+            } else {
+                keep.push(bundle);
             }
         }
-        Ok(())
-    }
-
-    /// Move each bundle whose name is in `existing`, or whose folder is under `bundles_dir`, to
-    /// the skipped list (Q5).
-    pub(crate) fn skip_existing(&mut self, existing: &BTreeSet<String>, bundles_dir: &Path) {
-        let (skip, keep): (Vec<PlanBundle>, Vec<PlanBundle>) = std::mem::take(&mut self.bundles)
-            .into_iter()
-            .partition(|b| {
-                existing.contains(&b.name) || bundles_dir.join(&b.name).symlink_metadata().is_ok()
-            });
-        self.skipped.extend(skip.into_iter().map(|b| b.name));
         self.bundles = keep;
-    }
-
-    /// The bundles that the plan skipped because they exist.
-    pub(crate) fn skipped(&self) -> &[String] {
-        &self.skipped
+        Ok(skipped)
     }
 
     /// True when the plan adds nothing.
     pub(crate) fn is_empty(&self) -> bool {
-        self.bundles.is_empty()
-            && self.features.memory.is_empty()
-            && self.features.codebase_memory.is_empty()
-            && self.host.is_empty()
-            && self
-                .scope
-                .kinds()
-                .iter()
-                .all(|(_, entries)| entries.is_empty())
+        self.additions().is_empty()
     }
 
-    /// The additions to `config.yaml`: one `bundle:` entry for each bundle, and the features
-    /// and host entries.
+    /// The additions to `config.yaml`: one `bundle:` entry for each bundle, and the features,
+    /// host, and scope entries.
     pub(crate) fn additions(&self) -> Vec<Addition> {
         let mut out = Vec::new();
         let entries: Vec<Value> = self.bundles.iter().map(bundle_entry).collect();
-        if !entries.is_empty() {
-            out.push(Addition::Items {
-                key: "bundle",
-                sub: None,
-                items: entries,
-            });
-        }
-        if !self.features.memory.is_empty() {
-            let items = self.features.memory.clone();
-            out.push(Addition::Items {
-                key: "features",
-                sub: Some("memory"),
-                items,
-            });
-        }
-        if !self.features.codebase_memory.is_empty() {
-            let items = self.features.codebase_memory.clone();
-            out.push(Addition::Items {
-                key: "features",
-                sub: Some("codebase_memory"),
-                items,
-            });
+        let lists = [
+            ("bundle", None, entries),
+            ("features", Some("memory"), self.features.memory.clone()),
+            (
+                "features",
+                Some("codebase_memory"),
+                self.features.codebase_memory.clone(),
+            ),
+        ];
+        let scopes = self
+            .scope
+            .kinds()
+            .map(|(kind, entries)| ("scope", Some(kind), entries.clone()));
+        for (key, sub, items) in lists.into_iter().chain(scopes) {
+            if !items.is_empty() {
+                out.push(Addition::Items { key, sub, items });
+            }
         }
         if !self.host.is_empty() {
+            let keys = self.host.clone();
             out.push(Addition::Keys {
                 key: "host",
                 sub: None,
-                keys: self.host.clone(),
+                keys,
             });
         }
+        out
+    }
+
+    /// One summary line per new bundle, with the tags that make it fire.
+    pub(crate) fn bundle_lines(&self) -> Vec<String> {
+        self.bundles
+            .iter()
+            .map(|b| format!("bundle {} (fires on: {})", b.name, shown_list(&b.when)))
+            .collect()
+    }
+
+    /// One summary line per new scope entry, with the tags it emits.
+    pub(crate) fn scope_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
         for (kind, entries) in self.scope.kinds() {
-            if !entries.is_empty() {
-                out.push(Addition::Items {
-                    key: "scope",
-                    sub: Some(kind),
-                    items: entries.clone(),
-                });
+            for entry in entries {
+                let id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+                let tags: Vec<String> = entry
+                    .get("tags")
+                    .and_then(Value::as_sequence)
+                    .map(|t| {
+                        t.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                out.push(format!(
+                    "{kind} scope {} (emits: {})",
+                    shown(id),
+                    shown_list(&tags)
+                ));
             }
         }
         out
     }
 
-    /// The scope entries that the plan adds, as `kind id` lines.
-    pub(crate) fn scope_ids(&self) -> Vec<String> {
-        self.scope
-            .kinds()
-            .iter()
-            .flat_map(|(kind, entries)| {
-                entries.iter().map(move |e| {
-                    format!(
-                        "{kind} {}",
-                        e.get("id").and_then(Value::as_str).unwrap_or("(no id)")
-                    )
-                })
-            })
-            .collect()
-    }
-
-    /// The host names that the plan adds.
+    /// The host names that the plan adds. The shape check makes each key a string.
     pub(crate) fn host_names(&self) -> Vec<String> {
         self.host
             .keys()
@@ -239,8 +202,8 @@ impl Plan {
             .collect()
     }
 
-    /// The files to create, as paths relative to the config folder, with their text. Each
-    /// bundle with capabilities gets a `bundle.yaml`.
+    /// The files to create, as paths relative to the config folder, with their text: the
+    /// `bundle.yaml` of a bundle with capabilities, and its `AGENTS.md`.
     ///
     /// # Errors
     /// The capabilities of a bundle cannot be encoded as YAML.
@@ -253,8 +216,8 @@ impl Plan {
                     .with_context(|| format!("encoding bundle.yaml of {}", bundle.name))?;
                 out.push((dir.join("bundle.yaml"), text));
             }
-            for (file, text) in &bundle.files {
-                out.push((dir.join(file), text.clone()));
+            if !bundle.agents_md.is_empty() {
+                out.push((dir.join("AGENTS.md"), bundle.agents_md.clone()));
             }
         }
         Ok(out)
@@ -274,22 +237,33 @@ fn bundle_entry(bundle: &PlanBundle) -> Value {
     Value::Mapping(map)
 }
 
-/// A bundle file path must be relative, stay in the bundle, and not be `bundle.yaml`, which
-/// comes from `capabilities`.
-fn check_file_path(bundle: &str, file: &str) -> anyhow::Result<()> {
-    let path = Path::new(file);
-    let plain = path.components().all(|c| matches!(c, Component::Normal(_)));
-    if file.is_empty() || !plain {
-        bail!("bundle {bundle:?}: file {file:?} must be a relative path inside the bundle");
+/// Text from the plan, safe to print: a control character, such as a terminal escape, could
+/// hide the gated text that follows it, so it is shown escaped.
+pub(crate) fn shown(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn shown_list(items: &[String]) -> String {
+    if items.is_empty() {
+        return "no tag".to_string();
     }
-    ensure!(
-        path != Path::new("bundle.yaml"),
-        "bundle {bundle:?}: set `capabilities` for bundle.yaml, not a file named bundle.yaml"
-    );
-    Ok(())
+    items
+        .iter()
+        .map(|i| shown(i))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 mod gate;
+mod shape;
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::panic, reason = "test code")]

@@ -6,9 +6,10 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, bail, ensure};
+use anyhow::{Context as _, ensure};
 
 use super::config_splice::splice;
+use super::path_exists;
 use super::plan::Plan;
 use crate::config::Config;
 use crate::merge::BundleRef;
@@ -28,8 +29,8 @@ pub(crate) trait Prompter {
 /// change writes nothing.
 ///
 /// # Errors
-/// The plan or the config cannot be read, the plan fails a check, a file to create exists, the
-/// config changed during the run, or a write fails.
+/// The plan or the config cannot be read, the plan fails a check, a path to create exists, the
+/// config changed during the run, or a write fails. A failed write removes what this run made.
 pub(crate) fn apply(
     plan_path: &Path,
     config_dir: &Path,
@@ -41,14 +42,13 @@ pub(crate) fn apply(
     let config = Config::load(&config_path)?;
     let mut plan = Plan::load(plan_path)?;
     let existing: BTreeSet<String> = config.bundle.iter().map(|b| b.name.clone()).collect();
-    plan.skip_existing(&existing, &config_dir.join("bundles"));
-    check_hosts(&plan, &config)?;
-    for name in plan.skipped() {
+    for name in plan.skip_existing(&existing, &config_dir.join("bundles"))? {
         writeln!(
             out,
             "Skipped bundle {name}: it exists, and llmenv never replaces a bundle."
         )?;
     }
+    check_hosts(&plan, &config, config_dir)?;
     if plan.is_empty() {
         writeln!(out, "The plan adds nothing. Nothing was written.")?;
         return Ok(false);
@@ -60,6 +60,13 @@ pub(crate) fn apply(
         return Ok(false);
     }
     ask_items(&mut plan, prompter, out)?;
+    if plan.is_empty() {
+        writeln!(
+            out,
+            "Every entry got a no, so the plan adds nothing. Nothing was written."
+        )?;
+        return Ok(false);
+    }
     check(&plan, &old, config_dir)?;
     let (new_text, diff) = splice(&old, &plan.additions())?;
     writeln!(out, "\nLines to add to {}:\n{diff}", config_path.display())?;
@@ -85,12 +92,21 @@ fn read_config(path: &Path) -> anyhow::Result<String> {
         })
 }
 
-fn check_hosts(plan: &Plan, config: &Config) -> anyhow::Result<()> {
+/// A plan host must be new: a host of the same name in config.yaml or in a bundle would point
+/// an existing memory server somewhere else.
+fn check_hosts(plan: &Plan, config: &Config, config_dir: &Path) -> anyhow::Result<()> {
+    let mut known: BTreeSet<String> = config.host.keys().cloned().collect();
+    for bundle in &config.bundle {
+        let root = config_dir.join("bundles").join(&bundle.name);
+        if let Some(caps) = crate::merge::read_bundle_yaml(&root, &bundle.name)? {
+            known.extend(caps.host.into_keys());
+        }
+    }
     for name in plan.host_names() {
         ensure!(
-            !config.host.contains_key(&name),
-            "the plan adds host {name:?}, which config.yaml already has. Fix: use the existing \
-             host in the plan's features entry, and drop it from the plan's `host`"
+            !known.contains(&name),
+            "the plan adds host {name:?}, which config.yaml or a bundle already has. Fix: use the \
+             existing host in the plan's features entry, and drop it from the plan's `host`"
         );
     }
     Ok(())
@@ -136,17 +152,11 @@ fn check(plan: &Plan, old: &str, config_dir: &Path) -> anyhow::Result<()> {
 
 fn print_plan(plan: &Plan, out: &mut dyn Write) -> anyhow::Result<()> {
     writeln!(out, "The plan adds:")?;
-    for name in plan.bundle_names() {
-        writeln!(out, "  bundle {name}")?;
+    for line in plan.bundle_lines().into_iter().chain(plan.scope_lines()) {
+        writeln!(out, "  {line}")?;
     }
     for (rel, _) in plan.files()? {
         writeln!(out, "  file {}", rel.display())?;
-    }
-    for name in plan.host_names() {
-        writeln!(out, "  host {name}")?;
-    }
-    for scope in plan.scope_ids() {
-        writeln!(out, "  scope {scope}")?;
     }
     let items = plan.gated_items()?.len();
     writeln!(
@@ -174,23 +184,19 @@ fn ask_items(
         }
     }
     if !declined.is_empty() {
+        let n = declined.len();
         writeln!(
             out,
-            "\n{} entr{} left out.",
-            declined.len(),
-            if declined.len() == 1 {
-                "y is"
-            } else {
-                "ies are"
-            }
+            "\n{n} entr{} left out.",
+            if n == 1 { "y is" } else { "ies are" }
         )?;
     }
-    plan.remove_items(&declined);
-    Ok(())
+    plan.remove_items(&declined)
 }
 
-/// Create the files, then write `config.yaml` last, so a failed file write leaves the config as
-/// it was. Every path is checked first, so no file is half-written next to one that exists.
+/// Create the bundle folders and files, then write `config.yaml` last. The config is checked
+/// first, so a change during the run stops before anything is made. A failure removes what this
+/// run made, so a re-run of `--apply` starts from the same state.
 fn write_all(
     plan: &Plan,
     config_dir: &Path,
@@ -198,47 +204,82 @@ fn write_all(
     new_text: &str,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let files: Vec<(PathBuf, String)> = plan
-        .files()?
-        .into_iter()
-        .map(|(rel, text)| (config_dir.join(rel), text))
-        .collect();
-    for (path, _) in &files {
-        if path.symlink_metadata().is_ok() {
-            bail!(
-                "{} exists, and llmenv never overwrites a file. Nothing was written",
-                path.display()
-            );
-        }
-    }
-    for (path, text) in &files {
-        create_new(path, text)?;
-        writeln!(out, "Created {}", path.display())?;
-    }
     let config_path = config_dir.join("config.yaml");
     ensure!(
         read_config(&config_path)? == old,
-        "{} changed while the plan ran, so it was not written. The bundle files are created. \
-         Fix: run `llmenv setup --apply` again",
+        "{} changed while the plan ran. Nothing was written. Fix: run `llmenv setup --apply` \
+         again",
         config_path.display()
     );
-    llmenv_paths::write_user_file_atomic(&config_path, new_text.as_bytes())
-        .with_context(|| format!("writing {}", config_path.display()))?;
+    let bundles_dir = config_dir.join("bundles");
+    std::fs::create_dir_all(&bundles_dir)
+        .with_context(|| format!("making {}", bundles_dir.display()))?;
+    let mut made = Vec::new();
+    let result = make_files(plan, config_dir, &mut made).and_then(|()| {
+        llmenv_paths::write_user_file_atomic(&config_path, new_text.as_bytes())
+            .with_context(|| format!("writing {}", config_path.display()))
+    });
+    if let Err(e) = result {
+        return Err(e.context(undo(&made)));
+    }
+    for path in &made {
+        writeln!(out, "Created {}", path.display())?;
+    }
     writeln!(out, "Updated {}", config_path.display())?;
     Ok(())
 }
 
-fn create_new(path: &Path, text: &str) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
+/// Make each bundle folder with `create_dir`, which fails on anything already at the path, and
+/// each file with `create_new`. Each path made is pushed to `made`.
+fn make_files(plan: &Plan, config_dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for name in plan.bundle_names() {
+        let dir = config_dir.join("bundles").join(name);
+        std::fs::create_dir(&dir).with_context(|| {
+            format!(
+                "making {}; llmenv never writes into a folder it did not make",
+                dir.display()
+            )
+        })?;
+        made.push(dir);
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
+    for (rel, text) in plan.files()? {
+        let path = config_dir.join(rel);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("creating {}", path.display()))?;
+        made.push(path.clone());
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Remove what this run made, newest first, and say what happened.
+fn undo(made: &[PathBuf]) -> String {
+    let mut left = Vec::new();
+    for path in made.iter().rev() {
+        let removed = if path.is_dir() {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        if let Err(e) = removed
+            && path_exists(path).unwrap_or(true)
+        {
+            left.push(format!("{} ({e})", path.display()));
+        }
+    }
+    if left.is_empty() {
+        "the apply failed, and the files it made are removed; config.yaml is unchanged".to_string()
+    } else {
+        format!(
+            "the apply failed, and these paths it made could not be removed: {}. Fix: remove \
+             them, then run `llmenv setup --apply` again",
+            left.join(", ")
+        )
+    }
 }
 
 #[cfg(test)]

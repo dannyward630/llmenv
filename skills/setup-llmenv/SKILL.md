@@ -70,7 +70,7 @@ For each plugin in `existing_configs.claude_code.plugins` and each marketplace i
 If `claude_md` or `gemini_md` is present:
 
 - Summarize the key directives.
-- Propose a new bundle for them, such as `personal-rules`, with an `AGENTS.md` file in the plan.
+- Propose a new bundle for them, such as `personal-rules`, with the text in its `agents_md`.
 - `--apply` never changes a file that exists.
   To add to the `AGENTS.md` of an existing bundle, show the text and tell the user to add it by hand.
 
@@ -177,8 +177,7 @@ It is the only file you write.
 bundles:
   - name: rust-dev
     when: [lang-rust]
-    files:              # bundle-relative path -> text; created only when absent
-      AGENTS.md: "..."
+    agents_md: "..."    # the bundle's rules text; the only file a plan writes
     capabilities:       # becomes bundles/<name>/bundle.yaml
       permissions: {allow: [{tool: Bash, pattern: "cargo *"}]}
       hooks: []
@@ -194,8 +193,12 @@ scope:
   user: []
 ```
 
-A plan bundle may set only `permissions`, `hooks`, `plugins`, `mcp`, `lsp`, `skills`, `output_styles`, and `env`.
-Leave every other key out, and show it as a line to add by hand.
+A plan bundle may set only `permissions` (its `allow`, `ask`, and `deny` lists), `hooks`, `plugins`, `mcp`, and `lsp`.
+Leave every other key out, such as `env`, `skills`, or `permissions.default_mode`.
+Show such a key as a line to add by hand.
+A plan writes no file except `bundle.yaml` and `AGENTS.md`.
+A hook command must use a tool that is installed, not a script in the bundle.
+Do not use YAML tags in a plan.
 
 Before the hand-off, show the user the plan in this order:
 
@@ -205,10 +208,10 @@ Before the hand-off, show the user the plan in this order:
 4. each hook, MCP server, and permission allow, with its command or pattern in full,
 5. the lines to add by hand from steps 2 to 5.
 
-Then tell the user to type this in the prompt, so it runs in their own terminal:
+Then tell the user to run this command in a separate terminal window:
 
 ```text
-! llmenv setup --apply {config_dir}/.llmenv-setup-plan.yaml
+llmenv setup --apply {config_dir}/.llmenv-setup-plan.yaml
 ```
 
 MUST NOT run `llmenv setup --apply` yourself.
@@ -216,6 +219,7 @@ It refuses to run without a terminal, because only the user can give its yes ans
 
 `--apply` checks the plan before it asks anything: the bundles must merge, and `config.yaml` with the plan added must load.
 It then asks for a yes for the plan, for each gated entry, and for the lines it adds to `config.yaml`.
+The gated entries are each allow, hook, MCP server, language server, plugin, feature entry, and host.
 It skips a bundle whose name exists, never overwrites a file, and never re-serializes `config.yaml`.
 After a write, it runs `llmenv validate` and `llmenv regenerate`.
 If it reports an error, fix the plan file and ask the user to run it again.

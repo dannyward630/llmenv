@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use proptest::prelude::*;
+
 use super::Plan;
 use crate::onboarding::config_splice::Addition;
 
@@ -8,8 +10,7 @@ const PLAN: &str = r#"
 bundles:
   - name: rust-dev
     when: [lang-rust]
-    files:
-      AGENTS.md: "Use cargo nextest."
+    agents_md: "Use cargo nextest."
     capabilities:
       permissions:
         allow:
@@ -20,7 +21,7 @@ bundles:
       hooks:
         - event: PostToolUse
           matcher: Edit
-          handler: {type: command, command: hooks/fmt.sh}
+          handler: {type: command, command: cargo fmt}
 features:
   codebase_memory:
     - {when: [me]}
@@ -49,7 +50,7 @@ fn the_gated_items_are_the_allows_hooks_and_features_in_order() {
     );
     let (_, hook) = &items[2];
     assert!(
-        hook.contains("command: hooks/fmt.sh") && hook.contains("PostToolUse"),
+        hook.contains("command: cargo fmt") && hook.contains("PostToolUse"),
         "{hook}"
     );
 }
@@ -57,7 +58,7 @@ fn the_gated_items_are_the_allows_hooks_and_features_in_order() {
 #[test]
 fn a_declined_item_is_removed_from_the_files_and_the_additions() {
     let mut p = plan();
-    p.remove_items(&BTreeSet::from([0, 3]));
+    p.remove_items(&BTreeSet::from([0, 3])).unwrap();
     let items = p.gated_items().unwrap();
     assert_eq!(items.len(), 2, "{items:?}");
     assert!(
@@ -88,6 +89,25 @@ fn a_declined_item_is_removed_from_the_files_and_the_additions() {
         )
     });
     assert_eq!(features.count(), 0, "the declined feature entry is gone");
+}
+
+#[test]
+fn a_declined_position_outside_the_plan_is_an_error() {
+    let err = plan().remove_items(&BTreeSet::from([99])).unwrap_err();
+    assert!(format!("{err:#}").contains("not in the plan"), "{err:#}");
+}
+
+#[test]
+fn a_host_is_a_gated_item_and_a_no_removes_it() {
+    let mut p = Plan::parse("host: {still: {addr: still.local}}").unwrap();
+    let items = p.gated_items().unwrap();
+    assert_eq!(items.len(), 1);
+    assert!(
+        items[0].0 == "host still" && items[0].1.contains("still.local"),
+        "{items:?}"
+    );
+    p.remove_items(&BTreeSet::from([0])).unwrap();
+    assert!(p.is_empty());
 }
 
 #[test]
@@ -123,14 +143,18 @@ fn the_additions_list_each_bundle_and_feature() {
 fn an_existing_bundle_is_skipped_by_name_or_folder() {
     let dir = tempfile::tempdir().unwrap();
     let mut p = plan();
-    p.skip_existing(&BTreeSet::from(["rust-dev".to_string()]), dir.path());
-    assert_eq!(p.skipped(), ["rust-dev"]);
+    let skipped = p
+        .skip_existing(&BTreeSet::from(["rust-dev".to_string()]), dir.path())
+        .unwrap();
+    assert_eq!(skipped, ["rust-dev"]);
     assert!(p.bundle_names().is_empty());
 
     let mut p = plan();
     std::fs::create_dir(dir.path().join("rust-dev")).unwrap();
-    p.skip_existing(&BTreeSet::new(), dir.path());
-    assert_eq!(p.skipped(), ["rust-dev"]);
+    assert_eq!(
+        p.skip_existing(&BTreeSet::new(), dir.path()).unwrap(),
+        ["rust-dev"]
+    );
     assert!(!p.is_empty(), "the feature entry is still in the plan");
 }
 
@@ -138,9 +162,7 @@ fn an_existing_bundle_is_skipped_by_name_or_folder() {
 fn shape_errors_name_the_fix() {
     assert!(err("bundles: [{name: ../x}]").contains("not a plain name"));
     assert!(err("bundles: [{name: a}, {name: a}]").contains("twice"));
-    assert!(err("bundles: [{name: a, files: {../x: y}}]").contains("relative path inside"));
-    assert!(err("bundles: [{name: a, files: {/etc/x: y}}]").contains("relative path inside"));
-    assert!(err("bundles: [{name: a, files: {bundle.yaml: y}}]").contains("set `capabilities`"));
+    assert!(err("bundles: [{name: a, files: {x: y}}]").contains("unknown field"));
     let native = err("bundles: [{name: a, capabilities: {native_hooks: {}}}]");
     assert!(
         native.contains("cannot set `native_hooks`") && native.contains("Fix:"),
@@ -148,6 +170,71 @@ fn shape_errors_name_the_fix() {
     );
     assert!(err("bundle: []").contains("unknown field"));
     assert!(err("features: {throttle: {}}").contains("unknown field"));
+    assert!(err("scope: {content: [{match: {glob: x}}]}").contains("has no `id`"));
+    assert!(err("host: {1: {addr: x}}").contains("not a string"));
+}
+
+/// Each of these slipped past the gate before the shape rules (security review of #2962).
+#[test]
+fn entries_that_could_skip_the_gate_are_refused() {
+    let cases = [
+        (
+            "bundles: [{name: a, capabilities: {!x permissions: {allow: [{tool: Bash}]}}}]",
+            "YAML tag",
+        ),
+        (
+            "bundles: [{name: a, capabilities: {hooks: !h [{event: Stop}]}}]",
+            "YAML tag",
+        ),
+        (
+            "bundles: [{name: a, capabilities: {permissions: {default_mode: bypassPermissions}}}]",
+            "permissions.default_mode",
+        ),
+        (
+            "bundles: [{name: a, capabilities: {permissions: {preset: safe-readonly}}}]",
+            "permissions.preset",
+        ),
+        (
+            "bundles: [{name: a, capabilities: {env: {BASH_ENV: /tmp/x}}}]",
+            "cannot set `env`",
+        ),
+        (
+            "bundles: [{name: a, capabilities: {skills: [x]}}]",
+            "cannot set `skills`",
+        ),
+        (
+            "bundles: [{name: a, capabilities: {hooks: {event: Stop}}}]",
+            "must be a list",
+        ),
+        (
+            "bundles: [{name: a, capabilities: {permissions: {allow: {tool: Bash}}}}]",
+            "must be a list",
+        ),
+        (
+            "bundles: [{name: a, files: {Bundle.yaml: x}}]",
+            "unknown field",
+        ),
+    ];
+    for (plan, expected) in cases {
+        let text = err(plan);
+        assert!(text.contains(expected), "{plan}: {text}");
+    }
+}
+
+#[test]
+fn plan_text_is_shown_with_control_characters_escaped() {
+    let p =
+        Plan::parse("scope: {user: [{id: \"a\\e[2Jb\", match: {user: me}, tags: [t]}]}").unwrap();
+    let lines = p.scope_lines();
+    assert!(
+        !lines[0].contains('\u{1b}') && lines[0].contains("\\u{1b}"),
+        "{lines:?}"
+    );
+    assert!(lines[0].contains("emits: t"), "{lines:?}");
+    assert_eq!(
+        plan().bundle_lines(),
+        ["bundle rust-dev (fires on: lang-rust)"]
+    );
 }
 
 #[test]
@@ -167,7 +254,7 @@ fn scope_entries_are_added_without_a_question() {
             .unwrap();
     assert!(!p.is_empty());
     assert!(p.gated_items().unwrap().is_empty());
-    assert_eq!(p.scope_ids(), ["content rust"]);
+    assert_eq!(p.scope_lines(), ["content scope rust (emits: lang-rust)"]);
     let additions = p.additions();
     assert!(
         matches!(
@@ -180,4 +267,24 @@ fn scope_entries_are_added_without_a_question() {
         ),
         "{additions:?}"
     );
+}
+
+proptest! {
+    /// After any set of no answers, the gated entries left are exactly the ones that got a yes,
+    /// in order. The model is a filter over the first list.
+    #[test]
+    fn remove_items_leaves_exactly_the_yes_answers(answers in prop::collection::vec(any::<bool>(), 4)) {
+        let mut p = plan();
+        let before = p.gated_items().unwrap();
+        let declined: BTreeSet<usize> =
+            answers.iter().enumerate().filter(|(_, yes)| !**yes).map(|(i, _)| i).collect();
+        p.remove_items(&declined).unwrap();
+        let expected: Vec<(String, String)> = before
+            .into_iter()
+            .zip(&answers)
+            .filter(|(_, yes)| **yes)
+            .map(|(item, _)| item)
+            .collect();
+        prop_assert_eq!(p.gated_items().unwrap(), expected);
+    }
 }

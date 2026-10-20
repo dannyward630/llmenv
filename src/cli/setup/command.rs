@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use super::run_setup;
 
@@ -57,7 +57,9 @@ impl crate::onboarding::apply::Prompter for TerminalPrompter {
     }
 }
 
-/// Run `llmenv setup --apply PLAN`, then validate and regenerate when it wrote files.
+/// Run `llmenv setup --apply PLAN`, then validate and regenerate when it wrote files. The plan
+/// text goes to stderr, next to the prompts, so a redirected stdout cannot hide what the user
+/// approves.
 ///
 /// # Errors
 /// stdin or stderr is not a terminal, the apply fails, or validate or regenerate fails.
@@ -67,17 +69,24 @@ fn run_apply(plan: &std::path::Path) -> Result<()> {
     anyhow::ensure!(
         std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
         "`llmenv setup --apply` asks for a yes for each hook, MCP server, and permission allow, \
-         so it needs a terminal. Fix: run it yourself in a terminal. In Claude Code, type \
-         `! llmenv setup --apply {}`",
+         so it needs a terminal. Fix: run `llmenv setup --apply {}` yourself in a terminal \
+         window",
         plan.display()
     );
     let config_dir = crate::paths::config_dir()?;
-    let mut out = std::io::stdout();
-    if crate::onboarding::apply::apply(plan, &config_dir, &mut TerminalPrompter, &mut out)? {
-        super::super::run_validate(out.is_terminal())?;
-        super::super::run_regenerate()?;
+    let mut out = std::io::stderr();
+    if !crate::onboarding::apply::apply(plan, &config_dir, &mut TerminalPrompter, &mut out)? {
+        return Ok(());
     }
-    Ok(())
+    let written = "`llmenv setup --apply` wrote the bundle files and config.yaml shown above";
+    super::super::run_validate(std::io::stdout().is_terminal()).with_context(|| {
+        format!("{written}, but validate failed. Fix: remove the added lines, or fix them by hand")
+    })?;
+    super::super::run_regenerate().with_context(|| {
+        format!(
+            "{written}, but regenerate failed. Fix: correct the error, then run `llmenv regenerate`"
+        )
+    })
 }
 
 /// Run `llmenv setup`: a scan or a tool report prints its JSON and stops; otherwise the wizard

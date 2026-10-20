@@ -205,8 +205,7 @@ The skill never writes the configuration itself.
 bundles:
   - name: rust-dev
     when: [lang-rust]
-    files:              # bundle-relative path -> text; created only when absent
-      AGENTS.md: "..."
+    agents_md: "..."    # the bundle's rules text, written to AGENTS.md
     capabilities:       # becomes bundles/<name>/bundle.yaml
       permissions: {allow: [{tool: Bash, pattern: "cargo *"}]}
       hooks: []
@@ -215,35 +214,53 @@ features:               # added to config.yaml
   memory: []
   codebase_memory: []
 host: {}                # new host entries for features.memory
+scope:                  # new scope entries, so a new bundle's tags can fire
+  content: []
 ```
 
-Unknown keys are errors.
-A plan bundle accepts these capability keys only: `permissions`, `hooks`, `plugins`, `mcp`, `lsp`, `skills`, `output_styles`, and `env`.
-The `native_*` keys, `features`, and the other bundle keys are added by hand after onboarding, because the gate cannot show what they do.
-A file path must be relative, must stay inside the bundle, and must not be `bundle.yaml`.
+Unknown keys are errors, and so is a YAML tag anywhere in the plan.
+A tag on a key hides it from the gate's exact lookup, while the loader of the written file still reads the plain key.
+
+A plan bundle accepts these capability keys only: `permissions`, `hooks`, `plugins`, `mcp`, and `lsp`.
+Its `permissions` accepts only the `allow`, `ask`, and `deny` lists, and each gated key must hold a list.
+Every other key is added by hand after onboarding, because the gate cannot show what it does.
+`env` can run code (`BASH_ENV`, `NODE_OPTIONS`), `skills` and `output_styles` can grant tools, and `default_mode` and `preset` change what the agent may do without a list entry.
+
+A plan writes no file except each bundle's `bundle.yaml` and `AGENTS.md`.
+A hook therefore runs an installed tool, and the gate shows its whole command.
+A script in the bundle would run code that the user never saw.
 
 ### Checks before any prompt
 
 1. A bundle whose name is in `config.yaml` or whose folder exists is skipped, and the summary names it (Q5).
 2. Each new `bundle.yaml` passes the same check as a real one.
-3. The plan's `host` names must be new.
+3. The plan's `host` names must be new to `config.yaml` and to every bundle, so no existing memory server is pointed elsewhere.
 4. The changed `config.yaml` must load, and the merge of every bundle, old and new, must succeed.
-   The merge treats every bundle as firing, so a scalar collision between any two bundles is found now, not on the day both fire.
+   The merge treats every bundle as firing.
+   The keys a plan may set are all lists, which merge without a conflict, so this check mainly catches an entry that does not load.
+
+`llmenv validate` runs after the write.
+Its other checks cover keys that a plan cannot set, such as `enable_bundles` and `disabled_engines`.
 
 ### The trust gate (Q4)
 
 `--apply` refuses to run unless stdin and stderr are terminals (owner decision on #2788).
-An agent's shell tool has no terminal, so the skill tells the user to type `! llmenv setup --apply PLAN`.
+An agent's shell tool has no terminal, so the skill tells the user to run `llmenv setup --apply PLAN` in a separate terminal window.
 The gate stops an agent that runs the command itself.
 It is not a sandbox: a process that makes a pseudo-terminal can still answer the prompts.
 
 The flow asks in this order:
 
 1. Approve the plan as a whole.
-2. Approve each gated item: each permission allow, hook, MCP server, language server, plugin, and memory or code-graph feature entry, with its command in full.
+2. Approve each gated item: each permission allow, hook, MCP server, language server, plugin, memory or code-graph feature entry, and host, shown in full.
+   Text from the plan is printed with control characters escaped, so an escape code cannot hide what follows it.
    An item that gets a no is removed from the files that are written.
 3. Approve the `config.yaml` change, shown as the lines to add.
    A no here writes nothing, because a bundle that `config.yaml` does not list never fires.
+
+The write makes each bundle folder with a call that fails on anything already at the path, and each file with one that never replaces a file.
+`config.yaml` is written last.
+If any step fails, the files and folders that the run made are removed, so a second run starts from the same state.
 
 ### The config.yaml change
 
@@ -257,6 +274,7 @@ The file is never re-serialized.
 ### Re-run (Q5)
 
 On a configured machine, `llmenv setup` offers a merge as the default choice and the full reset as a second choice.
+`--no-launch` cannot ask, so it takes the merge.
 The merge keeps every file, refreshes the skill and its state, and hands off to the engine.
 The skill then builds a plan, and `--apply` skips existing bundles and files as above.
 After a write, `--apply` runs `llmenv validate`, then `llmenv regenerate`.
