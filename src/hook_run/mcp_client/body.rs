@@ -121,4 +121,21 @@ mod tests {
             "short"
         );
     }
+
+    /// The caps are the sizes that the docs and the changelog state: 8 MiB and 4 KiB.
+    #[tokio::test]
+    async fn the_reply_cap_is_8_mib() {
+        let at_cap = read_capped(reply(vec![b'x'; 8_388_608]).await, MAX_REPLY_BYTES, "t").await;
+        assert_eq!(at_cap.unwrap().len(), 8_388_608);
+        let over = read_capped(reply(vec![b'x'; 8_388_609]).await, MAX_REPLY_BYTES, "t").await;
+        assert!(over.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_error_body_that_exactly_fills_the_cap_is_not_cut() {
+        let body = error_body(reply(vec![b'e'; 4096]).await, "t").await;
+        assert_eq!(body.len(), 4096, "no cut marker: {}", &body[4090..]);
+        let body = error_body(reply(vec![b'e'; 4097]).await, "t").await;
+        assert!(body.ends_with("[cut at 4096 bytes]"), "{}", &body[4090..]);
+    }
 }

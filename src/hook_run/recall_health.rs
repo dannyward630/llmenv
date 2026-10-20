@@ -252,6 +252,32 @@ mod tests {
         assert_eq!(health(log).unwrap().unwrap().newest_at, 20);
     }
 
+    /// A file that exists but cannot be opened is not a bad ring: it is kept, and the agent
+    /// hears that the update failed.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_kept_and_the_update_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dir();
+        let log = dir.path();
+        record(log, 3, 0, 1);
+        let file = path(log);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            // A root user reads the file anyway, so the case cannot happen here.
+            return;
+        }
+        record(log, 1, 0, 2);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            health(log).unwrap().unwrap().calls,
+            3,
+            "the file was not replaced"
+        );
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(notice.contains("was not updated"), "{notice}");
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 
