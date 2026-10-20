@@ -308,3 +308,30 @@ proptest! {
         prop_assert_eq!(count, items + usize::from(has_memory));
     }
 }
+
+/// A blank line or a comment between items stays inside the list, so the new item goes last.
+#[test]
+fn a_blank_line_or_comment_between_items_keeps_the_list_whole() {
+    let old = "bundle:\n- name: base\n  when: [me]\n\n# work bundles\n- name: work\n  when: [w]\n";
+    let (new, _) = run(old, &[bundle("x", "t")]);
+    let names: Vec<String> = yaml(&new)["bundle"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["base", "work", "x"], "{new}");
+    assert!(new.starts_with(old), "{new}");
+}
+
+#[test]
+fn the_manual_fix_names_the_key_and_the_sub_key() {
+    let err = format!(
+        "{:#}",
+        splice("bundle: [a]\n", &[bundle("x", "t")]).unwrap_err()
+    );
+    assert!(err.contains("cannot add to `bundle` in"), "{err}");
+    let old = "features:\n  memory: [{server_host: a}]\n";
+    let err = format!("{:#}", splice(old, &[memory_entry()]).unwrap_err());
+    assert!(err.contains("cannot add to `features.memory` in"), "{err}");
+}
