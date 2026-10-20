@@ -11,8 +11,7 @@ use super::{Plan, shown};
 /// The capability keys that a plan bundle may set. Every entry of these lists, except a
 /// permission `ask` or `deny`, gets a question. Other keys, such as `env` or `skills`, can run
 /// code or grant tools in ways the gate cannot show, so they are added by hand after setup.
-pub(super) const PLAN_CAPABILITY_KEYS: [&str; 5] =
-    ["permissions", "hooks", "plugins", "mcp", "lsp"];
+const PLAN_CAPABILITY_KEYS: [&str; 5] = ["permissions", "hooks", "plugins", "mcp", "lsp"];
 
 /// The keys of `permissions` that a plan may set. `default_mode` and `preset` change what the
 /// agent may do without a list entry the gate could show, so a plan cannot set them.
