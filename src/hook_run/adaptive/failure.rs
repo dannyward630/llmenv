@@ -61,7 +61,7 @@ pub(super) fn is_generic(error: &str) -> bool {
 ///
 /// ICM normalizes its score per query, so the best of an unrelated set also scores near 1.0
 /// and cannot gate the injection. A raw score is requested upstream (rtk-ai/icm#521).
-pub(super) async fn recall(
+async fn recall(
     client: &McpHttpClient,
     query: Option<RecallQuery>,
     error: &str,

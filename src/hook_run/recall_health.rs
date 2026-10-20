@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Calls kept in the ring. With up to six calls a turn, this covers the last 30 or more turns,
 /// which is enough for a rate and small enough to rewrite on every hook.
-pub(crate) const RING_CAP: usize = 200;
+const RING_CAP: usize = 200;
 /// Doctor warns when more than this percent of the kept calls failed.
 pub(crate) const WARN_FAILED_PERCENT: usize = 20;
 /// Doctor reports the server as stuck when this many of the newest calls all failed.
