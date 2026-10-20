@@ -35,6 +35,8 @@ struct Ring {
 pub(crate) struct Health {
     pub(crate) calls: usize,
     pub(crate) failed: usize,
+    /// The Unix time in seconds of the newest call.
+    pub(crate) newest_at: i64,
     /// The newest [`STUCK_RUN`] calls all failed.
     pub(crate) stuck: bool,
 }
@@ -60,11 +62,14 @@ pub(crate) fn record(state_dir: &Path, ok: usize, failed: usize, now: i64) {
         return;
     }
     let path = path(state_dir);
-    let Some(_lock) = super::session_state::lock_state_file(state_dir, FILE_KEY, "recall health")
-    else {
-        note_unsaved(&path, "the lock is busy or cannot be made");
-        return;
-    };
+    let _lock =
+        match super::session_state::lock_state_file_why(state_dir, FILE_KEY, "recall health") {
+            Ok(lock) => lock,
+            Err(why) => {
+                note_unsaved(&path, &why);
+                return;
+            }
+        };
     let result = read_ring(&path).and_then(|mut ring| {
         let new = std::iter::repeat_n(false, failed).chain(std::iter::repeat_n(true, ok));
         ring.calls.extend(new.map(|ok| Call { at: now, ok }));
@@ -85,41 +90,62 @@ pub(crate) fn record(state_dir: &Path, ok: usize, failed: usize, now: i64) {
 /// The file exists but cannot be read, or it is not a valid ring.
 pub(crate) fn health(state_dir: &Path) -> anyhow::Result<Option<Health>> {
     let path = path(state_dir);
-    let text = match crate::paths::bounded::state_text_io(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    let Some(text) = read_text(&path).with_context(|| format!("reading {}", path.display()))?
+    else {
+        return Ok(None);
     };
     let ring: Ring = serde_json::from_str(&text)
         .with_context(|| format!("{} is not a valid recall health file", path.display()))?;
-    Ok(Some(assess(&ring.calls)))
+    Ok(assess(&ring.calls))
 }
 
-/// The stored ring. A missing file is an empty ring. A corrupt file is logged and replaced,
-/// because the rate of new calls is worth more than a ring nobody can read.
-fn read_ring(path: &Path) -> anyhow::Result<Ring> {
+/// The text of the ring file, or `None` when there is no file.
+fn read_text(path: &Path) -> std::io::Result<Option<String>> {
     match crate::paths::bounded::state_text_io(path) {
-        Ok(text) => Ok(serde_json::from_str(&text).unwrap_or_else(|e| {
-            tracing::error!(
-                "recall health {} is corrupt, starting fresh: {e}",
-                path.display()
-            );
-            Ring::default()
-        })),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ring::default()),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
-/// The health of `calls`, oldest first.
-fn assess(calls: &VecDeque<Call>) -> Health {
+/// The stored ring. A missing file is an empty ring. A file that is not a valid ring is
+/// replaced and the agent is told, because the rate of new calls is worth more than a ring
+/// that nobody can read. `InvalidData` covers bytes that are not UTF-8 and an oversized file.
+fn read_ring(path: &Path) -> anyhow::Result<Ring> {
+    let text = match read_text(path) {
+        Ok(Some(text)) => text,
+        Ok(None) => return Ok(Ring::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            note_reset(path, &e.to_string());
+            return Ok(Ring::default());
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    Ok(serde_json::from_str(&text).unwrap_or_else(|e| {
+        note_reset(path, &e.to_string());
+        Ring::default()
+    }))
+}
+
+/// The health of `calls`, oldest first, or `None` for an empty ring.
+fn assess(calls: &VecDeque<Call>) -> Option<Health> {
+    let newest_at = calls.back()?.at;
     let failed = calls.iter().filter(|c| !c.ok).count();
     let newest_failed = calls.iter().rev().take_while(|c| !c.ok).count();
-    Health {
+    Some(Health {
         calls: calls.len(),
         failed,
+        newest_at,
         stuck: newest_failed >= STUCK_RUN,
-    }
+    })
+}
+
+fn note_reset(path: &Path, why: &str) {
+    crate::agent_notice::record_logged(format!(
+        "llmenv: the recall health file {} was not a valid ring ({why}), so a new one was \
+         started. `llmenv doctor` now counts only the calls after this point.",
+        path.display()
+    ));
 }
 
 fn note_unsaved(path: &Path, why: &str) {
@@ -204,12 +230,65 @@ mod tests {
         assert!(notice.contains("recall health file"), "{notice}");
     }
 
+    #[test]
+    fn a_file_that_is_not_utf8_is_replaced_and_the_agent_is_told() {
+        let dir = dir();
+        let log = dir.path();
+        std::fs::write(path(log), [0xff, 0xfe]).unwrap();
+        assert!(health(log).is_err(), "doctor reports the bad file");
+        record(log, 1, 0, 7);
+        let h = health(log).unwrap().unwrap();
+        assert_eq!((h.calls, h.newest_at), (1, 7));
+        let notice = crate::agent_notice::current().unwrap_or_default();
+        assert!(notice.contains("was not a valid ring"), "{notice}");
+    }
+
+    #[test]
+    fn the_newest_time_is_the_last_hook() {
+        let dir = dir();
+        let log = dir.path();
+        record(log, 1, 0, 10);
+        record(log, 0, 1, 20);
+        assert_eq!(health(log).unwrap().unwrap().newest_at, 20);
+    }
+
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// Recording hooks one by one keeps the newest calls of a plain model: failures first
+        /// within a hook, capped at the ring size, with the stuck flag from its tail.
+        #[test]
+        fn record_then_health_matches_a_model(
+            hooks in prop::collection::vec((0usize..30, 0usize..30), 1..20),
+        ) {
+            let dir = dir();
+            let mut model: Vec<bool> = Vec::new();
+            for (i, &(ok, failed)) in hooks.iter().enumerate() {
+                record(dir.path(), ok, failed, i64::try_from(i).unwrap());
+                model.extend(std::iter::repeat_n(false, failed));
+                model.extend(std::iter::repeat_n(true, ok));
+            }
+            let kept = &model[model.len().saturating_sub(200)..];
+            let got = health(dir.path()).unwrap();
+            if kept.is_empty() {
+                prop_assert!(got.is_none());
+            } else {
+                let h = got.unwrap();
+                prop_assert_eq!(h.calls, kept.len());
+                prop_assert_eq!(h.failed, kept.iter().filter(|ok| !**ok).count());
+                let tail = kept.iter().rev().take_while(|ok| !**ok).count();
+                prop_assert_eq!(h.stuck, tail >= 10);
+            }
+        }
+
         /// The warning and the stuck flag follow their definitions for any ring.
         #[test]
         fn assess_matches_the_definitions(oks in prop::collection::vec(any::<bool>(), 0..60)) {
             let calls: VecDeque<Call> = oks.iter().map(|&ok| Call { at: 1, ok }).collect();
-            let h = assess(&calls);
+            let Some(h) = assess(&calls) else {
+                prop_assert!(oks.is_empty());
+                return Ok(());
+            };
             let failed = oks.iter().filter(|ok| !**ok).count();
             prop_assert_eq!(h.failed, failed);
             prop_assert_eq!(h.failing_often(), failed * 5 > oks.len());

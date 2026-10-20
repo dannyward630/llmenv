@@ -1246,7 +1246,10 @@ active context (active bundles, active MCP servers, etc.). Checks:
   outcome of the last 200 adaptive recall calls, which the hooks keep in
   `recall_health.json` in the state dir. It makes no network call. It warns when
   more than 20% of the calls failed, and reports the memory server as stuck when
-  the last 10 calls all failed. See [Adaptive recall](mcp.md#adaptive-recall-added-in-v3120).
+  the last 10 calls all failed. Each line gives the age of the newest call. A stuck
+  result with no call in the last day is info only, because the server may be fixed
+  since. A ring file that is not valid is replaced by the next hook, and the agent is
+  told. See [Adaptive recall](mcp.md#adaptive-recall-added-in-v3120).
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached
   in the durable state dir, and warns when the cached token has expired. See
   [Inherited Claude Code state](configuration.md#oauth-credential-inheritance).
