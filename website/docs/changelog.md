@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv clean` (#2815) [feat:hooks]
 - A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
 - `llmenv doctor` prints a `Memory recall:` section with the failure rate of the last 200 adaptive recall calls. It warns above 20% failed and says the memory server is stuck when the last 10 calls all failed, with no network call. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2919) [feat:doctor]
+- `llmenv setup --apply PLAN` applies an onboarding plan. It asks for a yes for the plan, for each permission allow, hook, MCP server, and feature entry, and for the `config.yaml` lines. It needs a terminal, creates only absent files, and adds to `config.yaml` without re-serializing it. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---apply) (#2788) [feat:setup]
 
 ### Changed
 
@@ -39,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]
 - Adaptive recall skips its keyword and topic fanouts when the project and global-topic recalls already fill the byte budget, so a full turn sends fewer recall calls with the same memories. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2920) [perf:hook]
 - After a tool error, llmenv injects a memory only when its summary or keywords share a distinctive word or an error code with the error, so an unrelated best match no longer shows up. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2921) [feat:hook]
+- `llmenv setup` on a machine with a config offers a merge by default: it keeps every file and lets the onboarding plan add what is new. Reset is a second choice, and `--no-launch` takes the merge instead of replacing `config.yaml`. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup) (#2789) [feat:setup]
+- The `setup-llmenv` skill writes a plan instead of config files, and asks you to run `llmenv setup --apply` on it in a terminal. A plan can add scope entries, so a new bundle can fire. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---apply) (#2788) [feat:setup]
 
 ### Deprecated
 
