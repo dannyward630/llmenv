@@ -4,59 +4,15 @@ use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 mod atomic_write;
-use atomic_write::write_owner_only_atomic_in_dir;
+mod bounded_read;
+mod owner_only;
+mod tilde;
+pub use tilde::expand_tilde;
+use tilde::expand_tilde_with_env;
+pub mod program;
 pub use atomic_write::{resolve_user_link, write_owner_only_atomic, write_user_file_atomic};
-
-/// Makes an open refuse a symlink at the final path component (#2599).
-/// A name check before the open is not enough: a symlink swapped in after the check is followed,
-/// and the write then lands on the symlink's target.
-#[cfg(unix)]
-pub fn refuse_symlink(opts: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
-}
-
-/// Non-unix targets have no `O_NOFOLLOW`; the name check remains the only guard there.
-#[cfg(not(unix))]
-pub fn refuse_symlink(opts: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
-    opts
-}
-
-/// Expand a leading `~` or `~/` to `$HOME`. Other input is returned unchanged.
-///
-/// # Errors
-/// Returns an error that names `HOME` when the input starts with `~` and `HOME` is unset, empty,
-/// or not valid UTF-8. Such a path cannot be expanded, and it must not be used as is: a relative
-/// `~/x` would otherwise resolve against the working directory.
-pub fn expand_tilde(p: &str) -> anyhow::Result<String> {
-    expand_tilde_with_env(p, &|name| std::env::var(name))
-}
-
-/// [`expand_tilde`] with an injectable env-var provider so tests can exercise
-/// the set-but-empty and non-UTF-8 `HOME` cases without mutating real process env vars.
-fn expand_tilde_with_env(
-    p: &str,
-    get_env: &impl Fn(&str) -> Result<String, VarError>,
-) -> anyhow::Result<String> {
-    // `rest` is empty for `~` and starts with `/` for `~/x`. `~user` is not a home reference.
-    let rest = match p.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
-        _ => return Ok(p.to_string()),
-    };
-    // HOME is read only for a `~` input, so an absolute or relative path never fails on it.
-    let home = match get_env("HOME") {
-        // An empty HOME would anchor "~/rest" at the filesystem root ("/rest"). An unset
-        // HOME would leave "~/rest" relative to the working directory (#1179, #2679).
-        Ok(home) if !home.is_empty() => home,
-        Ok(_) | Err(VarError::NotPresent) => anyhow::bail!(
-            "cannot expand {p:?}: HOME is not set or is empty. Set HOME, or give an absolute path"
-        ),
-        Err(VarError::NotUnicode(_)) => anyhow::bail!(
-            "cannot expand {p:?}: HOME is not valid UTF-8. Set HOME to a UTF-8 path and retry"
-        ),
-    };
-    Ok(format!("{home}{rest}"))
-}
+pub use bounded_read::{check_regular_file, read_file_bounded, read_open_file, read_text_bounded};
+pub use owner_only::{create_dir_owner_only, write_owner_only};
 
 /// `read_dir` that treats a missing directory as "nothing to iterate":
 /// returns `Ok(None)` on `NotFound` but propagates every other I/O error (e.g.
@@ -118,114 +74,6 @@ pub fn is_valid_short_name(name: &str) -> bool {
     }
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-/// Returns `true` when `name` resolves to an executable on the current `PATH`.
-///
-/// Walks `PATH` directly rather than shelling out to `which` (#1382). The
-/// subprocess returned the same `false` for "the binary isn't installed" and
-/// "`which` itself couldn't be run", so on an image without `which` — routine
-/// for distroless and minimal containers — an installed engine looked missing.
-/// That was harmless while every caller was advisory, but `run_launch` turns a
-/// negative result into a hard error, which made the ambiguity user-visible as
-/// a false "not installed". Resolving `PATH` in-process has no such failure
-/// mode, and skips a fork+exec on a hot path.
-///
-/// Names containing `/` or ASCII whitespace are unconditionally rejected;
-/// they cannot be plain binary names.
-///
-/// Lives here rather than in `llmenv`'s adapter module because it is a plain
-/// path helper with two unrelated callers — adapter/engine detection and
-/// `mcp-proxy` lookup. Each kept its own copy until #1390, and they diverged:
-/// the proxy's never got the empty-`PATH`-entry guard below.
-#[must_use]
-pub fn binary_on_path(name: &str) -> bool {
-    resolve_on_path(name).is_some()
-}
-
-/// The full path `name` resolves to on `PATH`, or `None` when it isn't there.
-///
-/// Callers that only need a yes/no answer should use [`binary_on_path`]; this
-/// exists for the ones that need the location itself (claude-code's
-/// install-method detection inspects the resolved path).
-#[must_use]
-pub fn resolve_on_path(name: &str) -> Option<PathBuf> {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        // Distinguished from "PATH is set but has no match" only in the log:
-        // both mean the binary is unusable, but an absent PATH points at a
-        // stripped environment rather than a missing install.
-        tracing::debug!("PATH is unset; cannot resolve '{name}'");
-        return None;
-    };
-    resolve_in_path_list(name, &path_var)
-}
-
-/// [`resolve_on_path`] against an explicit `PATH` value.
-///
-/// Split out so the lookup is testable without mutating the process
-/// environment: `std::env::set_var` is `unsafe` as of Rust 2024 and this
-/// workspace sets `unsafe_code = "forbid"`, so a test cannot legally point the
-/// real `PATH` somewhere else. Callers with a `PATH` value in hand (rather than
-/// the process's own) use it directly.
-#[must_use]
-pub fn resolve_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
-    if name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace) {
-        return None;
-    }
-    std::env::split_paths(path_var)
-        // Absolute entries only (#1400). A shell resolves every relative entry
-        // against the working directory — a literal empty one (`PATH="$UNSET:…"`
-        // leaves one behind), and equally an explicit `.` or `bin`. Resolving a
-        // binary out of the working directory is a hijack vector, and nothing
-        // llmenv looks up — `claude`, `crush`, `opencode`, `mcp-proxy`, `uvx`,
-        // `icm` — legitimately lives at a relative path. Skipping only the empty
-        // spelling, as this did until #1400, left `PATH=".:/usr/local/bin"`
-        // resolving `./claude` in preference to the installed one.
-        //
-        // `is_absolute` covers the empty entry too: `Path::new("").is_absolute()`
-        // is false.
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable_file(candidate))
-}
-
-/// True when `path` is a regular file carrying an execute bit — what a shell's
-/// `PATH` search accepts.
-///
-/// `metadata` follows symlinks, so a symlinked binary resolves the way a shell
-/// would. Any I/O error (a `PATH` entry that doesn't exist, or one the user
-/// can't stat) simply means "not usable here", which is the same conclusion a
-/// shell reaches.
-fn is_executable_file(path: &Path) -> bool {
-    let md = match std::fs::metadata(path) {
-        Ok(md) => md,
-        Err(e) => {
-            // A missing entry is the overwhelmingly common case and not worth
-            // reporting. Anything else (an unreadable directory, a stalled
-            // network mount, fd exhaustion) also resolves to "not usable
-            // here", but it can make an installed binary look absent — so
-            // leave a breadcrumb rather than discarding it entirely.
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::debug!("PATH probe could not stat {}: {e}", path.display());
-            }
-            return false;
-        }
-    };
-    if !md.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        md.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        // Fail closed. There is no shipped non-unix target (release builds are
-        // linux-musl and apple-darwin), and treating every regular file as
-        // executable would be weaker than the `which` call this replaced.
-        false
-    }
 }
 
 /// Return true if `cwd` is at or below `prefix`, treating both as filesystem
@@ -335,122 +183,6 @@ fn state_dir_with_env(get_env: &impl Fn(&str) -> Option<String>) -> anyhow::Resu
         Ok(PathBuf::from(home).join(".local/state/llmenv"))
     }
 }
-
-/// Create a directory (and any missing parent components) with owner-only
-/// permissions (mode 0o700 on Unix) from the moment of creation, and harden
-/// it to 0o700 if it already existed at a looser mode. On Windows falls back
-/// to `create_dir_all`'s default permissions.
-///
-/// Use instead of `create_dir_all` followed by a separate `set_permissions`
-/// call for any directory that must never be world-readable — the two-call
-/// version leaves the directory at the umask default (typically 0o755)
-/// between creation and the chmod, a TOCTOU window (#1113), and a caller who
-/// skips the follow-up chmod (or an older llmenv version, before this
-/// hardening existed) leaves it world-readable indefinitely (#1178).
-///
-/// # Errors
-/// Propagates directory-creation failure, and failure to chmod an
-/// already-existing directory (e.g. owned by another user).
-pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        // DirBuilder's mode only governs directories it creates. If `dir`
-        // already existed (an older llmenv version, a caller that used a
-        // bare create_dir_all, a permissive umask), its mode is left
-        // untouched -- self-heal it so every caller gets an owner-only
-        // directory regardless of whether it was just created.
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir)
-    }
-}
-
-/// Write `content` to `path` with owner-only permissions (mode 0o600).
-/// Creates the file if absent, replaces it if present — including a
-/// symlink, which is unlinked rather than written through (#1429; a plain
-/// `.create(true).truncate(true)` open would follow a pre-existing symlink
-/// at `path` and truncate its target instead). Fails if `path`'s parent
-/// directory doesn't exist — use [`write_owner_only_atomic`] if you need it
-/// created. Use for any file containing user state or credentials
-/// (settings, sync state, MCP configs, ICM memory) where world-readable
-/// defaults would leak data on shared systems.
-///
-/// Shares [`write_owner_only_atomic`]'s temp-file-plus-`rename` mechanism
-/// rather than a direct `create_new` open: an exclusive open that loses a
-/// race against another writer to the same `path` has to retry, and unlike
-/// a same-directory temp name (unique per call via `TMP_COUNTER`), retrying
-/// the *shared destination* itself doesn't scale under real contention —
-/// `rename`'s replace-regardless-of-what's-there semantics do, without a
-/// retry loop at all.
-///
-/// # Errors
-/// Returns an error if `path` has no file name, or the underlying write or
-/// rename fails.
-pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let parent = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("path has no file name: {}", path.display()),
-        )
-    })?;
-    write_owner_only_atomic_in_dir(parent, file_name, path, content)
-}
-
-/// Copy `src` to `dst`, replacing whatever is at `dst` — including a symlink
-/// — rather than writing through it.
-///
-/// A plain `std::fs::copy(src, dst)` opens `dst` with `O_TRUNC`, which
-/// follows a symlink there and truncates/overwrites its target instead of
-/// replacing the link itself — the same class of gap `write_owner_only_atomic`
-/// closes for in-memory content, applied here to copying from another file.
-///
-/// The temp file is opened with `create_new` (`O_EXCL`, never follows a
-/// final-component symlink and fails if the name is already taken) and
-/// written to **through that same file handle** — never a second path-based
-/// open, which `std::fs::copy(src, &tmp_path)` would be. An `O_EXCL` open
-/// followed by a second, non-exclusive open of the same path is exactly the
-/// TOCTOU window this function exists to close: a planted or raced symlink
-/// between those two opens would still get written through on the second one
-/// (security-audit, #1426). Only after the content and permissions are fully
-/// written does `rename` move the temp file over `dst`, which POSIX
-/// guarantees replaces the destination directory entry atomically without
-/// following it — and does not follow a symlink at the *source* of the
-/// rename either, so a swapped `tmp_path` still moves as an entry, never as
-/// its target's content.
-///
-/// Preserves `src`'s permission mode with group/other write and setuid/setgid
-/// masked off (`& 0o755 & !0o022`, i.e. `& 0o755`) — full mode propagation
-/// would let a bundle file sourced from a permissive local path or tarball
-/// land group/world-writable inside a directory the agent can execute code
-/// from. Every other file llmenv writes into that directory goes through
-/// [`write_owner_only`] (0o600); this is deliberately looser only to let a
-/// legitimately executable bundle asset (a hook script) keep its exec bit,
-/// never group/other write or setuid/setgid.
-///
-/// Retried on a temp-name collision (`AlreadyExists`) up to this many times,
-/// mirroring [`write_owner_only_atomic_in_dir`]'s retry bound — the
-/// process-local counter below makes a same-process collision unlikely but
-/// not provably impossible (`SystemTime` granularity varies by platform), and
-/// the bound also covers a stale leftover from a prior crashed process at the
-/// same pid+nanos slice.
-const COPY_REPLACING_SYMLINK_MAX_RETRIES: u32 = 8;
-
-/// Process-local counter disambiguating [`copy_replacing_symlink`]'s temp
-/// filenames when multiple calls land in the same nanosecond — shares the
-/// reasoning [`TMP_COUNTER`] documents for [`write_owner_only_atomic`], kept
-/// separate since the two functions' temp-file lifetimes don't overlap.
-static COPY_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// # Errors
 /// Propagates the read, copy, permission, or rename failure. Removes the
@@ -577,231 +309,178 @@ pub fn reject_non_regular_file(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// [`resolve_on_path`] against an explicit `PATH` value.
+///
+/// Split out so the lookup is testable without mutating the process
+/// environment: `std::env::set_var` is `unsafe` as of Rust 2024 and this
+/// workspace sets `unsafe_code = "forbid"`, so a test cannot legally point the
+/// real `PATH` somewhere else. Callers with a `PATH` value in hand (rather than
+/// the process's own) use it directly.
+#[must_use]
+pub fn resolve_in_path_list(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace) {
+        return None;
+    }
+    std::env::split_paths(path_var)
+        // Absolute entries only (#1400). A shell resolves every relative entry
+        // against the working directory — a literal empty one (`PATH="$UNSET:…"`
+        // leaves one behind), and equally an explicit `.` or `bin`. Resolving a
+        // binary out of the working directory is a hijack vector, and nothing
+        // llmenv looks up — `claude`, `crush`, `opencode`, `mcp-proxy`, `uvx`,
+        // `icm` — legitimately lives at a relative path. Skipping only the empty
+        // spelling, as this did until #1400, left `PATH=".:/usr/local/bin"`
+        // resolving `./claude` in preference to the installed one.
+        //
+        // `is_absolute` covers the empty entry too: `Path::new("").is_absolute()`
+        // is false.
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// Returns `true` when `name` resolves to an executable on the current `PATH`.
+///
+/// Walks `PATH` directly rather than shelling out to `which` (#1382). The
+/// subprocess returned the same `false` for "the binary isn't installed" and
+/// "`which` itself couldn't be run", so on an image without `which` — routine
+/// for distroless and minimal containers — an installed engine looked missing.
+/// That was harmless while every caller was advisory, but `run_launch` turns a
+/// negative result into a hard error, which made the ambiguity user-visible as
+/// a false "not installed". Resolving `PATH` in-process has no such failure
+/// mode, and skips a fork+exec on a hot path.
+///
+/// Names containing `/` or ASCII whitespace are unconditionally rejected;
+/// they cannot be plain binary names.
+///
+/// Lives here rather than in `llmenv`'s adapter module because it is a plain
+/// path helper with two unrelated callers — adapter/engine detection and
+/// `mcp-proxy` lookup. Each kept its own copy until #1390, and they diverged:
+/// the proxy's never got the empty-`PATH`-entry guard below.
+#[must_use]
+pub fn binary_on_path(name: &str) -> bool {
+    resolve_on_path(name).is_some()
+}
+
+/// The full path `name` resolves to on `PATH`, or `None` when it isn't there.
+///
+/// Callers that only need a yes/no answer should use [`binary_on_path`]; this
+/// exists for the ones that need the location itself (claude-code's
+/// install-method detection inspects the resolved path).
+#[must_use]
+pub fn resolve_on_path(name: &str) -> Option<PathBuf> {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        // Distinguished from "PATH is set but has no match" only in the log:
+        // both mean the binary is unusable, but an absent PATH points at a
+        // stripped environment rather than a missing install.
+        tracing::debug!("PATH is unset; cannot resolve '{name}'");
+        return None;
+    };
+    resolve_in_path_list(name, &path_var)
+}
+
+/// Copy `src` to `dst`, replacing whatever is at `dst` — including a symlink
+/// — rather than writing through it.
+///
+/// A plain `std::fs::copy(src, dst)` opens `dst` with `O_TRUNC`, which
+/// follows a symlink there and truncates/overwrites its target instead of
+/// replacing the link itself — the same class of gap `write_owner_only_atomic`
+/// closes for in-memory content, applied here to copying from another file.
+///
+/// The temp file is opened with `create_new` (`O_EXCL`, never follows a
+/// final-component symlink and fails if the name is already taken) and
+/// written to **through that same file handle** — never a second path-based
+/// open, which `std::fs::copy(src, &tmp_path)` would be. An `O_EXCL` open
+/// followed by a second, non-exclusive open of the same path is exactly the
+/// TOCTOU window this function exists to close: a planted or raced symlink
+/// between those two opens would still get written through on the second one
+/// (security-audit, #1426). Only after the content and permissions are fully
+/// written does `rename` move the temp file over `dst`, which POSIX
+/// guarantees replaces the destination directory entry atomically without
+/// following it — and does not follow a symlink at the *source* of the
+/// rename either, so a swapped `tmp_path` still moves as an entry, never as
+/// its target's content.
+///
+/// Preserves `src`'s permission mode with group/other write and setuid/setgid
+/// masked off (`& 0o755 & !0o022`, i.e. `& 0o755`) — full mode propagation
+/// would let a bundle file sourced from a permissive local path or tarball
+/// land group/world-writable inside a directory the agent can execute code
+/// from. Every other file llmenv writes into that directory goes through
+/// [`write_owner_only`] (0o600); this is deliberately looser only to let a
+/// legitimately executable bundle asset (a hook script) keep its exec bit,
+/// never group/other write or setuid/setgid.
+///
+/// Retried on a temp-name collision (`AlreadyExists`) up to this many times,
+/// mirroring [`write_owner_only_atomic_in_dir`]'s retry bound — the
+/// process-local counter below makes a same-process collision unlikely but
+/// not provably impossible (`SystemTime` granularity varies by platform), and
+/// the bound also covers a stale leftover from a prior crashed process at the
+/// same pid+nanos slice.
+const COPY_REPLACING_SYMLINK_MAX_RETRIES: u32 = 8;
+
+/// Process-local counter disambiguating [`copy_replacing_symlink`]'s temp
+/// filenames when multiple calls land in the same nanosecond — shares the
+/// reasoning [`TMP_COUNTER`] documents for [`write_owner_only_atomic`], kept
+/// separate since the two functions' temp-file lifetimes don't overlap.
+static COPY_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// True when `path` is a regular file carrying an execute bit — what a shell's
+/// `PATH` search accepts.
+///
+/// `metadata` follows symlinks, so a symlinked binary resolves the way a shell
+/// would. Any I/O error (a `PATH` entry that doesn't exist, or one the user
+/// can't stat) simply means "not usable here", which is the same conclusion a
+/// shell reaches.
+fn is_executable_file(path: &Path) -> bool {
+    let md = match std::fs::metadata(path) {
+        Ok(md) => md,
+        Err(e) => {
+            // A missing entry is the overwhelmingly common case and not worth
+            // reporting. Anything else (an unreadable directory, a stalled
+            // network mount, fd exhaustion) also resolves to "not usable
+            // here", but it can make an installed binary look absent — so
+            // leave a breadcrumb rather than discarding it entirely.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("PATH probe could not stat {}: {e}", path.display());
+            }
+            return false;
+        }
+    };
+    if !md.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        md.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        // Fail closed. There is no shipped non-unix target (release builds are
+        // linux-musl and apple-darwin), and treating every regular file as
+        // executable would be weaker than the `which` call this replaced.
+        false
+    }
+}
+
+/// Makes an open refuse a symlink at the final path component (#2599).
+/// A name check before the open is not enough: a symlink swapped in after the check is followed,
+/// and the write then lands on the symlink's target.
+#[cfg(unix)]
+pub fn refuse_symlink(opts: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+}
+
+/// Non-unix targets have no `O_NOFOLLOW`; the name check remains the only guard there.
+#[cfg(not(unix))]
+pub fn refuse_symlink(opts: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    opts
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-
-    /// Marks a file executable so the `PATH` tests exercise the real predicate.
-    #[cfg(unix)]
-    fn make_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    #[test]
-    fn binary_on_path_true_for_sh() {
-        assert!(binary_on_path("sh"), "sh must be on PATH in any POSIX env");
-    }
-
-    #[test]
-    fn binary_on_path_false_for_bogus_binary() {
-        assert!(
-            !binary_on_path("__llmenv_no_such_binary_xyzzy__"),
-            "bogus binary must not be found on PATH"
-        );
-    }
-
-    /// #1382: resolution must not need a `which` binary anywhere. A `PATH`
-    /// holding nothing but the directory containing the target still resolves
-    /// it — the case that produced a false "not installed" on distroless
-    /// images, where `run_launch` turned it into a hard error.
-    #[test]
-    fn binary_in_path_list_resolves_without_any_helper_binaries() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let bin = dir.path().join("some-engine");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        make_executable(&bin);
-        let found = resolve_in_path_list("some-engine", dir.path().as_os_str());
-        assert_eq!(
-            found.as_deref(),
-            Some(bin.as_path()),
-            "an executable in the only PATH entry must resolve to its full path"
-        );
-    }
-
-    #[test]
-    fn binary_in_path_list_rejects_non_executable_and_directories() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let plain = dir.path().join("not-executable");
-        std::fs::write(&plain, "data").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(
-                resolve_in_path_list("not-executable", dir.path().as_os_str()).is_none(),
-                "a file without an execute bit is not runnable"
-            );
-        }
-        std::fs::create_dir(dir.path().join("a-directory")).unwrap();
-        assert!(
-            resolve_in_path_list("a-directory", dir.path().as_os_str()).is_none(),
-            "a directory is not an executable even though it has the exec bit"
-        );
-    }
-
-    /// An empty `PATH` element means "current directory" to a POSIX shell.
-    /// Honouring it would let a binary in the working directory shadow a real
-    /// engine, so it is skipped deliberately.
-    #[test]
-    fn binary_in_path_list_ignores_empty_entries() {
-        assert!(
-            resolve_in_path_list("some-engine", std::ffi::OsStr::new("")).is_none(),
-            "an empty PATH must resolve nothing"
-        );
-        assert!(
-            resolve_in_path_list("some-engine", std::ffi::OsStr::new(":")).is_none(),
-            "empty PATH entries must not be treated as the cwd"
-        );
-    }
-
-    /// #1390: the empty-entry guard has to hold even when a matching executable
-    /// really is sitting in the process working directory — the hijack the
-    /// duplicated resolver in `mcp/proxy.rs` was open to. Uses a name no test
-    /// fixture would create so a hit could only have come from cwd resolution.
-    #[cfg(unix)]
-    #[test]
-    fn binary_in_path_list_does_not_resolve_out_of_the_working_directory() {
-        let cwd = std::env::current_dir().unwrap();
-        let bin = cwd.join("__llmenv_cwd_hijack_probe__");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        make_executable(&bin);
-        let found = resolve_in_path_list("__llmenv_cwd_hijack_probe__", std::ffi::OsStr::new("::"));
-        std::fs::remove_file(&bin).unwrap();
-        assert!(
-            found.is_none(),
-            "an executable in the working directory must not satisfy an empty PATH entry"
-        );
-    }
-
-    /// #1400: an explicit relative `PATH` entry is the same cwd hijack as the
-    /// empty one, one character apart — a shell resolves both against the working
-    /// directory. The executable is really there behind each relative spelling,
-    /// so a guardless resolver would find it; only the absolute entry may match.
-    #[cfg(unix)]
-    #[test]
-    fn binary_in_path_list_ignores_relative_entries_that_would_otherwise_resolve() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let bin = dir.path().join("some-engine");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        make_executable(&bin);
-
-        // Every relative spelling of "look in the working directory", plus a
-        // relative subdirectory — a project-local `bin/` is the realistic case.
-        // These are shape assertions; the companion test below is the one that
-        // proves the guard, with the executable really reachable through `.`.
-        for entry in ["", ".", "./", "bin", "./bin", "../bin"] {
-            assert!(
-                resolve_in_path_list("some-engine", std::ffi::OsStr::new(entry)).is_none(),
-                "relative PATH entry {entry:?} must not resolve"
-            );
-        }
-
-        // The same lookup against an absolute entry still works, so this narrows
-        // the resolver rather than breaking it.
-        assert_eq!(
-            resolve_in_path_list("some-engine", dir.path().as_os_str()).as_deref(),
-            Some(bin.as_path()),
-            "an absolute PATH entry must still resolve"
-        );
-    }
-
-    /// The relative-entry guard has to hold when the file really is reachable
-    /// through that entry, not just when it's absent — the trap the slash and
-    /// whitespace tests fell into. Runs from a working directory the test owns,
-    /// with the executable inside it, so `PATH="."` would resolve without the
-    /// guard.
-    #[cfg(unix)]
-    #[test]
-    fn binary_in_path_list_ignores_a_dot_entry_with_the_binary_really_in_cwd() {
-        let cwd = std::env::current_dir().unwrap();
-        let bin = cwd.join("__llmenv_relative_entry_probe__");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        make_executable(&bin);
-
-        let found =
-            resolve_in_path_list("__llmenv_relative_entry_probe__", std::ffi::OsStr::new("."));
-        std::fs::remove_file(&bin).unwrap();
-        assert!(
-            found.is_none(),
-            "a `.` PATH entry must not resolve a binary sitting in the working directory"
-        );
-    }
-
-    /// The name guard has to bite even when the joined path would really resolve.
-    /// `binary_on_path_rejects_slash`/`_whitespace` only show that *absent* files
-    /// aren't found, which holds with the guard deleted — so they don't actually
-    /// pin it. Here the target exists: without the guard, `dir.join("sub/tool")`
-    /// finds it and a caller could reach outside the `PATH` entry it named.
-    #[cfg(unix)]
-    #[test]
-    fn binary_in_path_list_rejects_a_traversing_name_that_would_otherwise_resolve() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let sub = dir.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        let bin = sub.join("tool");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        make_executable(&bin);
-
-        // Sanity: the guardless join would have found it.
-        assert!(is_executable_file(&dir.path().join("sub/tool")));
-
-        assert!(
-            resolve_in_path_list("sub/tool", dir.path().as_os_str()).is_none(),
-            "a name containing '/' must be rejected outright, not resolved relative \
-             to a PATH entry"
-        );
-    }
-
-    /// Same shape for the whitespace guard: a file whose name really does contain
-    /// a space is present, and must still not resolve — a `PATH` lookup takes a
-    /// plain binary name, and accepting one with whitespace would let a value like
-    /// `sh -c echo` look installed.
-    #[cfg(unix)]
-    #[test]
-    fn binary_in_path_list_rejects_a_whitespace_name_that_would_otherwise_resolve() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let bin = dir.path().join("two words");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        make_executable(&bin);
-
-        assert!(is_executable_file(&bin));
-        assert!(
-            resolve_in_path_list("two words", dir.path().as_os_str()).is_none(),
-            "a name containing whitespace must be rejected outright"
-        );
-    }
-
-    #[test]
-    fn binary_in_path_list_rejects_empty_name() {
-        let dir = tempfile::TempDir::new().unwrap();
-        assert!(
-            resolve_in_path_list("", dir.path().as_os_str()).is_none(),
-            "an empty name must not resolve to the PATH directory itself"
-        );
-    }
-
-    #[test]
-    fn binary_on_path_rejects_slash() {
-        assert!(
-            !binary_on_path("/usr/bin/sh"),
-            "path with '/' must be rejected without spawning which"
-        );
-    }
-
-    #[test]
-    fn binary_on_path_rejects_whitespace() {
-        assert!(
-            !binary_on_path("sh -c echo"),
-            "name with whitespace must be rejected without spawning which"
-        );
-        assert!(
-            !binary_on_path("sh\techo"),
-            "name with tab must be rejected without spawning which"
-        );
-    }
 
     #[cfg(unix)]
     #[test]
@@ -829,50 +508,6 @@ mod tests {
     fn ensure_utf8_accepts_unset_and_utf8_values() {
         assert!(ensure_utf8("HOME", None).is_ok());
         assert!(ensure_utf8("HOME", Some(std::ffi::OsStr::new("/home/u"))).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_dir_owner_only_is_0o700_from_creation() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("nested").join("store");
-        create_dir_owner_only(&dir).unwrap();
-
-        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "dir must be born owner-only, got {mode:o}");
-    }
-
-    #[test]
-    fn create_dir_owner_only_is_idempotent_on_existing_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("store");
-        create_dir_owner_only(&dir).unwrap();
-        create_dir_owner_only(&dir).unwrap();
-        assert!(dir.is_dir());
-    }
-
-    // A directory created before this hardening shipped (older llmenv
-    // version, a caller using bare create_dir_all, a permissive umask) must
-    // still end up owner-only the next time something calls
-    // create_dir_owner_only on it -- not just directories it creates fresh.
-    #[cfg(unix)]
-    #[test]
-    fn create_dir_owner_only_hardens_a_preexisting_looser_dir() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("store");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        create_dir_owner_only(&dir).unwrap();
-
-        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o700,
-            "pre-existing looser dir must be hardened, got {mode:o}"
-        );
     }
 
     #[test]
@@ -1169,332 +804,6 @@ mod tests {
         assert!(!is_unsafe_join_target("file..txt"));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn write_owner_only_sets_mode_0o600() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let path = tmp.path().join("secret");
-        write_owner_only(&path, b"sensitive").expect("write");
-        let mode = std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        // Group/other bits must be clear — file is owner-only.
-        assert_eq!(mode & 0o077, 0, "group/other bits set: {mode:o}");
-        let body = std::fs::read(&path).expect("read");
-        assert_eq!(body, b"sensitive");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_owner_only_truncates_existing_file() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let path = tmp.path().join("file");
-        write_owner_only(&path, b"longer content").expect("write1");
-        write_owner_only(&path, b"short").expect("write2");
-        let body = std::fs::read(&path).expect("read");
-        assert_eq!(body, b"short");
-    }
-
-    /// A plain `.create(true).truncate(true)` open follows a pre-existing
-    /// symlink at `path` and truncates/overwrites its target instead of
-    /// replacing the link — the same TOCTOU class #1341/#1422/#1423/#1427
-    /// fixed for `std::fs::copy`-based writes (#1429).
-    #[cfg(unix)]
-    #[test]
-    fn write_owner_only_does_not_write_through_a_symlinked_destination() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let victim = tmp.path().join("victim");
-        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
-        let path = tmp.path().join("settings.json");
-        std::os::unix::fs::symlink(&victim, &path).expect("plant symlink");
-
-        write_owner_only(&path, b"attacker-controlled").expect("write");
-
-        assert!(
-            !std::fs::symlink_metadata(&path)
-                .expect("stat path")
-                .file_type()
-                .is_symlink(),
-            "the planted symlink must be replaced, not written through"
-        );
-        assert_eq!(
-            std::fs::read(&path).expect("read path"),
-            b"attacker-controlled"
-        );
-        assert_eq!(
-            std::fs::read(&victim).expect("read victim"),
-            b"must-not-be-touched",
-            "the symlink's target must be untouched"
-        );
-    }
-
-    /// The unlink-then-`create_new` fix must not regress the ordinary
-    /// concurrent-writer case: the old non-exclusive open let two writers to
-    /// the same path both succeed (later write wins), and `create_new` losing
-    /// that race must retry rather than surface a hard error where the old
-    /// code silently succeeded (#1429).
-    #[cfg(unix)]
-    #[test]
-    fn write_owner_only_concurrent_writers_all_succeed() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let path = tmp.path().join("contended.json");
-        write_owner_only(&path, b"initial").expect("seed");
-
-        let writers: Vec<_> = (0..8)
-            .map(|i| {
-                let p = path.clone();
-                std::thread::spawn(move || {
-                    let payload = format!("writer-{i}").into_bytes();
-                    for _ in 0..20 {
-                        write_owner_only(&p, &payload).expect("concurrent write must not fail");
-                    }
-                })
-            })
-            .collect();
-
-        for w in writers {
-            w.join().expect("writer thread panicked");
-        }
-
-        // Some writer's payload must have landed — the file must exist and be
-        // non-empty, not corrupted or missing.
-        let body = std::fs::read(&path).expect("read after concurrent writes");
-        assert!(!body.is_empty());
-    }
-
-    // ---- copy_replacing_symlink ----
-
-    #[test]
-    fn copy_replacing_symlink_copies_content_to_a_fresh_destination() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        std::fs::write(&src, b"payload").expect("write src");
-
-        copy_replacing_symlink(&src, &dst).expect("copy");
-
-        assert_eq!(std::fs::read(&dst).expect("read"), b"payload");
-    }
-
-    #[test]
-    fn copy_replacing_symlink_overwrites_an_existing_regular_file() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        std::fs::write(&src, b"new-content").expect("write src");
-        std::fs::write(&dst, b"old-content").expect("write dst");
-
-        copy_replacing_symlink(&src, &dst).expect("copy");
-
-        assert_eq!(std::fs::read(&dst).expect("read"), b"new-content");
-    }
-
-    /// A plain `std::fs::copy` opens the destination with `O_TRUNC`, which
-    /// follows a symlink and truncates/overwrites whatever it points at
-    /// instead of replacing the link itself. `copy_replacing_symlink` must
-    /// replace the destination directory entry atomically (via `rename`),
-    /// which never follows a symlink at the destination.
-    #[cfg(unix)]
-    #[test]
-    fn copy_replacing_symlink_does_not_write_through_a_symlinked_destination() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        let victim = tmp.path().join("victim");
-        std::fs::write(&src, b"attacker-controlled").expect("write src");
-        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
-        std::os::unix::fs::symlink(&victim, &dst).expect("symlink");
-
-        copy_replacing_symlink(&src, &dst).expect("copy");
-
-        assert!(
-            !std::fs::symlink_metadata(&dst)
-                .expect("stat dst")
-                .file_type()
-                .is_symlink(),
-            "the symlink at the destination must be replaced, not written through"
-        );
-        assert_eq!(
-            std::fs::read(&dst).expect("read dst"),
-            b"attacker-controlled"
-        );
-        assert_eq!(
-            std::fs::read(&victim).expect("read victim"),
-            b"must-not-be-touched",
-            "the symlink's target must be untouched"
-        );
-    }
-
-    /// The copy preserves the source's permission mode — unlike the
-    /// owner-only writers above, this helper is for arbitrary bundle content
-    /// (which may need to stay executable), not credentials.
-    #[cfg(unix)]
-    #[test]
-    fn copy_replacing_symlink_preserves_the_source_mode() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        std::fs::write(&src, b"#!/bin/sh\necho hi\n").expect("write src");
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-
-        copy_replacing_symlink(&src, &dst).expect("copy");
-
-        let mode = std::fs::metadata(&dst)
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o755, "the executable bit must survive the copy");
-    }
-
-    /// Group/other write and setuid/setgid must never survive the copy — a
-    /// bundle file sourced from a permissive local path or tarball must not
-    /// land group/world-writable inside a directory the agent executes code
-    /// from (security-audit, #1426).
-    #[cfg(unix)]
-    #[test]
-    fn copy_replacing_symlink_masks_group_other_write_and_setid_bits() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        std::fs::write(&src, b"payload").expect("write src");
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o6777))
-            .expect("chmod 6777");
-
-        copy_replacing_symlink(&src, &dst).expect("copy");
-
-        let mode = std::fs::metadata(&dst)
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o7777;
-        assert_eq!(
-            mode, 0o755,
-            "group/other write and setuid/setgid must be masked off: got {mode:o}"
-        );
-    }
-
-    /// The temp file itself must be opened exclusively (`O_EXCL`), not
-    /// written to through a second, non-exclusive open the way
-    /// `std::fs::copy(src, &tmp_path)` would — otherwise a symlink planted at
-    /// the exact predictable temp name between the exclusive-open check and a
-    /// second open gets written through, which is the residual TOCTOU
-    /// security-audit found in the first cut of this function (#1426). A
-    /// symlink already sitting at the counter-derived temp name must make
-    /// this attempt collide and retry onto the next name, not follow it.
-    #[cfg(unix)]
-    #[test]
-    fn copy_replacing_symlink_does_not_follow_a_symlink_planted_at_the_temp_name() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        let victim = tmp.path().join("victim");
-        std::fs::write(&src, b"payload").expect("write src");
-        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
-
-        let pid = std::process::id();
-        let now = std::time::SystemTime::now();
-        let nanos = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        // Plant a symlink at every temp name the counter could plausibly
-        // produce next, forcing at least one `create_new` collision before a
-        // fresh (non-symlinked) name is found.
-        let next = COPY_TMP_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
-        for counter in next..next + 4 {
-            let name = format!("dst.{pid}.{nanos}.{counter}.tmp");
-            std::os::unix::fs::symlink(&victim, tmp.path().join(name))
-                .expect("plant symlink at candidate temp name");
-        }
-
-        copy_replacing_symlink(&src, &dst).expect("copy despite planted symlinks");
-
-        assert_eq!(std::fs::read(&dst).expect("read dst"), b"payload");
-        assert_eq!(
-            std::fs::read(&victim).expect("read victim"),
-            b"must-not-be-touched",
-            "a symlink planted at a candidate temp name must never be written through"
-        );
-    }
-
-    #[test]
-    fn copy_replacing_symlink_leaves_no_temp_files() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        std::fs::write(&src, b"payload").expect("write src");
-
-        copy_replacing_symlink(&src, &dst).expect("copy");
-
-        let entries: Vec<_> = std::fs::read_dir(tmp.path())
-            .expect("read_dir")
-            .filter_map(Result::ok)
-            .map(|e| e.file_name())
-            .collect();
-        assert_eq!(entries.len(), 2, "found stray files: {entries:?}");
-    }
-
-    // ---- reject_non_regular_file ----
-
-    #[test]
-    fn reject_non_regular_file_allows_a_missing_path() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let path = tmp.path().join("nope");
-        reject_non_regular_file(&path).expect("a missing path must be allowed");
-    }
-
-    #[test]
-    fn reject_non_regular_file_allows_a_real_file() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let path = tmp.path().join("real");
-        std::fs::write(&path, b"content").expect("write");
-        reject_non_regular_file(&path).expect("a regular file must be allowed");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reject_non_regular_file_rejects_a_symlink() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let victim = tmp.path().join("victim");
-        std::fs::write(&victim, b"content").expect("write victim");
-        let link = tmp.path().join("link");
-        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
-
-        let err = reject_non_regular_file(&link).expect_err("a symlink must be rejected");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reject_non_regular_file_rejects_a_dangling_symlink() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let link = tmp.path().join("link");
-        std::os::unix::fs::symlink(tmp.path().join("does-not-exist"), &link)
-            .expect("dangling symlink");
-
-        assert!(
-            reject_non_regular_file(&link).is_err(),
-            "a dangling symlink must be rejected, not treated as absent"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reject_non_regular_file_rejects_a_directory() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let dir = tmp.path().join("subdir");
-        std::fs::create_dir(&dir).expect("mkdir");
-
-        assert!(reject_non_regular_file(&dir).is_err());
-    }
-
     #[test]
     fn tilde_passthrough_for_absolute_and_relative() {
         // Tests the non-HOME-dependent branches.
@@ -1590,50 +899,6 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
-        /// A `PATH` of nothing but empty entries resolves nothing, for any name —
-        /// the cwd-hijack guard (#1382, #1390) generalised past the `""` and `":"`
-        /// the example tests pin.
-        #[test]
-        fn resolve_in_path_list_never_resolves_from_an_all_empty_path(
-            name in "[a-zA-Z0-9_.-]{1,12}",
-            separators in 0usize..8,
-        ) {
-            let path_var = ":".repeat(separators);
-            prop_assert!(
-                resolve_in_path_list(&name, std::ffi::OsStr::new(&path_var)).is_none(),
-                "name {:?} resolved against an all-empty PATH {:?}",
-                name,
-                path_var
-            );
-        }
-
-        /// Never panics, whatever arbitrary text arrives as either argument, and
-        /// anything it does return is the name joined onto one of the `PATH`
-        /// entries — never a path it invented.
-        #[test]
-        fn resolve_in_path_list_returns_only_a_path_var_entry_join(
-            name in ".*",
-            path_var in ".*",
-        ) {
-            let os_path = std::ffi::OsStr::new(&path_var);
-            if let Some(found) = resolve_in_path_list(&name, os_path) {
-                prop_assert_eq!(
-                    found.file_name(),
-                    Some(std::ffi::OsStr::new(&name)),
-                    "resolved {:?} for name {:?}",
-                    found,
-                    name
-                );
-                let parent = found.parent().map(std::path::Path::to_path_buf);
-                prop_assert!(
-                    std::env::split_paths(os_path).any(|dir| Some(&dir) == parent.as_ref()),
-                    "resolved {:?}, whose parent is not a PATH entry of {:?}",
-                    found,
-                    path_var
-                );
-            }
-        }
-
         #[test]
         fn has_parent_component_no_panic(s in ".*") {
             let _ = has_parent_component(&s);
@@ -1814,5 +1079,497 @@ mod tests {
                 prop_assert_eq!(mode & 0o077, 0, "group/other bits set after overwrite: {:o}", mode);
             }
         }
+    }
+
+    /// Marks a file executable so the `PATH` tests exercise the real predicate.
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn binary_on_path_true_for_sh() {
+        assert!(binary_on_path("sh"), "sh must be on PATH in any POSIX env");
+    }
+
+    #[test]
+    fn binary_on_path_false_for_bogus_binary() {
+        assert!(
+            !binary_on_path("__llmenv_no_such_binary_xyzzy__"),
+            "bogus binary must not be found on PATH"
+        );
+    }
+
+    /// #1382: resolution must not need a `which` binary anywhere. A `PATH`
+    /// holding nothing but the directory containing the target still resolves
+    /// it — the case that produced a false "not installed" on distroless
+    /// images, where `run_launch` turned it into a hard error.
+    #[test]
+    fn binary_in_path_list_resolves_without_any_helper_binaries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("some-engine");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        make_executable(&bin);
+        let found = resolve_in_path_list("some-engine", dir.path().as_os_str());
+        assert_eq!(
+            found.as_deref(),
+            Some(bin.as_path()),
+            "an executable in the only PATH entry must resolve to its full path"
+        );
+    }
+
+    #[test]
+    fn binary_in_path_list_rejects_non_executable_and_directories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plain = dir.path().join("not-executable");
+        std::fs::write(&plain, "data").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(
+                resolve_in_path_list("not-executable", dir.path().as_os_str()).is_none(),
+                "a file without an execute bit is not runnable"
+            );
+        }
+        std::fs::create_dir(dir.path().join("a-directory")).unwrap();
+        assert!(
+            resolve_in_path_list("a-directory", dir.path().as_os_str()).is_none(),
+            "a directory is not an executable even though it has the exec bit"
+        );
+    }
+
+    /// An empty `PATH` element means "current directory" to a POSIX shell.
+    /// Honouring it would let a binary in the working directory shadow a real
+    /// engine, so it is skipped deliberately.
+    #[test]
+    fn binary_in_path_list_ignores_empty_entries() {
+        assert!(
+            resolve_in_path_list("some-engine", std::ffi::OsStr::new("")).is_none(),
+            "an empty PATH must resolve nothing"
+        );
+        assert!(
+            resolve_in_path_list("some-engine", std::ffi::OsStr::new(":")).is_none(),
+            "empty PATH entries must not be treated as the cwd"
+        );
+    }
+
+    /// #1390: the empty-entry guard has to hold even when a matching executable
+    /// really is sitting in the process working directory — the hijack the
+    /// duplicated resolver in `mcp/proxy.rs` was open to. Uses a name no test
+    /// fixture would create so a hit could only have come from cwd resolution.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_does_not_resolve_out_of_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let bin = cwd.join("__llmenv_cwd_hijack_probe__");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+        let found = resolve_in_path_list("__llmenv_cwd_hijack_probe__", std::ffi::OsStr::new("::"));
+        std::fs::remove_file(&bin).unwrap();
+        assert!(
+            found.is_none(),
+            "an executable in the working directory must not satisfy an empty PATH entry"
+        );
+    }
+
+    /// #1400: an explicit relative `PATH` entry is the same cwd hijack as the
+    /// empty one, one character apart — a shell resolves both against the working
+    /// directory. The executable is really there behind each relative spelling,
+    /// so a guardless resolver would find it; only the absolute entry may match.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_ignores_relative_entries_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("some-engine");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        // Every relative spelling of "look in the working directory", plus a
+        // relative subdirectory — a project-local `bin/` is the realistic case.
+        // These are shape assertions; the companion test below is the one that
+        // proves the guard, with the executable really reachable through `.`.
+        for entry in ["", ".", "./", "bin", "./bin", "../bin"] {
+            assert!(
+                resolve_in_path_list("some-engine", std::ffi::OsStr::new(entry)).is_none(),
+                "relative PATH entry {entry:?} must not resolve"
+            );
+        }
+
+        // The same lookup against an absolute entry still works, so this narrows
+        // the resolver rather than breaking it.
+        assert_eq!(
+            resolve_in_path_list("some-engine", dir.path().as_os_str()).as_deref(),
+            Some(bin.as_path()),
+            "an absolute PATH entry must still resolve"
+        );
+    }
+
+    /// The relative-entry guard has to hold when the file really is reachable
+    /// through that entry, not just when it's absent — the trap the slash and
+    /// whitespace tests fell into. Runs from a working directory the test owns,
+    /// with the executable inside it, so `PATH="."` would resolve without the
+    /// guard.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_ignores_a_dot_entry_with_the_binary_really_in_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let bin = cwd.join("__llmenv_relative_entry_probe__");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        let found =
+            resolve_in_path_list("__llmenv_relative_entry_probe__", std::ffi::OsStr::new("."));
+        std::fs::remove_file(&bin).unwrap();
+        assert!(
+            found.is_none(),
+            "a `.` PATH entry must not resolve a binary sitting in the working directory"
+        );
+    }
+
+    /// The name guard has to bite even when the joined path would really resolve.
+    /// `binary_on_path_rejects_slash`/`_whitespace` only show that *absent* files
+    /// aren't found, which holds with the guard deleted — so they don't actually
+    /// pin it. Here the target exists: without the guard, `dir.join("sub/tool")`
+    /// finds it and a caller could reach outside the `PATH` entry it named.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_rejects_a_traversing_name_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let bin = sub.join("tool");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        // Sanity: the guardless join would have found it.
+        assert!(is_executable_file(&dir.path().join("sub/tool")));
+
+        assert!(
+            resolve_in_path_list("sub/tool", dir.path().as_os_str()).is_none(),
+            "a name containing '/' must be rejected outright, not resolved relative \
+             to a PATH entry"
+        );
+    }
+
+    /// Same shape for the whitespace guard: a file whose name really does contain
+    /// a space is present, and must still not resolve — a `PATH` lookup takes a
+    /// plain binary name, and accepting one with whitespace would let a value like
+    /// `sh -c echo` look installed.
+    #[cfg(unix)]
+    #[test]
+    fn binary_in_path_list_rejects_a_whitespace_name_that_would_otherwise_resolve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("two words");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        make_executable(&bin);
+
+        assert!(is_executable_file(&bin));
+        assert!(
+            resolve_in_path_list("two words", dir.path().as_os_str()).is_none(),
+            "a name containing whitespace must be rejected outright"
+        );
+    }
+
+    #[test]
+    fn binary_in_path_list_rejects_empty_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(
+            resolve_in_path_list("", dir.path().as_os_str()).is_none(),
+            "an empty name must not resolve to the PATH directory itself"
+        );
+    }
+
+    #[test]
+    fn binary_on_path_rejects_slash() {
+        assert!(
+            !binary_on_path("/usr/bin/sh"),
+            "path with '/' must be rejected without spawning which"
+        );
+    }
+
+    #[test]
+    fn binary_on_path_rejects_whitespace() {
+        assert!(
+            !binary_on_path("sh -c echo"),
+            "name with whitespace must be rejected without spawning which"
+        );
+        assert!(
+            !binary_on_path("sh\techo"),
+            "name with tab must be rejected without spawning which"
+        );
+    }
+
+    #[test]
+    fn copy_replacing_symlink_copies_content_to_a_fresh_destination() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"payload").expect("write src");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        assert_eq!(std::fs::read(&dst).expect("read"), b"payload");
+    }
+
+    #[test]
+    fn copy_replacing_symlink_overwrites_an_existing_regular_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"new-content").expect("write src");
+        std::fs::write(&dst, b"old-content").expect("write dst");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        assert_eq!(std::fs::read(&dst).expect("read"), b"new-content");
+    }
+
+    /// A plain `std::fs::copy` opens the destination with `O_TRUNC`, which
+    /// follows a symlink and truncates/overwrites whatever it points at
+    /// instead of replacing the link itself. `copy_replacing_symlink` must
+    /// replace the destination directory entry atomically (via `rename`),
+    /// which never follows a symlink at the destination.
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_does_not_write_through_a_symlinked_destination() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let victim = tmp.path().join("victim");
+        std::fs::write(&src, b"attacker-controlled").expect("write src");
+        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
+        std::os::unix::fs::symlink(&victim, &dst).expect("symlink");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        assert!(
+            !std::fs::symlink_metadata(&dst)
+                .expect("stat dst")
+                .file_type()
+                .is_symlink(),
+            "the symlink at the destination must be replaced, not written through"
+        );
+        assert_eq!(
+            std::fs::read(&dst).expect("read dst"),
+            b"attacker-controlled"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("read victim"),
+            b"must-not-be-touched",
+            "the symlink's target must be untouched"
+        );
+    }
+
+    /// The copy preserves the source's permission mode — unlike the
+    /// owner-only writers above, this helper is for arbitrary bundle content
+    /// (which may need to stay executable), not credentials.
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_preserves_the_source_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"#!/bin/sh\necho hi\n").expect("write src");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        let mode = std::fs::metadata(&dst)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the executable bit must survive the copy");
+    }
+
+    /// Group/other write and setuid/setgid must never survive the copy — a
+    /// bundle file sourced from a permissive local path or tarball must not
+    /// land group/world-writable inside a directory the agent executes code
+    /// from (security-audit, #1426).
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_masks_group_other_write_and_setid_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"payload").expect("write src");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o6777))
+            .expect("chmod 6777");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        let mode = std::fs::metadata(&dst)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o755,
+            "group/other write and setuid/setgid must be masked off: got {mode:o}"
+        );
+    }
+
+    /// The temp file itself must be opened exclusively (`O_EXCL`), not
+    /// written to through a second, non-exclusive open the way
+    /// `std::fs::copy(src, &tmp_path)` would — otherwise a symlink planted at
+    /// the exact predictable temp name between the exclusive-open check and a
+    /// second open gets written through, which is the residual TOCTOU
+    /// security-audit found in the first cut of this function (#1426). A
+    /// symlink already sitting at the counter-derived temp name must make
+    /// this attempt collide and retry onto the next name, not follow it.
+    #[cfg(unix)]
+    #[test]
+    fn copy_replacing_symlink_does_not_follow_a_symlink_planted_at_the_temp_name() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let victim = tmp.path().join("victim");
+        std::fs::write(&src, b"payload").expect("write src");
+        std::fs::write(&victim, b"must-not-be-touched").expect("write victim");
+
+        let pid = std::process::id();
+        let now = std::time::SystemTime::now();
+        let nanos = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        // Plant a symlink at every temp name the counter could plausibly
+        // produce next, forcing at least one `create_new` collision before a
+        // fresh (non-symlinked) name is found.
+        let next = COPY_TMP_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
+        for counter in next..next + 4 {
+            let name = format!("dst.{pid}.{nanos}.{counter}.tmp");
+            std::os::unix::fs::symlink(&victim, tmp.path().join(name))
+                .expect("plant symlink at candidate temp name");
+        }
+
+        copy_replacing_symlink(&src, &dst).expect("copy despite planted symlinks");
+
+        assert_eq!(std::fs::read(&dst).expect("read dst"), b"payload");
+        assert_eq!(
+            std::fs::read(&victim).expect("read victim"),
+            b"must-not-be-touched",
+            "a symlink planted at a candidate temp name must never be written through"
+        );
+    }
+
+    #[test]
+    fn copy_replacing_symlink_leaves_no_temp_files() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::write(&src, b"payload").expect("write src");
+
+        copy_replacing_symlink(&src, &dst).expect("copy");
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 2, "found stray files: {entries:?}");
+    }
+
+    #[test]
+    fn reject_non_regular_file_allows_a_missing_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("nope");
+        reject_non_regular_file(&path).expect("a missing path must be allowed");
+    }
+
+    #[test]
+    fn reject_non_regular_file_allows_a_real_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().join("real");
+        std::fs::write(&path, b"content").expect("write");
+        reject_non_regular_file(&path).expect("a regular file must be allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_regular_file_rejects_a_symlink() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"content").expect("write victim");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+
+        let err = reject_non_regular_file(&link).expect_err("a symlink must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_regular_file_rejects_a_dangling_symlink() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(tmp.path().join("does-not-exist"), &link)
+            .expect("dangling symlink");
+
+        assert!(
+            reject_non_regular_file(&link).is_err(),
+            "a dangling symlink must be rejected, not treated as absent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_regular_file_rejects_a_directory() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path().join("subdir");
+        std::fs::create_dir(&dir).expect("mkdir");
+
+        assert!(reject_non_regular_file(&dir).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn resolve_in_path_list_never_resolves_from_an_all_empty_path(
+            name in "[a-zA-Z0-9_.-]{1,12}",
+            separators in 0usize..8,
+        ) {
+            let path_var = ":".repeat(separators);
+            prop_assert!(
+                resolve_in_path_list(&name, std::ffi::OsStr::new(&path_var)).is_none(),
+                "name {:?} resolved against an all-empty PATH {:?}",
+                name,
+                path_var
+            );
+        }
+
+        /// Never panics, whatever arbitrary text arrives as either argument, and
+        /// anything it does return is the name joined onto one of the `PATH`
+        /// entries — never a path it invented.
+        #[test]
+        fn resolve_in_path_list_returns_only_a_path_var_entry_join(
+            name in ".*",
+            path_var in ".*",
+        ) {
+            let os_path = std::ffi::OsStr::new(&path_var);
+            if let Some(found) = resolve_in_path_list(&name, os_path) {
+                prop_assert_eq!(
+                    found.file_name(),
+                    Some(std::ffi::OsStr::new(&name)),
+                    "resolved {:?} for name {:?}",
+                    found,
+                    name
+                );
+                let parent = found.parent().map(std::path::Path::to_path_buf);
+                prop_assert!(
+                    std::env::split_paths(os_path).any(|dir| Some(&dir) == parent.as_ref()),
+                    "resolved {:?}, whose parent is not a PATH entry of {:?}",
+                    found,
+                    path_var
+                );
+            }
+        }
+
     }
 }

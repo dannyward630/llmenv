@@ -22,6 +22,10 @@ pub(super) fn record_bash_read(state_dir: &Path, session_id: &str, payload: &Val
         .and_then(|v| v.get("command"))
         .and_then(Value::as_str)
     else {
+        // The commit gate denies such a call; here the read just goes unrecorded (#2536).
+        tracing::warn!(
+            "slippage read: the Bash call has no string tool_input.command, so no read is recorded"
+        );
         return;
     };
     let Some(file) = single_file_read(command) else {

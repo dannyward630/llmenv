@@ -66,7 +66,7 @@ mod tests {
         fs::create_dir(&claude).unwrap();
         age_tree(&claude, old());
 
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
 
         assert!(report.removed.is_empty());
         assert!(claude.exists(), "the per-user TMPDIR root was removed");
@@ -84,7 +84,7 @@ mod tests {
         let fresh_child = claude.join("shell-fresh");
         fs::create_dir(&fresh_child).unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
 
         assert_eq!(report.removed.len(), 1, "removed: {:?}", report.removed);
         assert!(
@@ -109,7 +109,7 @@ mod tests {
         fs::write(&cwd_file, b"c").unwrap();
         age_tree(&busy, old());
 
-        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&cwd_file)).unwrap();
+        let report = sweep(root.path(), DAY * 7, std::slice::from_ref(&cwd_file), false).unwrap();
 
         assert!(
             report.removed.is_empty(),
@@ -131,7 +131,7 @@ mod tests {
             .set_modified(SystemTime::now() + DAY)
             .unwrap();
 
-        let report = sweep(root.path(), DAY * 7, &[]).unwrap();
+        let report = sweep(root.path(), DAY * 7, &[], false).unwrap();
 
         assert!(report.removed.is_empty());
         assert!(future.exists());

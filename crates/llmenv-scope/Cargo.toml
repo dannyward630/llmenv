@@ -15,6 +15,8 @@ llmenv-config = { path = "../llmenv-config", version = "5.0.0-alpha.1" }
 if-addrs = { workspace = true }
 ipnet = { workspace = true }
 serde = { workspace = true }
+llmenv-paths = { path = "../llmenv-paths", version = "5.0.0-alpha.1" }
+llmenv-util = { path = "../llmenv-util", version = "5.0.0-alpha.1" }
 serde_yaml = { workspace = true }
 globset = { workspace = true }
 walkdir = { workspace = true }

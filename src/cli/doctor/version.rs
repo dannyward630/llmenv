@@ -48,3 +48,111 @@ pub(super) fn cbm_floor_warning(version: &str) -> Option<String> {
         )
     })
 }
+
+/// The first opencode major that llmenv supports. llmenv writes only the 2.x plugin (#2840).
+const OPENCODE_MIN_MAJOR: u64 = 2;
+
+/// The warning text for an opencode older than 2.0, or for a version that cannot be parsed.
+/// `None` for 2.0 or newer.
+pub(super) fn opencode_floor_warning(version: &str) -> Option<String> {
+    let Some((major, _, _)) = parse_semver_triple(version) else {
+        return Some(format!(
+            "opencode version {version} could not be checked. llmenv supports opencode 2.x only. \
+             Run `opencode --version` to confirm the version is 2.0 or newer."
+        ));
+    };
+    (major < OPENCODE_MIN_MAJOR).then(|| {
+        format!(
+            "opencode {version} is not supported: llmenv supports opencode 2.x only, and the \
+             llmenv plugin does not load on 1.x. Fix: run `opencode upgrade`."
+        )
+    })
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, clippy::panic, reason = "test code")]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn parse_semver_triple_accepts_the_expected_shapes() {
+        assert_eq!(parse_semver_triple("0.11.0"), Some((0, 11, 0)));
+        assert_eq!(parse_semver_triple("v0.10.8"), Some((0, 10, 8)));
+        assert_eq!(parse_semver_triple("0.11.0-rc.1"), Some((0, 11, 0)));
+        assert_eq!(parse_semver_triple("1.2.3+build"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn parse_semver_triple_rejects_other_shapes() {
+        for bad in [
+            "0.11",
+            "0.11.0.1",
+            "0.x.0",
+            "\u{ff10}.11.0",
+            "",
+            "1234567890.0.0",
+        ] {
+            assert_eq!(parse_semver_triple(bad), None, "{bad:?}");
+        }
+    }
+
+    proptest! {
+        /// Any triple that fits nine digits round-trips through the text form, with or without
+        /// a `v` prefix and a suffix.
+        #[test]
+        fn parse_semver_triple_round_trips(
+            a in 0u64..1_000_000_000,
+            b in 0u64..1_000_000_000,
+            c in 0u64..1_000_000_000,
+            prefix in prop::sample::select(vec!["", "v"]),
+            suffix in prop::sample::select(vec!["", "-rc.1", "+build.5"]),
+        ) {
+            let text = format!("{prefix}{a}.{b}.{c}{suffix}");
+            prop_assert_eq!(parse_semver_triple(&text), Some((a, b, c)));
+        }
+
+        /// The parser never panics, and only accepts text that starts with a digit or `v`.
+        #[test]
+        fn parse_semver_triple_never_panics(text in "\\PC{0,24}") {
+            if parse_semver_triple(&text).is_some() {
+                prop_assert!(text.starts_with(|c: char| c.is_ascii_digit() || c == 'v'));
+            }
+        }
+    }
+
+    #[test]
+    fn cbm_floor_warning_fires_only_below_the_floor() {
+        let warning = cbm_floor_warning("0.10.8").expect("0.10.8 is below the floor");
+        assert!(warning.contains("0.10.8 is older than 0.12.0"), "{warning}");
+        assert!(
+            cbm_floor_warning("0.11.0").is_some(),
+            "0.11.0 is below the 0.12.0 floor"
+        );
+        for ok in ["0.12.0", "0.12.1", "1.0.0"] {
+            assert_eq!(cbm_floor_warning(ok), None, "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn opencode_below_2_is_reported_as_unsupported() {
+        let warning = opencode_floor_warning("v1.14.2").expect("1.x is unsupported");
+        assert!(warning.contains("not supported"), "{warning}");
+        assert!(warning.contains("opencode upgrade"), "{warning}");
+        for ok in ["v2.0.0", "v2.0.30", "3.1.0"] {
+            assert_eq!(opencode_floor_warning(ok), None, "{ok:?}");
+        }
+        let unknown = opencode_floor_warning("version unknown").expect("an unknown version warns");
+        assert!(unknown.contains("could not be checked"), "{unknown}");
+    }
+
+    #[test]
+    fn cbm_floor_warning_fires_for_an_unparseable_version() {
+        for unknown in ["version unknown", "garbage", ""] {
+            let warning = cbm_floor_warning(unknown)
+                .unwrap_or_else(|| panic!("{unknown:?} must warn, not pass silently"));
+            assert!(warning.contains("could not be checked"), "{warning}");
+            assert!(warning.contains(unknown), "{warning}");
+        }
+    }
+}

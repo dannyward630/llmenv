@@ -14,7 +14,16 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The `CLAUDE_CODE_VERSION` variable, or no variable when the version cannot be read. The hooks
 /// then record an empty version, as they did before this change.
 pub(crate) fn env_vars() -> Vec<(String, String)> {
-    let mut cmd = Command::new("claude");
+    // Export runs in the folder of each shell prompt, so a bare `claude` could run a copy that a
+    // cloned repo holds in a relative PATH folder (#2932).
+    let claude = match crate::path_lookup::resolve_program("claude") {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::error!("CLAUDE_CODE_VERSION not set: {e:#}");
+            return Vec::new();
+        }
+    };
+    let mut cmd = Command::new(claude);
     cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

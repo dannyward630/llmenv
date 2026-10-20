@@ -229,7 +229,8 @@ async fn http_proxy_env_cannot_carry_an_mcp_request() {
         "mcp_client::tests::listing_and_headers::",
         "http_proxy_env_cannot_carry_an_mcp_request"
     );
-    // The child re-runs this test binary, so the path is the test binary itself. nosemgrep: rust.lang.security.current-exe.current-exe
+    // The child re-runs this test binary, so the path is the test binary itself.
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let test_binary = std::env::current_exe().expect("test binary path");
     let output = std::process::Command::new(test_binary)
         .args(["--exact", test_name, "--nocapture"])

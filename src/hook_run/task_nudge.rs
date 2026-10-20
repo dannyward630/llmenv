@@ -5,7 +5,8 @@
 //! a question to the user, and before the first `git commit` or `gh pr create` with no task in
 //! progress. Per-session counters live in `state_dir/task_nudge/{session_id}.json`.
 //!
-//! Fail-soft: an I/O error logs and passes the call through, and a deny needs its marker saved.
+//! Fail-soft: an I/O error is logged and named to the agent, and the call passes through. A deny
+//! needs its marker saved.
 //! Load-modify-save has no lock, like `repeat_detect`. Parallel tool calls of one session can
 //! lose an update, which costs one extra or one missed nudge and nothing more.
 //! The tracker state is per project, not per session: a task in progress in any open session of
@@ -21,6 +22,17 @@ use crate::hook_run::shell_split::{
     ends_task_before_commit, nesting_reason, runs_commit_or_pr, shell_segments,
 };
 use crate::task::Tracking;
+
+mod deny;
+mod notices;
+use notices::{needs_state, note_no_state, note_unlocked_skip};
+mod stop;
+pub(crate) use deny::state_dir_deny;
+use deny::{
+    gate_unavailable_deny, state_unreadable_deny, store_unreadable_deny, unsaved_state_deny,
+};
+pub(crate) use stop::handle_stop;
+use stop::waiting_reminder;
 
 /// Skills that start a multi-step workflow, when `workflow_skills` is not set.
 const DEFAULT_WORKFLOW_SKILLS: [&str; 5] = [
@@ -68,31 +80,33 @@ fn state_path(state_dir: &Path, session_id: &str) -> Option<PathBuf> {
     })
 }
 
-/// The state of a session. A missing file is a new session. A corrupt file is reset. A file that
-/// exists but cannot be read is an error, and the message names the path.
-fn read_state(path: &Path) -> Result<NudgeState, String> {
+/// The state of a session, and whether it was reset. A missing file is a new session. A corrupt
+/// file is reset, and the caller saves the reset so the next call does not report it again. A
+/// file that exists but cannot be read is an error, and the message names the path.
+fn read_state(path: &Path) -> Result<(NudgeState, bool), String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(NudgeState::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((NudgeState::default(), false));
+        }
         Err(e) => return Err(format!("{} cannot be read: {e}", path.display())),
     };
-    Ok(serde_json::from_str(&text).unwrap_or_else(|e| {
-        tracing::error!(
-            "task nudge state {} is unreadable, reset: {e}",
-            path.display()
-        );
-        crate::agent_notice::record(format!(
-            "llmenv found an unreadable task nudge state {}, so its nudge history was reset: {e}. \
-             Fix: delete the file.",
-            path.display()
-        ));
-        NudgeState::default()
-    }))
+    Ok(match serde_json::from_str(&text) {
+        Ok(state) => (state, false),
+        Err(e) => {
+            crate::agent_notice::record_logged(format!(
+                "llmenv found an unreadable task nudge state {}, so its nudge history was reset: \
+                 {e}. Fix: none needed; the reset state replaces the file.",
+                path.display()
+            ));
+            (NudgeState::default(), true)
+        }
+    })
 }
 
 /// [`read_state`] for the hooks that fail soft: the error is logged and reaches the agent, and the
 /// caller skips its nudge.
-fn load(path: &Path) -> Option<NudgeState> {
+fn load(path: &Path) -> Option<(NudgeState, bool)> {
     read_state(path)
         .inspect_err(|e| {
             tracing::error!("task nudge state {e}");
@@ -115,7 +129,12 @@ fn save(path: &Path, state: &NudgeState) -> bool {
             crate::paths::write_owner_only_atomic(path, json.as_bytes())
         });
     if let Err(e) = &written {
-        tracing::error!("task nudge state {} cannot be saved: {e:#}", path.display());
+        // A lost save repeats the same nudge on every call, so the agent is told (#2536).
+        crate::agent_notice::record_logged(format!(
+            "llmenv: the task nudge state {} cannot be saved: {e:#}. A nudge may repeat. Fix: \
+             check the permissions of the state directory.",
+            path.display()
+        ));
     }
     written.is_ok()
 }
@@ -176,6 +195,9 @@ pub(crate) fn handle_post_tool_use(
         return waiting_reminder(&tracking);
     }
     let Some(path) = session_id.and_then(|id| state_path(state_dir, id)) else {
+        if needs_state(tool) {
+            note_no_state(session_id);
+        }
         return String::new();
     };
     // Held from the load to the save, so a concurrent hook cannot overwrite a deny marker (#2678).
@@ -187,7 +209,7 @@ pub(crate) fn handle_post_tool_use(
     // A save without the lock could overwrite the commit gate's deny marker, so it is skipped
     // and the agent is told (#2747).
     let may_save = dir_and_id.is_none() || lock.is_some();
-    let Some(mut state) = load(&path) else {
+    let Some((mut state, reset)) = load(&path) else {
         return String::new();
     };
     let before = state.clone();
@@ -199,7 +221,7 @@ pub(crate) fn handle_post_tool_use(
         String::new()
     };
     settle(&tracking, &mut state);
-    if state != before {
+    if state != before || reset {
         if may_save {
             save(&path, &state);
         } else {
@@ -209,16 +231,8 @@ pub(crate) fn handle_post_tool_use(
     text
 }
 
-/// Logs and notices a nudge state change that was not saved, because the lock was busy or
-/// could not be taken.
-fn note_unlocked_skip(path: &Path) {
-    crate::agent_notice::record_logged(format!(
-        "llmenv: the task nudge state {} was not saved, because its lock is busy or cannot be \
-         taken. A nudge may repeat. Fix: run `llmenv doctor` to check the state directory.",
-        path.display()
-    ));
-}
-
+/// Logs and notices that the nudges are off for a call, because the payload has no session id
+/// that can name a state file (#2536).
 /// Reset the counters while tasks are tracked.
 fn settle(tracking: &Tracking, state: &mut NudgeState) {
     if matches!(tracking, Tracking::Tracked { .. }) {
@@ -298,108 +312,6 @@ fn work_nudge(tracker: &TaskTracker, tracking: &Tracking, state: &mut NudgeState
     )
 }
 
-/// The reminder to park the task that waits for the user's answer.
-fn waiting_reminder(tracking: &Tracking) -> String {
-    match tracking {
-        Tracking::Tracked {
-            wip: Some(slug), ..
-        } => format!(
-            "llmenv task tracker: you asked the user a question while '{slug}' is in progress. If \
-             you wait for the answer, run `llmenv task wait {slug} \"<what you wait for>\"`. After \
-             the user answers, run `llmenv task start {slug}`."
-        ),
-        _ => String::new(),
-    }
-}
-
-/// The addition to the Stop reminder. A question to the user parks the task in progress, and
-/// queued tasks with none in progress name the next start.
-pub(crate) fn handle_stop(
-    tracker: &TaskTracker,
-    payload: &serde_json::Value,
-    state_dir: &Path,
-) -> String {
-    if !tracker.nudges {
-        return String::new();
-    }
-    let asks = payload["last_assistant_message"]
-        .as_str()
-        .is_some_and(|m| m.trim_end().ends_with('?'));
-    let tracking = crate::task::tracking(state_dir);
-    match &tracking {
-        Tracking::Tracked { wip: Some(_), .. } if asks => waiting_reminder(&tracking),
-        Tracking::Tracked { waiting, .. } if asks && !waiting.is_empty() => format!(
-            "llmenv task tracker: waiting on the user: {}. After the user answers, run `llmenv \
-             task start <slug>`.",
-            waiting.join(", ")
-        ),
-        Tracking::Tracked {
-            wip: None,
-            next: Some(slug),
-            ..
-        } => queued_reminder(slug),
-        _ => String::new(),
-    }
-}
-
-/// The `__DENY__` text for a commit when the gate cannot check it. The gate denies rather than
-/// passing a commit it could not check (#2630).
-fn gate_unavailable_deny(reason: &str) -> String {
-    format!(
-        "__DENY__:llmenv blocked this commit or pull request: the task commit gate cannot check \
-         it, because {reason}. Fix that, then run the same command again. To turn this off, set \
-         features.task_tracker.enforce_commit to false."
-    )
-}
-
-/// The `__DENY__` text for a commit when the deny marker cannot be saved to `path`.
-fn unsaved_state_deny(path: &Path) -> String {
-    gate_unavailable_deny(&format!(
-        "the task nudge state {} cannot be saved",
-        path.display()
-    ))
-}
-
-/// The deny for a commit when the llmenv state directory cannot be resolved, for the dispatcher.
-/// The commit gate reads its state there, so the commit is denied (#2630). `None` for any other
-/// call.
-pub(crate) fn state_dir_deny(
-    tracker: &TaskTracker,
-    payload: &serde_json::Value,
-    error: &anyhow::Error,
-) -> Option<String> {
-    let command = payload["tool_input"]["command"].as_str()?;
-    if !tracker.enforce_commit
-        || payload["tool_name"].as_str() != Some("Bash")
-        || !runs_commit_or_pr(command)
-    {
-        return None;
-    }
-    Some(gate_unavailable_deny(&format!(
-        "the llmenv state directory cannot be resolved ({error:#})"
-    )))
-}
-
-/// The `__DENY__` text for a commit when the nudge state file cannot be read. The gate cannot
-/// tell whether the commit has a task, so it denies every attempt until the file is readable (#2630).
-fn state_unreadable_deny(error: &str) -> String {
-    format!(
-        "__DENY__:llmenv blocked this commit or pull request: the task nudge state cannot be read \
-         ({error}). Fix the file or its permissions, then run the same command again. To turn this \
-         off, set features.task_tracker.enforce_commit to false."
-    )
-}
-
-/// The `__DENY__` text for a commit when the task store cannot be read. The gate cannot tell
-/// whether a task is in progress, so it denies (#2630).
-fn store_unreadable_deny() -> String {
-    "__DENY__:llmenv blocked this commit or pull request: the task store cannot be read, so the \
-     gate cannot tell whether a task is in progress. Fix the task store under the state directory, \
-     then run the same command again. To turn this off, set features.task_tracker.enforce_commit \
-     to false."
-        .to_owned()
-}
-
 /// The `__DENY__` text for the first commit or pull request with no task in progress, or an
 /// empty string. The retry passes, and the marker clears when a task is in progress.
 pub(crate) fn handle_pre_tool_use(
@@ -411,9 +323,14 @@ pub(crate) fn handle_pre_tool_use(
     if !tracker.enforce_commit || payload["tool_name"].as_str() != Some("Bash") {
         return String::new();
     }
-    let command = payload["tool_input"]["command"]
-        .as_str()
-        .unwrap_or_default();
+    let Some(command) = payload["tool_input"]["command"].as_str() else {
+        // An empty command would pass unchecked, so a malformed call is denied and named (#2536).
+        tracing::error!(
+            "task commit gate: the Bash call has no string tool_input.command: {}",
+            payload["tool_input"]
+        );
+        return gate_unavailable_deny("the Bash call has no string `tool_input.command`");
+    };
     if !runs_commit_or_pr(command) {
         return String::new();
     }
@@ -428,20 +345,28 @@ pub(crate) fn handle_pre_tool_use(
     // Same lock as the post-tool handler, so the two read-change-save cycles cannot interleave (#2678).
     // Without the lock, this check and a post-tool save could overwrite each other's marker,
     // so the commit is denied until the lock can be taken (#2747).
-    let Some(_lock) = path
-        .parent()
-        .and_then(|dir| super::session_state::lock_state_file(dir, id, "task nudge"))
-    else {
-        return gate_unavailable_deny(&format!(
-            "the lock for the task nudge state {} is busy or cannot be taken",
-            path.display()
-        ));
+    let lock = match path.parent() {
+        Some(dir) => super::session_state::lock_state_file_why(dir, id, "task nudge"),
+        None => Err(format!("{} has no parent folder", path.display())),
+    };
+    let _lock = match lock {
+        Ok(lock) => lock,
+        Err(why) => {
+            return gate_unavailable_deny(&format!(
+                "the lock for the task nudge state {} cannot be taken: {why}",
+                path.display()
+            ));
+        }
     };
     let tracking = crate::task::tracking(state_dir);
-    let mut state = match read_state(&path) {
-        Ok(state) => state,
+    let (mut state, reset) = match read_state(&path) {
+        Ok(loaded) => loaded,
         Err(e) => return state_unreadable_deny(&e),
     };
+    // A failed save here is noticed by `save`; the branches below save again where it counts.
+    if reset {
+        save(&path, &state);
+    }
     // The tracking is read before the command runs, so a task that this command ends still shows
     // as in progress. It does not count for the commit.
     let nested = shell_segments(command).is_err();
@@ -452,9 +377,9 @@ pub(crate) fn handle_pre_tool_use(
         _ => false,
     };
     match tracking {
-        Tracking::Unknown => {
-            tracing::error!("task commit gate: the task store cannot be read");
-            store_unreadable_deny()
+        Tracking::Unknown(cause) => {
+            tracing::error!("task commit gate: the task store cannot be read: {cause}");
+            store_unreadable_deny(&cause)
         }
         _ if wip_open => {
             // A marker that stays set would let a later commit with no task pass unchecked, so a

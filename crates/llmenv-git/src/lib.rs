@@ -6,6 +6,10 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The program that [`secure_git`] runs when no absolute `PATH` folder holds `git`. The path
+/// does not exist, so the spawn fails as not found and names no relative folder.
+const GIT_NOT_FOUND: &str = "/git-is-not-in-an-absolute-PATH-folder/git";
+
 /// Git config flags to protect cloned repos from executing hooks or fsmonitors.
 /// Prevents a malicious config repo from running arbitrary code via git hooks or fsmonitors.
 pub const GIT_CONFIG_FLAGS: &[&str] = &[
@@ -23,8 +27,21 @@ pub const GIT_CONFIG_FLAGS: &[&str] = &[
 /// prompt such as a credential helper (#299, #307). Centralizing it here means
 /// every `secure_git()` call site — including `.status()`/`.spawn()` callers
 /// that would otherwise inherit the parent's stdin — gets the guarantee.
+///
+/// `git` is taken from an absolute `PATH` folder only, because a bare name also searches a
+/// relative folder such as `.`, where a cloned repository could hold its own `git` (#2948). With
+/// no `git` in an absolute folder, the spawn fails as not found.
 pub fn secure_git() -> Command {
-    let mut cmd = Command::new("git");
+    let path_var = std::env::var_os("PATH");
+    let git = llmenv_paths::program::find_on_path("git", path_var.as_deref()).unwrap_or_else(|| {
+        // The spawn error names no program, so the cause and the fix are logged here.
+        tracing::error!(
+            "git is not in any absolute PATH folder (relative folders such as `.` are skipped). \
+             Fix: install git, or add its folder to PATH as an absolute path."
+        );
+        std::path::PathBuf::from(GIT_NOT_FOUND)
+    });
+    let mut cmd = Command::new(git);
     cmd.args(GIT_CONFIG_FLAGS);
     cmd.stdin(Stdio::null());
     cmd
@@ -178,268 +195,26 @@ fn parse_commit_count(output: &[u8]) -> Option<u32> {
     clippy::expect_used,
     reason = "test code, where a setup failure should panic"
 )]
-mod repo_state_tests {
-    use super::*;
-
-    /// Runs git in `dir` and asserts success. Identity and signing are set per command, so the
-    /// test does not depend on the developer's global git config.
-    fn git_run(dir: &Path, args: &[&str]) {
-        let status = secure_git()
-            .args([
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.invalid",
-            ])
-            .args(["-c", "commit.gpgsign=false"])
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .expect("spawn git");
-        assert!(status.success(), "git {args:?} failed in {}", dir.display());
-    }
-
-    /// Pins the branch to `main`, so the upstream config below names the real branch on every
-    /// machine, whatever `init.defaultBranch` is set to.
-    fn git_init(dir: &Path) {
-        git_run(dir, &["init", "-q", "-b", "main"]);
-    }
-
-    #[test]
-    fn working_tree_dirty_is_false_for_a_clean_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        git_init(dir.path());
-        assert_eq!(working_tree_dirty(dir.path()), Ok(false));
-    }
-
-    #[test]
-    fn working_tree_dirty_is_true_with_an_untracked_file() {
-        let dir = tempfile::tempdir().unwrap();
-        git_init(dir.path());
-        std::fs::write(dir.path().join("new.txt"), b"x").unwrap();
-        assert_eq!(working_tree_dirty(dir.path()), Ok(true));
-    }
-
-    #[test]
-    fn working_tree_dirty_errors_outside_a_repo_instead_of_reporting_clean() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = working_tree_dirty(dir.path()).unwrap_err();
-        assert!(err.contains("git status failed"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn has_unpushed_commits_is_false_when_the_branch_has_no_upstream() {
-        let dir = tempfile::tempdir().unwrap();
-        git_init(dir.path());
-        // An unborn HEAD reports "no such branch", not a missing upstream, so commit first.
-        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "init"]);
-        assert_eq!(has_unpushed_commits(dir.path()), Ok(false));
-    }
-
-    #[test]
-    fn has_unpushed_commits_errors_when_the_upstream_ref_is_gone() {
-        let dir = tempfile::tempdir().unwrap();
-        git_init(dir.path());
-        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "init"]);
-        // The branch names an upstream, but no remote-tracking ref backs it. That is a real
-        // failure, not "no upstream", so it must not read as nothing to push.
-        git_run(dir.path(), &["config", "branch.main.remote", "origin"]);
-        git_run(
-            dir.path(),
-            &["config", "branch.main.merge", "refs/heads/main"],
-        );
-        let err = has_unpushed_commits(dir.path()).unwrap_err();
-        assert!(
-            err.contains("git rev-list failed"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn has_unpushed_commits_errors_outside_a_repo_instead_of_reporting_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = has_unpushed_commits(dir.path()).unwrap_err();
-        assert!(
-            err.contains("git rev-list failed"),
-            "unexpected error: {err}"
-        );
-    }
-}
+mod repo_state_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn secure_git_includes_config_flags() {
-        let cmd = secure_git();
-        // Just verify command is created; actual flag testing is in integration tests
-        assert_eq!(cmd.get_program(), "git");
-    }
+/// How long a local git query may run, such as `rev-parse` or `symbolic-ref`. A local git answers
+/// in milliseconds, so a longer wait means a stuck mount, and a hook must not wait on it (#2923).
+const LOCAL_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    #[test]
-    fn apply_git_timeout_sets_tcp_timeout() {
-        use std::ffi::OsStr;
-        let mut cmd = secure_git();
-        apply_git_timeout(&mut cmd, 10);
-        assert!(
-            cmd.get_envs()
-                .any(|(k, v)| k == OsStr::new("GIT_CONNECT_TIMEOUT") && v == Some(OsStr::new("10"))),
-            "GIT_CONNECT_TIMEOUT env var should be set to 10"
-        );
-    }
-
-    #[test]
-    fn apply_git_timeout_sets_ssh_command() {
-        use std::ffi::OsStr;
-        let mut cmd = secure_git();
-        apply_git_timeout(&mut cmd, 10);
-        // Function checks std::env::var_os to avoid clobbering existing GIT_SSH_COMMAND.
-        // In this test environment it's not set, so the function should set it.
-        assert!(
-            cmd.get_envs()
-                .any(|(k, v)| k == OsStr::new("GIT_SSH_COMMAND")
-                    && v == Some(OsStr::new("ssh -o ConnectTimeout=10 -o BatchMode=yes"))),
-            "GIT_SSH_COMMAND should be set correctly"
-        );
-    }
-
-    #[test]
-    fn apply_git_timeout_sets_http_config() {
-        let mut cmd = secure_git();
-        apply_git_timeout(&mut cmd, 10);
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            args.windows(2).any(|w| w == ["-c", "http.lowSpeedTime=10"]),
-            "should set http.lowSpeedTime=10"
-        );
-        assert!(
-            args.windows(2).any(|w| w == ["-c", "http.lowSpeedLimit=1"]),
-            "should set http.lowSpeedLimit=1"
-        );
-    }
-
-    #[test]
-    fn sanitize_git_url_http_with_credentials() {
-        let url = "https://user:password@github.com/owner/repo.git";
-        assert_eq!(
-            sanitize_git_url(url),
-            "https://***@github.com/owner/repo.git"
-        );
-    }
-
-    #[test]
-    fn sanitize_git_url_ssh() {
-        let url = "git@github.com:owner/repo.git";
-        assert_eq!(sanitize_git_url(url), "***@github.com:owner/repo.git");
-    }
-
-    #[test]
-    fn sanitize_git_url_no_credentials() {
-        let url = "https://github.com/owner/repo.git";
-        assert_eq!(sanitize_git_url(url), url);
-    }
-
-    #[test]
-    fn git_failure_detail_prefers_stderr() {
-        use std::os::unix::process::ExitStatusExt;
-        let status = std::process::ExitStatus::from_raw(1 << 8);
-        let detail = git_failure_detail(b"fatal: repository not found\n", b"ignored", status);
-        assert_eq!(detail, "fatal: repository not found");
-    }
-
-    #[test]
-    fn git_failure_detail_falls_back_to_stdout_when_stderr_empty() {
-        use std::os::unix::process::ExitStatusExt;
-        let status = std::process::ExitStatus::from_raw(1 << 8);
-        let detail = git_failure_detail(b"", b"index locked\n", status);
-        assert_eq!(detail, "index locked");
-    }
-
-    #[test]
-    fn git_failure_detail_scrubs_credentials_in_stderr() {
-        use std::os::unix::process::ExitStatusExt;
-        let status = std::process::ExitStatus::from_raw(1 << 8);
-        let detail = git_failure_detail(
-            b"fatal: could not read from https://user:tok@github.com/x.git\n",
-            b"",
-            status,
-        );
-        assert!(!detail.contains("tok"), "credential leaked: {detail}");
-    }
-
-    #[test]
-    fn git_failure_detail_strips_control_and_ansi_sequences() {
-        use std::os::unix::process::ExitStatusExt;
-        let status = std::process::ExitStatus::from_raw(1 << 8);
-        let hostile = b"\x1b[2Jcleared\x1b]0;title";
-        let detail = git_failure_detail(hostile, b"", status);
-        assert_eq!(detail, "[2Jcleared]0;title");
-    }
-
-    #[test]
-    fn git_failure_detail_falls_back_to_exit_code() {
-        use std::os::unix::process::ExitStatusExt;
-        let status = std::process::ExitStatus::from_raw(128 << 8);
-        let detail = git_failure_detail(b"   \n", b"", status);
-        assert!(detail.contains("exit code"), "got: {detail}");
-    }
-
-    #[cfg(test)]
-    mod prop_tests {
-        use super::*;
-        use proptest::prelude::*;
-
-        proptest! {
-            #[test]
-            fn parse_commit_count_valid_numeric(count_val in 0u32..100_000) {
-                let bytes = format!("{count_val}").into_bytes();
-                prop_assert_eq!(parse_commit_count(&bytes), Some(count_val));
-            }
-
-            #[test]
-            fn parse_commit_count_whitespace_trimmed(count_val in 0u32..100_000) {
-                let bytes = format!("  {count_val}  \n").into_bytes();
-                prop_assert_eq!(parse_commit_count(&bytes), Some(count_val));
-            }
-
-            #[test]
-            fn parse_commit_count_malformed_returns_none(junk in ".*") {
-                // Must not panic on arbitrary input; non-numeric → None
-                let _ = parse_commit_count(junk.as_bytes());
-            }
-
-            #[test]
-            fn sanitize_git_url_no_panic(s in ".*") {
-                let _ = sanitize_git_url(&s);
-            }
-
-            #[test]
-            fn sanitize_git_url_idempotent(s in ".*") {
-                let once = sanitize_git_url(&s);
-                let twice = sanitize_git_url(&once);
-                prop_assert_eq!(once, twice);
-            }
-
-            #[test]
-            fn sanitize_git_url_scrubs_http_credentials(
-                user in "[a-zA-Z0-9_]+",
-                pass in "[a-zA-Z0-9_]+",
-                host in "[a-zA-Z0-9.-]+",
-                path in "[a-zA-Z0-9/_.-]*"
-            ) {
-                let url = format!("https://{user}:{pass}@{host}/{path}");
-                let sanitized = sanitize_git_url(&url);
-                // The credential sequence user:pass@ must be gone; pass may
-                // legitimately appear in the host or path, so we check the
-                // full credential prefix, not the password alone.
-                prop_assert!(!sanitized.contains(&format!("{user}:{pass}@")),
-                    "credentials leaked in: {sanitized}");
-                prop_assert!(sanitized.contains("***@"), "expected *** in: {sanitized}");
-            }
-        }
-    }
+/// Run the local git query `args` in `dir` with the English messages that callers match on, for
+/// at most [`LOCAL_QUERY_TIMEOUT`].
+///
+/// # Errors
+/// git cannot start, or it runs past the timeout.
+pub fn local_query(dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut cmd = secure_git();
+    cmd.args(args)
+        .current_dir(dir)
+        .env("LC_ALL", "C")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    llmenv_util::process::run_with_timeout(cmd, LOCAL_QUERY_TIMEOUT)
 }

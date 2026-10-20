@@ -108,27 +108,26 @@ sets, so their names are translated:
 
 | Neutral tool | opencode key | crush tool | Not one-to-one? |
 | ------------ | ------------ | ---------- | --------------- |
-| `Bash` | `bash` | `bash` | |
+| `Bash` | `shell` | `bash` | |
 | `Read` | `read` | `view` | |
 | `Edit` | `edit` | `edit` | crush's edit tools also create missing files and parent directories, so allowing `Edit` on crush also allows file creation |
 | `Write` | `edit` | `write` | opencode gates every file mutation through the single `edit` key, so a `Write` rule there also covers `Edit` |
 | `MultiEdit` | `edit` | `multiedit` | opencode has no separate multi-edit key; same file-creation caveat as `Edit` on crush |
 | `Glob` | `glob` | `glob` | |
 | `Grep` | `grep` | `grep` | |
-| `LS` | `list` | `ls` | |
+| `LS` | — | `ls` | opencode 2.x has no list tool; the rule is dropped for opencode |
 | `WebFetch` | `webfetch` | `fetch` | crush's more specialized `agentic_fetch` is not used |
 | `WebSearch` | `websearch` | — | crush's `web_search` is more specialized and isn't treated as a direct equivalent; the rule is dropped for crush |
-| `TodoWrite` | `todowrite` | `todos` | |
-| `Task` | `task` | — | dropped for crush |
+| `TodoWrite` | — | `todos` | opencode 2.x has no todo tool; the rule is dropped for opencode |
+| `Task` | `subagent` | — | dropped for crush |
 | `Skill` | `skill` | — | dropped for crush |
 | `NotebookEdit` | — | — | neither engine has an equivalent; the rule takes effect on Claude Code only |
 
 A `—` means that engine has no analog llmenv will map to, so the rule is
 **dropped** for that engine and takes effect on the others. This is deliberate:
-guessing at a lowercase pass-through renders a key opencode's schema rejects
-(which makes it discard the whole config file) or a name crush's exact-match
-allowlist never matches. Use `native_permissions.<engine>` to target that
-engine's own tool directly.
+a guessed name is a rule that never matches a tool call.
+Use `native_permissions.<engine>` to target that engine's own tool directly.
+The opencode column follows opencode 2.x (changed in v3.13.0: `Bash` was `bash`, `Task` was `task`, and `LS` and `TodoWrite` mapped to 1.x tools that 2.x removed).
 
 A tool name that isn't in this table is **not** rejected — Claude Code gains
 tools llmenv has no reason to know about, and its adapter passes the name
@@ -301,10 +300,11 @@ materialized inside the llmenv cache directory.
 
 ### Env vars
 
-| Variable               | Points to                                                              | Notes                                                                                          |
-|------------------------|------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
-| `CRUSH_GLOBAL_CONFIG`  | `<cache>/crush/...` (the directory containing `crush.json`)            | Crush joins `crush.json` onto this path itself — it must be a directory, not the file          |
-| `CRUSH_GLOBAL_DATA`    | `<state_dir>/crush`                                                    | A dedicated subdir of the stable llmenv state dir; Crush needs no separate workaround          |
+| Variable                       | Points to                                         | Notes                                                                                                            |
+|--------------------------------|---------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `OPENCODE_CONFIG_DIR`          | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, `service.json`, and the `plugin/` folder from here                  |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | `1`                                               | opencode does not load skills from `~/.claude` or a project `.claude` folder (added in v3.13.0)                  |
+| `TMPDIR`, `TMP`, `TEMP`        | `<state>/tmp`                                     | temp files of opencode and its subprocesses stay in llmenv's state folder, as for Claude Code (added in v3.13.0) |
 
 `CRUSH_GLOBAL_CONFIG` and `CLAUDE_CONFIG_DIR` use separate namespaces and can
 coexist in a single shell session without conflict.
@@ -400,38 +400,62 @@ Unlike Crush, opencode is a full-featured target: it supports plugins, LSP,
 custom agents/commands, and six hook events, so it reaches near-parity with the
 Claude Code adapter.
 
+(changed in v3.13.0) llmenv supports opencode 2.x only.
+The llmenv plugin uses the opencode 2.0 plugin API, which opencode 1.x cannot load.
+`llmenv doctor` reports an installed opencode older than 2.0 as unsupported, with `opencode upgrade` as the fix.
+context-mode has no opencode 2.x plugin yet, so opencode gets its MCP server and its hooks, and not its native plugin.
+
+The plugin gives every hook the payload that Claude Code sends: a Claude Code tool name (`shell` arrives as `Bash`, `read` as `Read`), Claude Code argument keys (`path` arrives as `file_path`), the session id of the call, and the project folder as `cwd`.
+An MCP tool arrives as `mcp__<server>__<tool>`.
+A hook runs only for the tools that its `matcher` names.
+A hook blocks a tool call by exit code 2, with stderr as the reason, or by `permissionDecision: "deny"` on stdout.
+The `additionalContext` of a hook reaches the model as system text, and so does the error of a hook that cannot run.
+A hook that rewrites the input with `updatedInput` passes the new input to the hooks after it.
+A hook that runs past its timeout is stopped with its child processes.
+The llmenv `hook-run pre_tool_use` gate blocks the call when it times out or cannot start.
+The text of a `Stop` hook reaches the next request, because opencode cannot continue a finished turn.
+opencode's `patch` tool keeps its own name, and the llmenv config guard checks each file in its patch text.
+When `plugin/llmenv-hooks.json` cannot be read, no hook runs, and each request says so with the fix.
+Hooks run under `/bin/sh`.
+
 ### Env vars
 
-| Variable              | Points to                                         | Notes                                                                         |
-|-----------------------|---------------------------------------------------|-------------------------------------------------------------------------------|
-| `OPENCODE_CONFIG_DIR` | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` shim from here |
+| Variable                       | Points to                                         | Notes                                                                                           |
+|--------------------------------|---------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| `OPENCODE_CONFIG_DIR`          | `<cache>` (the directory holding `opencode.json`) | opencode reads `opencode.json`, `AGENTS.md`, and the `plugin/` folder from here                 |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | `1`                                               | opencode does not load skills from `~/.claude` or a project `.claude` folder (added in v3.13.0) |
+
+opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns that folder off. `llmenv doctor` warns when the folder exists and opencode is installed (added in v3.13.0).
 
 ### What the opencode adapter emits
 
 | Output | Contents |
 | ------ | -------- |
-| `opencode.json` | `$schema` (points at the `opencode.schema.json` sidecar below), `instructions`, `mcp`, `lsp`, `permission`, `plugin` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
+| `opencode.json` | `$schema` (points at the `opencode.schema.json` sidecar below), `instructions`, `mcp`, `lsp`, `permissions` — structured render, then `native_*.opencode` overlays deep-merged at the value level |
 | `opencode.schema.json` | JSON Schema (draft 2020-12) generated from the same typed structs that render `opencode.json`, so it always matches what llmenv actually writes. Root allows `additionalProperties`, so passthrough/native-overlay keys never fail IDE validation. |
 | `AGENTS.md` | the merged rules document opencode loads as project instructions — omitted entirely when that resolves to nothing (added in v3.10.0; earlier versions wrote a 0-byte file) |
-| `rules/*.md` | rule files copied verbatim and listed in `instructions` |
+| `service.json` | `{"disabled":true}`, so each opencode client starts a private server with this environment instead of attaching to the shared background server, which can run with another scope's config (added in v3.13.0) |
+| `rules/*.md` | rule files copied verbatim and listed in `instructions` by absolute path, because opencode 2.x resolves a relative entry from the project folder (changed in v3.13.0) |
 | skills (`SKILL.md`) | first-class and plugin-projected skills, in opencode's claude-compatible format |
-| `command/*.md`, `agent/*.md` | plugin commands and agents translated (agents gain `mode: subagent`) |
-| `plugin/llmenv.js` | a generated ES-module shim bridging opencode's JS plugin API to llmenv's `hook-run` subprocess |
+| `command/*.md`, `commands/*.md`, `agents/*.md` | plugin commands go to `command/`; bundle commands are translated in place in `commands/`; plugin and bundle agents go to `agents/` and gain `mode: subagent`. A bundle agent replaces a plugin agent of the same name (changed in v3.13.0: agents were in `command/`, so opencode showed them as slash commands) |
+| `plugin/llmenv.js` | the llmenv plugin for the opencode 2.x plugin API: it runs the hooks of `plugin/llmenv-hooks.json` (changed in v3.13.0) |
+| `plugin/llmenv-hooks.json` | the hook table: each hook's event, matcher, command, and timeout, the opencode-to-Claude tool name map, and the MCP server namespaces (added in v3.13.0) |
 
 ### Hooks
 
-(per-turn hook parity added in v4.0.0, [#1439](https://github.com/phaedrus1992/llmenv/issues/1439))
+(lifecycle events added in v4.0.0, [#1439](https://github.com/phaedrus1992/llmenv/issues/1439))
 
 llmenv wires its own hooks for opencode, the same baseline it gives Claude Code
-and Codex: the config-source context and managed-cache write guard/read-once
-dedup on `PreToolUse`, and the ICM memory/session-log lifecycle events on
-`SessionStart`/`SessionEnd`. These route through `plugin/llmenv.js`, the
-generated shim bridging opencode's JS plugin API to `llmenv hook-run`
-subprocess calls — there's no nested matcher-group config to write, since
-opencode dispatches by table entry in the shim itself.
+and Codex. The baseline runs the config-source context, the managed-cache write
+guard, and the read-once dedup on `PreToolUse`. It runs the ICM memory and
+session-log events on `SessionStart` and `SessionEnd`.
 
-The per-turn hooks are gated on configuration, exactly as they are for Claude
-Code and Codex:
+`plugin/llmenv.js` runs these hooks. It reads the hook table in
+`plugin/llmenv-hooks.json`, runs each hook only for the tools its matcher names,
+and sends the Claude Code tool names, argument keys, and session id to the hook.
+
+The per-turn hooks are gated on configuration, as they are for Claude Code and
+Codex:
 
 - `turn_start` on `UserPromptSubmit` — when a memory backend resolved for the
   scope (`features.memory`).
@@ -446,58 +470,108 @@ Code and Codex:
   — so an opencode scope with no `session_log:` block still sends every prompt
   to ICM's transcript store unless the sink is explicitly disabled.
 
+When a `PreToolUse` gate is configured, the session-log `PreToolUse` entry
+replaces the gate's own entry and is fail-closed. If the hook cannot run,
+opencode denies the tool call. The entry runs on every tool call, so one entry
+serves both (#1442).
+
 The session-log set is narrower than Claude Code's and Codex's: opencode has
 no `Notification`, `SubagentStop`, or `PreCompact` event (see the supported
-event list above), so none of the three are emitted — a shim table entry for
-an event opencode never dispatches would look wired and never fire.
+event list above), so none of the three are emitted. A shim table entry for an
+event opencode never dispatches would look wired and never fire.
+
 `llmenv doctor` reports which of these are wired for the active scope,
 alongside Claude Code and Codex.
 
 ### Capability map
 
-| Feature | opencode support | Notes |
-| --------- | ---------------- | ------- |
-| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as per-tool `pattern → action` maps; a bare tool emits a plain action string. `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's own permission key, source-verified against opencode's `permission.ts` schema (`bash`, `read`, `glob`, `grep`, `webfetch`, `websearch`, `todowrite`, `task`, `skill` are a straight lowercase; `Write`/`MultiEdit` both map to `edit`, `LS` maps to `list` — opencode has no separate `write`/`multiedit`/`ls` key). A neutral tool with no confirmed opencode equivalent is dropped rather than guessing at a key (fixed in v3.10.0, [#1326](https://github.com/phaedrus1992/llmenv/issues/1326)), with a `warning:` line naming the tool (fixed in v3.11.0, [#1345](https://github.com/phaedrus1992/llmenv/issues/1345) — before that it went to a log level nothing displayed, so the rule vanished silently). This mapping applies only to `capabilities.permissions`; `native_permissions.opencode` strings are opencode's own vocabulary already (`lsp`, `question`, `doom_loop`, `external_directory`, a bare `*` deny-all, ...) and are lowercased verbatim, never mapped. Because `Write` and `MultiEdit` collapse onto the same `edit` key as `Edit`, rules for any of the three now interact with each other under one shared key — allowing `Write` and denying `Edit` (or vice versa) resolves against the combined `edit` pattern map, not two independent tools. Two rule shapes opencode cannot represent are rejected at regeneration time rather than rendered (fixed in v3.11.0, [#1328](https://github.com/phaedrus1992/llmenv/issues/1328)) — see [Permission rules opencode cannot represent](#permission-rules-opencode-cannot-represent) |
-| Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim |
-| Hooks — other events | **Warned, skipped** | Unsupported events are dropped with an actionable warning rather than a hard error |
-| Hooks — `mcp_tool` kind | **Warned, skipped** | No opencode equivalent; use a `command`-kind handler |
-| MCP servers | Supported | Local (`command`, `${HOME}`-expanded) and remote (`http`/`sse`) transports |
-| LSP servers | Supported | Rendered to `lsp.<name>` entries, with `initialization_options` |
-| Skills (first-class + plugin-projected) | Supported | Native `SKILL.md` format |
-| Output styles | **Fallback — generated skill** | opencode has no output-style concept; `output_styles` entries render as `skills/<name>/SKILL.md` instead, same `name`/`description`/`content` (added in v3.10.0, [#1130](https://github.com/phaedrus1992/llmenv/issues/1130)) |
-| Plugins / marketplace | Supported | Plugin commands, agents, MCP, skills, and hooks are translated |
-| Custom agents | Supported | Plugin `agent/*.md` are emitted with `mode: subagent` |
-| Model providers (`model_providers`/`default_models`) | Supported | Rendered to `provider.<id>` / `model` / `small_model`; `api_type` maps to the AI SDK `npm` package (e.g. `openai` → `@ai-sdk/openai-compatible`). `default_models` only has `large`/`small` slots — other role names are a no-op |
+| Feature | Crush support | Notes |
+| --------- | -------------- | ------- |
+| Permissions (`allow`) | **Coarse — tool-level only** | An unscoped rule (no `pattern`/`paths`) is translated from llmenv's neutral tool vocabulary (`Bash`, `Read`, `WebFetch` — Claude Code's PascalCase names) to Crush's own tool identifiers (`bash`, `view`, `fetch`, ...) and rendered to `allowed_tools` (changed in v3.10.0 — previously rendered the neutral name verbatim, which never matched Crush's case-sensitive, differently-named tools; see [#1321](https://github.com/phaedrus1992/llmenv/issues/1321)). A neutral tool with no Crush equivalent (`Task`, `NotebookEdit`, ...) is dropped and logged, same as a `pattern`/`paths`-scoped rule below — the neutral permission list is shared across engines, so a Claude-Code-only tool name is a normal config, not a Crush-specific error. **`Edit`/`MultiEdit` also imply file creation** under Crush: its `edit`/`multiedit` tools create missing files and parent directories on an empty old-content diff, unlike Claude Code's `Edit`, which requires an existing path — allowing `Edit` for Crush is closer to allowing `Edit` **and** `Write` combined. A `pattern`/`paths`-scoped rule is dropped entirely rather than widened to a whole-tool grant, since Crush's matcher can't express scoping at all (changed in v3.10.0; see [#1306](https://github.com/phaedrus1992/llmenv/issues/1306)) |
+| Permissions (`ask`/`deny`) | **No dedicated rendering, but cross-checked against `allow`** | Crush's `PermissionsConfig` has no `denied_tools`/`default_mode` concept, so `ask`/`deny` rules produce no key of their own. As of v3.10.0 they still suppress a same-tool entry in `allowed_tools` (Crush has nothing else to enforce a conflicting deny with) — before the `allow`-side name mapping landed, `allow` never matched a real Crush tool either, so this cross-check wasn't needed; see [#1321](https://github.com/phaedrus1992/llmenv/issues/1321) |
+| Hooks — `PreToolUse` | Supported | `command`-kind handlers only |
+| Hooks — other events | **Hard error** | Crush supports only `PreToolUse`; any other event in config is an error |
+| Hooks — `mcp_tool` kind | **Hard error** | No Crush equivalent; use `command`-kind instead |
+| MCP servers | Supported | Includes `headers`, `disabled_tools`, `timeout` |
+| LSP servers | Supported | Rendered to `lsp.<name>` entries |
+| Skills (first-class) | Supported | Written via `options.skills_paths` |
+| Skills (plugin-projected) | Supported | Plugin `skills/` subdirs are projected into Crush's skill paths |
+| Output styles | **Fallback — generated skill** | Crush has no output-style concept; `output_styles` entries render as `skills/<name>/SKILL.md` instead, same `name`/`description`/`content` (added in v3.10.0, [#1130](https://github.com/phaedrus1992/llmenv/issues/1130)) |
+| Plugins / marketplace | **Hard error** | Crush has no plugin or marketplace concept; non-skill plugin content (custom `agents/`, `commands/`) produces an actionable error naming the plugin |
+| Custom agents | **Unsupported** | Crush hardcodes exactly two agent roles (coder/task); `agents/*.md` from plugins cannot be loaded |
+| Model providers (`model_providers`/`default_models`) | Supported | Rendered to `providers`/`models` using catwalk's field names; `api_type` passes through as `type` verbatim |
+
+### The `native.crush` escape hatch
+
+Keys that no modeled feature owns go under `native.crush`:
+
+```yaml
+native:
+  crush:
+    model: claude-opus-5-5
+    provider: anthropic
+```
+
+`capabilities.model_providers`/`default_models` (see
+[Configuration](configuration.md)) is the first-class, engine-agnostic home
+for provider/model config — use this escape hatch only for Crush-specific
+fields it doesn't cover. The fragment is deep-merged verbatim into
+`crush.json` at highest precedence.
+
+The `native_permissions.crush`, `native_hooks.crush`, `native_mcp.crush`, and
+`native_model_providers.crush` siblings work the same way for their respective
+domains.
+
+### `native_model_providers.<engine>`
+
+`capabilities.model_providers` models the fields every engine has in common,
+but Crush and opencode each accept provider and per-model keys it has no field
+for. `native_model_providers.<engine>` is the escape hatch: a raw fragment,
+keyed by provider id, deep-merged onto the rendered provider block —
+`providers` in `crush.json`, `provider` in `opencode.json`. The fragment is the
+higher-precedence layer, so a key it sets wins over the one rendered from
+`model_providers`; sibling keys are preserved.
+
+It also works on its own — with no `model_providers` entries at all, the
+fragment alone renders the provider block, so a hand-written provider survives
+`llmenv regenerate`. The fragment must be a mapping; a scalar or list is
+rejected with an error rather than replacing the whole rendered block. Don't
+declare both a fragment and a `disabled: true` provider for the same id — the
+fragment renders regardless.
+
+:::caution Per-model keys: opencode only
+Crush renders `models` as a list, so a fragment's model entry is appended, not
+patched — use `model_providers[].models` for per-model config on Crush.
+opencode renders it as an object keyed by model id, so patching works.
+:::
+
+```yaml
+capabilities:
+  model_providers:
+    - id: mtplx
+      base_url: http://localhost:8080/v1
+      api_type: openai
+      models:
+        - { id: gpt-oss }
+  native_model_providers:
+    opencode:
+      mtplx:
+        models:
+          gpt-oss:
+            reasoningEffort: high   # no neutral equivalent — opencode-only
+```
 
 ### Permission rules opencode cannot represent
 
 (added in v3.11.0)
 
-Two permission shapes have no faithful rendering in `opencode.json`. Both used
-to be emitted anyway and then silently misbehave, so `llmenv regenerate` now
-fails with an error naming the offending rules instead.
-
-**Scoped rules on an action-only key.** opencode types `todowrite`,
-`question`, `webfetch`, `websearch`, and `doom_loop` as a bare
-`"allow"`/`"ask"`/`"deny"` string — unlike `bash`, `read`, `edit`, and the
-rest, they take no `pattern → action` map. opencode discards the *entire*
-config file when any single key fails to decode, and reports nothing, so one
-scoped rule here used to void every MCP server, LSP entry, and permission rule
-in the file:
-
-```yaml
-capabilities:
-  permissions:
-    allow:
-      - { tool: WebFetch, pattern: "https://example.com/*" }   # rejected
-      - { tool: WebFetch }                                     # fine — covers the whole tool
-```
-
-Drop the `pattern`/`paths` so the rule covers the tool as a whole.
+One permission shape has no faithful rendering in `opencode.json`.
+It used to be emitted anyway and then silently misbehave, so `llmenv regenerate` now fails with an error naming the offending rules instead.
+opencode 2.x takes a pattern on every action, so a scoped `WebFetch` or `WebSearch` rule renders (changed in v3.13.0; the 1.x schema took only a bare action for those keys).
 
 **Two overlapping patterns where the later-sorting one isn't the narrower.**
-opencode applies the *last* matching rule in config key order, and llmenv emits
-each tool's pattern map sorted by pattern. So for any two patterns that can
+opencode applies the *last* matching rule in the `permissions` list, and llmenv emits
+the list sorted by action and then by pattern. So for any two patterns that can
 match the same input, whichever sorts last governs every input they share.
 That's only what you meant if the last one is the more specific of the two:
 
@@ -529,15 +603,15 @@ capabilities:
 
 This comparison spans permission *keys*, not just patterns within one key
 (added in v3.11.0, [#1344](https://github.com/phaedrus1992/llmenv/issues/1344)).
-opencode flattens every key into one ordered rule list and wildcard-matches the
-key against the tool name as well, so a native rule keyed `*` applies to every
-tool and is checked against the concrete keys that sort after it:
+opencode wildcard-matches the action against the tool name as well, so a native
+rule keyed `*` applies to every tool and is checked against the concrete actions
+that sort after it:
 
 ```yaml
 capabilities:
   native_permissions:
     opencode:
-      deny: ["*(git push --force*)"]   # key "*" sorts before "bash"…
+      deny: ["*(git push --force*)"]   # key "*" sorts before "shell"…
   permissions:
     allow:
       - { tool: Bash }                 # …so this allow won for "git push --force"
@@ -554,7 +628,7 @@ capabilities:
       deny: ["*"]        # deny everything by default
   permissions:
     allow:
-      - { tool: Bash }   # …except bash
+      - { tool: Bash }   # …except shell
 ```
 
 ### The `native.opencode` escape hatch
@@ -568,7 +642,7 @@ native:
     theme: opencode
 ```
 
-The modeled keys `instructions`, `mcp`, `lsp`, `permission`, `provider`,
+The modeled keys `instructions`, `mcp`, `lsp`, `permission`, `permissions`, `provider`,
 `model`, and `small_model` are **rejected** in the top-level `native.opencode`
 block — overlaying them last would clobber the security-rendered output. Route
 them through the sibling that merges in the safe direction instead:

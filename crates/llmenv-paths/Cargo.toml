@@ -15,6 +15,10 @@ anyhow = { workspace = true }
 rustix = { workspace = true }
 tracing = { workspace = true }
 
+# `O_NOFOLLOW` has a different value on each Unix, so the unix target enables the `fs` feature.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }

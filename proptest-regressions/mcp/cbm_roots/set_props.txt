@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a44e847bc4af62c4f90ca8dccbb1b581bb45a109ec07de3b7cebb9bed105ccb8 # shrinks to wanted = ["c"], listed = ["a/x/deep", "c"]
+cc 72058c5807cf63ac5642a695f004275161afecb7ee85a6f8b24f4f3e886bbe3c # shrinks to path = ["c/y"], roots = []
+cc 0b32ac302fe1de4486a55d42eb98413bd3c50f7818cb9534211f968b15fd1012 # shrinks to listed = ["c/y"], wanted = ["b", "c/y"]
+cc 0dc21c402d5f3154dbf1fcaae0bf691b95a62ec9e59a8e3e822bae32ff6c59f7 # shrinks to path = ["ab"], roots = ["a"]
+cc 0a24a622e471239bc3403b305a0270f0beaa23f0de9814dc6c3b5f31afc032c3 # shrinks to wanted = ["ab"], listed = ["a"]
+cc 6524adf171308076d934ae526b66730994ac7f33f3627a225e68d01f44c49554 # shrinks to listed = ["ab"], wanted = ["a"]

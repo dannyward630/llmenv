@@ -123,7 +123,7 @@ pub fn materialize_with_mode(
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(abs, &out)?;
+        std::fs::write(&out, crate::paths::bounded::asset(abs)?)?;
     }
     match std::fs::rename(&staging, &dest) {
         Ok(()) => Ok(Rendered { path: dest, hash }),
@@ -197,7 +197,7 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
 /// `write_file_through_dirs` walks each component via `openat`-relative
 /// descent instead, so no intermediate symlink is ever followed.
 fn write_bundle_file(dest: &Path, rel: &Path, abs: &Path) -> anyhow::Result<()> {
-    let bytes = std::fs::read(abs).with_context(|| format!("reading {}", abs.display()))?;
+    let bytes = crate::paths::bounded::asset(abs)?;
     let mode = bundle_file_mode(abs)?;
     crate::paths::dirfd::write_file_through_dirs(dest, rel, &bytes, mode)
         .map_err(anyhow::Error::from)
