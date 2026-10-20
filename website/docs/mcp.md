@@ -662,6 +662,17 @@ A compaction or `/clear` resets the state, so the scope-tagged memories go out a
 Set `features.memory[].adaptive_recall: false` to send the same scope-tagged memories on every prompt.
 See [`memory:`](configuration.md#featuresmemory) and [`hook-run`](commands.md#hook-run).
 
+(changed in v3.13.0) A prompt recalls the session project and the global topics first.
+The keyword and topic fanouts run only when those recalls leave room in the 8,000-byte budget, because fanout memories only fill the bytes that are left.
+A skipped fanout counts in the "recall queries skipped" notice.
+
+(changed in v3.13.0) After a tool error, a memory is injected only when its summary or keywords share a distinctive word or an error code with the error.
+A distinctive word has four or more characters and is not a common error word such as "error" or "failed".
+ICM ranks the best of an unrelated set near the top score, so the score alone cannot tell a related memory from an unrelated one.
+
+(added in v3.13.0) `llmenv doctor` reports the failure rate of the last 200 recall calls in a `Memory recall:` section.
+See [`doctor`](commands.md#doctor).
+
 ### Fetched pages (added in v3.2.0)
 
 After a `WebFetch` or `WebSearch` call, a detached child stores the first 1,000 characters of the result in ICM at importance `low`.

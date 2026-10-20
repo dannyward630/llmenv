@@ -315,7 +315,8 @@ recall events also need `adaptive_recall` on):
   of a batch in the per-session recall state; no output, except a notice when that state
   cannot be saved (changed in v3.13.0, see [llmenv notices](troubleshooting.md#the-agent-sees-an-llmenv-notice))
 - `post_tool_use_failure` (added in v3.12.0) — records the error and injects
-  memories about it
+  memories about it. (changed in v3.13.0) A memory is injected only when its
+  summary or keywords share a distinctive word or an error code with the error
 - `subagent_start` (added in v3.12.0) — injects memories that match the
   subagent's task, which `subagent_task` records
 - `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool
@@ -1240,6 +1241,11 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - background work (added in v3.12.0) — prints a `Background work:` section with one line for each
   checkpoint of a detached job that did not finish. A stale checkpoint is a warning. See
   [Troubleshooting](troubleshooting.md#background-work-that-did-not-finish).
+- memory recall (added in v3.13.0) — prints a `Memory recall:` section from the
+  outcome of the last 200 adaptive recall calls, which the hooks keep in
+  `recall_health.json` in the state dir. It makes no network call. It warns when
+  more than 20% of the calls failed, and reports the memory server as stuck when
+  the last 10 calls all failed. See [Adaptive recall](mcp.md#adaptive-recall-added-in-v3120).
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached
   in the durable state dir, and warns when the cached token has expired. See
   [Inherited Claude Code state](configuration.md#oauth-credential-inheritance).

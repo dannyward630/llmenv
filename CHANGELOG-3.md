@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `llmenv task list` is an alias of `llmenv task ls`, `llmenv task session list` of `llmenv task session ls`, and `llmenv memory ls` of `llmenv memory list` (#2905) [feat:task]
 - At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv clean` (#2815) [feat:hooks]
 - A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
+- `llmenv doctor` prints a `Memory recall:` section with the failure rate of the last 200 adaptive recall calls. It warns above 20% failed and says the memory server is stuck when the last 10 calls all failed, with no network call. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2919) [feat:doctor]
 
 ### Changed
 
@@ -27,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The `llmenv clean` sweep of the state temp folder now removes old entries inside Claude Code's `claude-<uid>` TMPDIR root, judged by their own age. The root itself is still kept (#2836) [feat:materialize]
 - The codebase-memory-mcp floor is now 0.12.0, and `llmenv doctor` warns below it. The docs say a repo indexed from the CLI is not watched, and that 0.12.0 changes the index format from 1 to 2 (#2853) [fix:mcp]
 - llmenv no longer records codebase-memory allowed roots. Roots come only from `allowed_roots`, and an empty grant store means unconfined. `llmenv doctor` and the SessionStart notice print the `codebase-memory-mcp allow-root` command for you to run. The `index_repository` guard denies a call while the recorded roots cannot be read, and denies a relative `repo_path`. A grant store from an earlier llmenv still holds the old roots. Delete `<cache dir>/allowed_roots` to return to unconfined indexing, or edit it to keep some. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2916) [fix:mcp]
+- Adaptive recall skips its keyword and topic fanouts when the project and global-topic recalls already fill the byte budget, so a full turn sends fewer recall calls with the same memories. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2920) [perf:hook]
+- After a tool error, llmenv injects a memory only when its summary or keywords share a distinctive word or an error code with the error, so an unrelated best match no longer shows up. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#adaptive-recall-added-in-v3120) (#2921) [feat:hook]
 
 ### Deprecated
 
