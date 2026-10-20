@@ -104,7 +104,7 @@ impl Plan {
         Self::parse(&text).with_context(|| format!("the plan {} is not valid", path.display()))
     }
 
-    pub(crate) fn parse(text: &str) -> anyhow::Result<Self> {
+    fn parse(text: &str) -> anyhow::Result<Self> {
         let plan: Self = serde_yaml::from_str(text)?;
         plan.check_shape()?;
         Ok(plan)
