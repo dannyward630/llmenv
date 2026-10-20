@@ -10,8 +10,9 @@ use super::{
     probe_engines, write_enumeration_json,
 };
 
-/// Re-scan existing configs and refresh the enumeration JSON + installed skill.
-/// Does NOT modify config.yaml, AGENTS.md, or bundle contents.
+/// Re-scan existing configs and refresh the enumeration JSON and the installed skill.
+/// It keeps config.yaml, AGENTS.md, and the user's bundle files. It replaces the setup skill at
+/// `bundles/base/skills/setup-llmenv/SKILL.md`, which llmenv owns and installs on every run.
 pub(super) fn run_rescan(config_dir: &Path, no_launch: bool) -> Result<()> {
     if !config_dir.join("config.yaml").is_file() {
         anyhow::bail!(
@@ -97,12 +98,16 @@ pub(super) enum ExistingConfig {
 }
 
 /// Ask what to do with an existing config. The merge is the default, and the reset is a
-/// deliberate second choice. `--no-launch` cannot ask, so it refuses rather than overwrite.
+/// deliberate second choice. `--no-launch` cannot ask, so it takes the merge, which keeps every
+/// file.
 pub(super) fn existing_config_choice(config_dir: &Path, no_launch: bool) -> Result<ExistingConfig> {
+    if no_launch {
+        return Ok(ExistingConfig::Merge);
+    }
     anyhow::ensure!(
-        !no_launch,
-        "{} exists, and `llmenv setup --no-launch` never overwrites it. Fix: run `llmenv setup \
-         --rescan` to keep your files, or move config.yaml away to start again",
+        super::is_interactive(),
+        "{} exists, and `llmenv setup` needs a terminal to ask whether to keep it. Fix: run \
+         `llmenv setup --rescan` to keep your files, or move config.yaml away to start again",
         config_dir.join("config.yaml").display()
     );
     let choice = dialoguer::Select::new()
