@@ -358,7 +358,7 @@ fn adaptive_events_fail_soft_with_an_unreachable_backend() {
         ),
         (
             "post_tool_use_failure",
-            r#"{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","error":"x"}"#,
+            r#"{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","error":"ImportError request_ctx"}"#,
         ),
         (
             "subagent_start",

@@ -49,20 +49,66 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
 /// target (#2686). Only the final component is checked. A symlink in a parent directory is still
 /// followed, so the parent must already be a directory the user controls.
 pub fn write_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    write_owner_only_unnamed(path, content)
+    write_owner_only_unnamed(path, content, false)
         .map_err(|e| std::io::Error::new(e.kind(), format!("cannot write {}: {e}", path.display())))
 }
 
-fn write_owner_only_unnamed(path: &Path, content: &[u8]) -> std::io::Result<()> {
+/// Write `content` as [`write_owner_only`] does, but with the owner executable bit (mode 0o700)
+/// on Unix, for a script that a skill or a hook runs directly. The mode is set on the open file,
+/// so a file that exists at mode 0o600 gets the bit too. Off Unix this is [`write_owner_only`].
+///
+/// # Errors
+/// As [`write_owner_only`], and a failure to set the mode.
+pub fn write_owner_only_executable(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    write_owner_only_unnamed(path, content, true)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("cannot write {}: {e}", path.display())))
+}
+
+/// Write `content` as [`write_owner_only`] does, with the executable bit when the file at `source`
+/// has one, so a script copied from a bundle or a skill can still run directly.
+///
+/// # Errors
+/// `source` cannot be read for its metadata, or the write fails.
+pub fn write_owner_only_like(path: &Path, content: &[u8], source: &Path) -> std::io::Result<()> {
+    if is_executable(source)? {
+        write_owner_only_executable(path, content)
+    } else {
+        write_owner_only(path, content)
+    }
+}
+
+/// Whether the file at `path` has an executable bit, following a symlink. Off Unix a file has no
+/// such bit, so the answer is false.
+///
+/// # Errors
+/// The file cannot be read for its metadata.
+pub fn is_executable(path: &Path) -> std::io::Result<bool> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("cannot read {}: {e}", path.display()))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Ok(false)
+    }
+}
+
+fn write_owner_only_unnamed(path: &Path, content: &[u8], executable: bool) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode = if executable { 0o700 } else { 0o600 };
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
+            .mode(mode)
             .custom_flags(
                 (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
                     .bits()
@@ -71,10 +117,15 @@ fn write_owner_only_unnamed(path: &Path, content: &[u8]) -> std::io::Result<()> 
             .open(path)?;
         // A FIFO with no reader fails the open with ENXIO; one with a reader fails here (#2942).
         crate::check_regular_file(&file)?;
+        if executable {
+            // The open mode applies only to a new file; an existing one keeps its old mode.
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
         file.write_all(content)?;
     }
     #[cfg(not(unix))]
     {
+        let _ = executable;
         std::fs::write(path, content)?;
     }
     Ok(())
@@ -182,6 +233,41 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[test]
+    fn the_executable_writer_sets_0o700_on_a_new_and_an_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run.sh");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        write_owner_only_executable(&path, b"a").unwrap();
+        assert_eq!(mode(&path), 0o700);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_owner_only_executable(&path, b"b").unwrap();
+        assert_eq!(mode(&path), 0o700, "an existing file gets the bit");
+        assert_eq!(std::fs::read(&path).unwrap(), b"b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_like_writer_takes_the_executable_bit_from_its_source() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let script = tmp.path().join("src.sh");
+        std::fs::write(&script, b"x").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let plain = tmp.path().join("src.md");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(is_executable(&script).unwrap() && !is_executable(&plain).unwrap());
+        write_owner_only_like(&tmp.path().join("a"), b"x", &script).unwrap();
+        write_owner_only_like(&tmp.path().join("b"), b"x", &plain).unwrap();
+        assert_eq!(mode(&tmp.path().join("a")), 0o700);
+        assert_eq!(mode(&tmp.path().join("b")), 0o600);
+        let err = is_executable(&tmp.path().join("missing")).unwrap_err();
+        assert!(err.to_string().contains("missing"), "{err}");
+    }
+
     #[test]
     fn write_owner_only_truncates_existing_file() {
         let tmp = tempfile::TempDir::new().expect("tempdir");

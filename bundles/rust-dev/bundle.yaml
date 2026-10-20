@@ -1,0 +1,26 @@
+env:
+  CARGO_TERM_COLOR: "always"
+  RUST_BACKTRACE: "1"
+  RUSTC_WRAPPER: "sccache"
+
+permissions:
+  allow:
+    - { tool: Bash, pattern: "cargo *" }
+    - { tool: Bash, pattern: "rustc --version" }
+    - { tool: Bash, pattern: "cat ~/.cargo/config.toml" }
+    - { tool: Read, paths: ["~/.cargo/**"] }
+
+# Capability fragment for the `rust-dev` bundle. Fires for the `lang-rust` tag.
+
+hooks:
+  # Auto-clippy on every Rust edit. Quiet + head-truncated so the hook
+  # doesn't spam terminal output; warnings still surface to the agent.
+  # Matcher is a tool-name regex (Claude Code semantics — file globs never
+  # match); the edited file path comes from the hook's stdin JSON, and
+  # cargo walks up from its directory to find the crate root.
+  - event: PostToolUse
+    matcher: "Edit|Write|MultiEdit"
+    handler:
+      type: command
+      command: |
+        f=$(jq -r '.tool_input.file_path // empty') || { echo 'hook: jq failed, so the formatter did not run.' >&2; exit 1; }; case "$f" in *.rs) cd "$(dirname "$f")" && cargo clippy --quiet 2>&1 | head -20;; esac

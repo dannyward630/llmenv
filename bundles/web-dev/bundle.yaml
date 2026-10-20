@@ -1,0 +1,13 @@
+# Capability fragment for the `web-dev` bundle. Fires for the `web` tag.
+#
+# Pre-approves the toolchain referenced by web-dev rules (typescript.md).
+# The HTML, CSS, htmx, and accessibility rules need no tool permissions.
+# e2e-playwright.md runs the axe-core accessibility gate through playwright.
+
+permissions:
+  allow:
+    - { tool: Bash, pattern: "oxlint *" }
+    - { tool: Bash, pattern: "oxfmt *" }
+    - { tool: Bash, pattern: "vitest *" }
+    - { tool: Bash, pattern: "tsc --noEmit*" }
+    - { tool: Bash, pattern: "npx playwright test*" }

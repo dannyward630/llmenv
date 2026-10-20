@@ -1,0 +1,27 @@
+env:
+  # Windows PowerShell 5.1 settings (Desktop edition, not Core/7+)
+  PSModulePath: "$PSModulePath"
+
+permissions:
+  allow:
+    # Primary: powershell.exe (Windows PowerShell 5.1, Windows-only)
+    # Secondary: pwsh (PowerShell 7+, cross-platform, not baseline-tested)
+    - { tool: Bash, pattern: "powershell *" }
+    - { tool: Bash, pattern: "pwsh *" }
+    - { tool: Bash, pattern: "Invoke-ScriptAnalyzer *" }
+    - { tool: Bash, pattern: "Get-ExecutionPolicy" }
+    - { tool: Read, paths: ["$PROFILE", "~/.config/powershell/**"] }
+
+hooks:
+  # Auto-analyze on every PowerShell edit with PSScriptAnalyzer.
+  # No-op when neither pwsh nor powershell is installed (macOS/Linux).
+  # Matcher is a tool-name regex (Claude Code semantics — file globs never
+  # match); the file path comes from the hook's stdin JSON (there is no
+  # $FILE variable in Claude Code hooks).
+  # Quiet + head-truncated so hook doesn't spam; warnings surface.
+  - event: PostToolUse
+    matcher: "Edit|Write|MultiEdit"
+    handler:
+      type: command
+      command: |
+        f=$(jq -r '.tool_input.file_path // empty') || { echo 'hook: jq failed, so the formatter did not run.' >&2; exit 1; }; case "$f" in *.ps1|*.psm1|*.psd1) ps=$(command -v pwsh || command -v powershell) && "$ps" -Command "Invoke-ScriptAnalyzer -Path '$f' 2>&1" | head -20;; esac

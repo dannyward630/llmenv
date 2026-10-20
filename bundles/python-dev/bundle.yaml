@@ -1,0 +1,19 @@
+# Capability fragment for the `python-dev` bundle. Fires for the `lang-python` tag.
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  UV_LINK_MODE: "copy"
+
+hooks:
+  # Report-only ruff on every Python edit. Never rewrites code (see
+  # hooks/ruff-report.sh). Matcher is a tool-name regex (Claude Code semantics —
+  # file globs never match); the file path comes from the hook's stdin JSON.
+  - event: PostToolUse
+    matcher: "Edit|Write|MultiEdit"
+    handler:
+      type: command
+      command: "bash hooks/ruff-report.sh"
+
+  # The module-budget and ruff-budget gates moved to the code-budget bundle
+  # (#68), which fires for lang-python or lang-rust so a Rust-only project
+  # gets the same gate. See bundles/code-budget/bundle.yaml.
