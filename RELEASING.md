@@ -243,6 +243,8 @@ re-seeds a fresh `[Unreleased]` + compare link, and makes one
 it only the root crate is bumped, leaving sub-crates at the old version.
 The `pre-release-hook` in `release.toml` runs `scripts/roll-changelog.sh` and `scripts/sync-changelog-doc.sh`.
 So the commit also changes `Cargo.lock`, each crate's `Cargo.toml`, and the generated `website/docs/changelog.md`.
+The new crate versions in `Cargo.lock` make both attribution files stale.
+After the bump, run `scripts/gen-attribution.sh` and commit `THIRD-PARTY-LICENSES.md` and `website/docs/third-party-licenses.md`.
 
 ### 1a. Write the release summary
 
