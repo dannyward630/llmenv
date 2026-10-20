@@ -55,3 +55,7 @@ pub(super) fn shipped_files(bundle: &PlanBundle, dir: &Path) -> anyhow::Result<V
         })
         .collect()
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, clippy::panic, reason = "test code")]
+mod tests;
