@@ -13,11 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [3.13.0] - 2026-10-20
 
-3.13.0 adds onboarding from a scan of your repositories, one cleanup command, and support for opencode 2.x.
+3.13.0 adds onboarding from a scan of your repositories, one cleanup command, and an opencode adapter updated for opencode 2.x.
 It also scopes memory recall to the session's project, hardens the hooks and the codebase-memory guard, and replaces many silent failures with notices that name the cause and the fix.
 
 **Breaking changes.**
-llmenv supports opencode 2.x only (#2840).
+The opencode adapter is updated for opencode 2.x (#2840).
+Its plugin uses the opencode 2.0 plugin API, which opencode 1.x cannot load, so llmenv no longer supports opencode 1.x (#2840).
 The MCP HTTP client ignores the proxy variables, so an MCP server reachable only through a proxy no longer works (#2484).
 `llmenv setup --no-launch` on a configured machine merges instead of replacing `config.yaml` (#2789).
 codebase-memory allowed roots are no longer recorded automatically, and the `index_repository` guard denies a relative `repo_path` (#2916).
@@ -33,7 +34,7 @@ llmenv ships bundles for common languages and platforms, and `llmenv setup` on a
 It sweeps the state temp folder by age, rotates the session log, and keeps entries with a future mtime (#2814, #2816, #2836, #2860).
 
 **opencode 2.x.**
-llmenv supports opencode 2.x only (#2840, #2841).
+The opencode adapter is updated for opencode 2.x, so llmenv hooks run on opencode again (#2840, #2841).
 The plugin, rule files, agents, permissions, and skill scope follow the 2.x formats, and each client gets its own background server (#2842, #2843, #2844, #2845, #2846).
 
 **Memory recall.**
@@ -91,12 +92,12 @@ A non-UTF-8 environment variable fails with an error that names it (#2600, #2607
 
 ### Removed
 
-- **BREAKING:** Support for opencode 1.x. llmenv supports opencode 2.x only, and `llmenv doctor` reports an older opencode as unsupported. See [engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#2840) [fix:adapter]
-- The task tracker no longer redirects opencode's `todowrite` tool: opencode 2.x has no todo tool, and llmenv supports opencode 2.x only (#2846) [fix:hook]
+- **BREAKING:** Support for opencode 1.x. The opencode adapter is updated for opencode 2.x, and its plugin uses the opencode 2.0 plugin API, which opencode 1.x cannot load. `llmenv doctor` reports an older opencode as unsupported. See [engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#2840) [fix:adapter]
+- The task tracker no longer redirects opencode's `todowrite` tool: opencode 2.x has no todo tool, and llmenv no longer supports opencode 1.x (#2846) [fix:hook]
 
 ### Fixed
 
-- opencode 2.x loads the llmenv plugin again: 2.0 refused the 1.x-style plugin, so no llmenv hook ran on opencode. The new plugin runs a hook only for the tools its matcher names, sends the Claude Code tool names, argument keys, and session id, blocks on exit code 2 or a `deny` decision, and shows the error of a hook that cannot run. A rewritten input reaches the hooks after the rewrite, a timed-out hook is stopped with its children, the llmenv gate fails closed, `Stop` hook text reaches the next request, and the config guard checks `patch` edits. llmenv supports opencode 2.x only, and `llmenv doctor` reports an older opencode as unsupported. See [engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#2840, #2841) [fix:adapter]
+- opencode 2.x loads the llmenv plugin again: 2.0 refused the 1.x-style plugin, so no llmenv hook ran on opencode. The new plugin runs a hook only for the tools its matcher names, sends the Claude Code tool names, argument keys, and session id, blocks on exit code 2 or a `deny` decision, and shows the error of a hook that cannot run. A rewritten input reaches the hooks after the rewrite, a timed-out hook is stopped with its children, the llmenv gate fails closed, `Stop` hook text reaches the next request, and the config guard checks `patch` edits. The update for 2.x drops opencode 1.x support, and `llmenv doctor` reports an older opencode as unsupported. See [engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#2840, #2841) [fix:adapter]
 - opencode 2.x loads llmenv rule files again: `instructions` lists each rule by its absolute path, because opencode 2.0 resolves a relative entry from the project folder and loaded a project's own `rules/<x>.md` in its place (#2842) [fix:adapter]
 - opencode sessions no longer load the skills in `~/.claude` and a project `.claude` folder, outside llmenv's scope rules. `llmenv doctor` warns about `~/.agents/skills`, which opencode 2.x always loads (#2843) [fix:adapter]
 - opencode shows plugin and bundle agents as agents again, not as slash commands: llmenv writes them to `agents/`. A bundle command is now listed one time, by its own name, not also as `__bundle_<name>` (#2844) [fix:adapter]
