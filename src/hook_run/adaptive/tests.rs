@@ -112,6 +112,7 @@ fn ctx<'a>(f: &'a Fixture, payload: &'a serde_json::Value) -> AdaptiveCtx<'a> {
         session_id: "s1",
         payload,
         global_topics: &f.topics,
+        state_dir: f._dir.path(),
     }
 }
 

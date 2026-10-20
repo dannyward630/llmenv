@@ -315,7 +315,8 @@ recall events also need `adaptive_recall` on):
   of a batch in the per-session recall state; no output, except a notice when that state
   cannot be saved (changed in v3.13.0, see [llmenv notices](troubleshooting.md#the-agent-sees-an-llmenv-notice))
 - `post_tool_use_failure` (added in v3.12.0) — records the error and injects
-  memories about it
+  memories about it. (changed in v3.13.0) A memory is injected only when its
+  summary or keywords share a distinctive word or an error code with the error
 - `subagent_start` (added in v3.12.0) — injects memories that match the
   subagent's task, which `subagent_task` records
 - `subagent_task` (added in v3.12.0) — a `PreToolUse` hook on the `Agent` tool
@@ -1297,7 +1298,8 @@ active context (active bundles, active MCP servers, etc.). Checks:
   A server that is down gets the reason and the fix. Nothing prints when the scope has no managed server.
   See [Session-start health check](mcp.md#session-start-health-check-added-in-v3120).
 - ICM server version (added in v3.12.0) — on the host that serves memory, reads the version of the local
-  `icm` binary and warns below 0.10.60 and below 0.10.64. On a memory client the version is unknown, and
+  `icm` binary and warns below 0.10.60, below 0.10.64, and (changed in v3.13.0) below 0.11.3. On a memory
+  client the version is unknown, and
   doctor says to run `icm --version` on the server host. See
   [Troubleshooting](troubleshooting.md#memory-backend-issues).
 - codebase-memory index (added in v3.12.0) — with one active `features.codebase_memory` entry, reports the
@@ -1310,6 +1312,14 @@ active context (active bundles, active MCP servers, etc.). Checks:
 - background work (added in v3.12.0) — prints a `Background work:` section with one line for each
   checkpoint of a detached job that did not finish. A stale checkpoint is a warning. See
   [Troubleshooting](troubleshooting.md#background-work-that-did-not-finish).
+- memory recall (added in v3.13.0) — prints a `Memory recall:` section from the
+  outcome of the last 200 adaptive recall calls, which the hooks keep in
+  `recall_health.json` in the state dir. It makes no network call. It warns when
+  more than 20% of the calls failed, and reports the memory server as stuck when
+  the last 10 calls all failed. Each line gives the age of the newest call. A stuck
+  result with no call in the last day is info only, because the server may be fixed
+  since. A ring file that is not valid is replaced by the next hook, and the agent is
+  told. See [Adaptive recall](mcp.md#adaptive-recall-added-in-v3120).
 - cached OAuth credential (added in v3.8.0) — reports whether a token is cached
   in the durable state dir, and warns when the cached token has expired. See
   [Inherited Claude Code state](configuration.md#oauth-credential-inheritance).

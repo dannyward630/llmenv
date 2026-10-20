@@ -18,45 +18,15 @@ mod network;
 mod opencode;
 pub(super) use opencode::claude_only_colon_permission_patterns;
 mod task_text;
+mod token_env;
+use token_env::effective_token_efficiency_var;
+mod icm_server;
+use icm_server::icm_server_check;
+mod recall_health;
 mod tool_availability;
 use tool_availability::run_doctor_tool_availability;
 mod version;
-use version::{cbm_floor_warning, opencode_floor_warning, parse_semver_triple};
-
-/// Effective value of a token-efficiency env var: the process environment
-/// wins if set (matches what Claude Code will actually see if it inherited
-/// the shell), otherwise fall back to `native.claude_code.env` in the
-/// resolved config — a var declared there lands in settings.json's own `env`
-/// block, which Claude Code applies to itself independent of the shell that
-/// launched it, so it counts as "set" even when the shell never exported it.
-fn effective_token_efficiency_var(
-    native_claude_env: Option<&serde_yaml::Value>,
-    key: &str,
-) -> Option<String> {
-    effective_from_read(crate::env_var::utf8_var(key), native_claude_env, key)
-}
-
-/// The rule behind [`effective_token_efficiency_var`], split out so a test can supply the read.
-/// A value that is not UTF-8 gives no value. It does not fall back to the settings value,
-/// because that value may not be the one the process holds (#2643).
-fn effective_from_read(
-    read: anyhow::Result<Option<String>>,
-    native_claude_env: Option<&serde_yaml::Value>,
-    key: &str,
-) -> Option<String> {
-    match read {
-        Ok(Some(val)) => Some(val),
-        Ok(None) => {
-            let value = native_claude_env?.get(key)?;
-            value
-                .as_str()
-                .map(String::from)
-                .or_else(|| value.as_bool().map(|b| b.to_string()))
-                .or_else(|| value.as_i64().map(|n| n.to_string()))
-        }
-        Err(_) => None,
-    }
-}
+use version::{cbm_floor_warning, opencode_floor_warning};
 
 /// The warning for the first of `keys` whose value is not UTF-8, or `None` when all are readable.
 fn non_utf8_message(keys: &[&str]) -> Option<String> {
@@ -421,12 +391,6 @@ fn parse_version_line(output: &str, binary: &str) -> Option<String> {
     (token != binary && token.chars().any(|c| c.is_ascii_digit())).then(|| token.to_string())
 }
 
-/// ICM server releases that fix recall behavior llmenv depends on (#2261): 0.10.60 applies the
-/// keyword/topic filter before the limit (adaptive recall fanout needs it), and 0.10.64 changes
-/// the full-text query from AND to OR and fixes topic starvation.
-const ICM_SERVER_FILTER_FIX: (u64, u64, u64) = (0, 10, 60);
-const ICM_SERVER_RANKING_FIX: (u64, u64, u64) = (0, 10, 64);
-
 /// Doctor's verdict on one managed MCP server's `initialize` probe (#2358).
 fn mcp_server_check(name: &str, outcome: Result<(), &str>) -> (CheckLevel, String) {
     match outcome {
@@ -483,32 +447,6 @@ fn run_doctor_mcp_servers(
         let reason = down.iter().find(|d| d.name == server.name);
         let outcome = reason.map_or(Ok(()), |d| Err(d.reason.as_str()));
         print_check(mcp_server_check(&server.name, outcome), &pass, &warn, &info);
-    }
-}
-
-/// Doctor's verdict on the version of the `icm` binary that serves memory (#2261).
-fn icm_server_check(version: &str) -> (CheckLevel, String) {
-    let upgrade = "Run `icm upgrade --apply`.";
-    match parse_semver_triple(version) {
-        None => (
-            CheckLevel::Info,
-            format!("ICM server reports version {version:?}, which is not semver"),
-        ),
-        Some(v) if v < ICM_SERVER_FILTER_FIX => (
-            CheckLevel::Warn,
-            format!(
-                "ICM server {version} is older than 0.10.60: it filters recall by keyword and \
-                 topic after the limit, so adaptive recall returns little or nothing. {upgrade}"
-            ),
-        ),
-        Some(v) if v < ICM_SERVER_RANKING_FIX => (
-            CheckLevel::Warn,
-            format!(
-                "ICM server {version} is older than 0.10.64: recall ranking is weaker (AND \
-                 full-text query, topic starvation). {upgrade}"
-            ),
-        ),
-        Some(_) => (CheckLevel::Pass, format!("ICM server {version}")),
     }
 }
 
@@ -1625,8 +1563,13 @@ pub(super) fn run_doctor(
     );
     cbm_index::run_doctor_cbm_index(use_color, &config, &active);
     match crate::paths::state_dir() {
-        Ok(state_dir) => background::run_doctor_checkpoints(use_color, &state_dir),
-        Err(e) => eprintln!("{warn} background work: cannot resolve the state folder: {e:#}"),
+        Ok(state_dir) => {
+            background::run_doctor_checkpoints(use_color, &state_dir);
+            recall_health::run_doctor_recall_health(use_color, &state_dir);
+        }
+        Err(e) => eprintln!(
+            "{warn} background work and memory recall: cannot resolve the state folder: {e:#}"
+        ),
     }
 
     // When context-mode is enabled, verify the marketplace clone exists so
@@ -1688,46 +1631,6 @@ mod tests {
     };
     use proptest::prelude::*;
 
-    fn native_env(yaml: &str) -> serde_yaml::Value {
-        serde_yaml::from_str(yaml).expect("valid yaml")
-    }
-
-    #[test]
-    fn non_utf8_token_var_gives_no_value_and_no_settings_fallback() {
-        // The settings file sets the key, so a fallback would report a value.
-        let native = native_env("BASH_MAX_OUTPUT_LENGTH: '1000'");
-        let read = Err(anyhow::anyhow!("BASH_MAX_OUTPUT_LENGTH is not valid UTF-8"));
-
-        let got = effective_from_read(read, Some(&native), "BASH_MAX_OUTPUT_LENGTH");
-
-        assert_eq!(
-            got, None,
-            "a non-UTF-8 value must not fall back to settings.json"
-        );
-    }
-
-    #[test]
-    fn unset_token_var_falls_back_to_settings() {
-        let native = native_env("BASH_MAX_OUTPUT_LENGTH: 1000");
-
-        let got = effective_from_read(Ok(None), Some(&native), "BASH_MAX_OUTPUT_LENGTH");
-
-        assert_eq!(got.as_deref(), Some("1000"));
-    }
-
-    #[test]
-    fn set_token_var_wins_over_settings() {
-        let native = native_env("BASH_MAX_OUTPUT_LENGTH: 1000");
-
-        let got = effective_from_read(
-            Ok(Some("2000".to_string())),
-            Some(&native),
-            "BASH_MAX_OUTPUT_LENGTH",
-        );
-
-        assert_eq!(got.as_deref(), Some("2000"));
-    }
-
     #[test]
     fn an_unset_variable_does_not_skip_a_check() {
         // A name that no environment sets reads as unset, and unset is readable.
@@ -1736,29 +1639,6 @@ mod tests {
         let mut ran = false;
         unless_non_utf8(&["LLMENV_TEST_TOKEN_VAR_NEVER_SET"], "WARN", || ran = true);
         assert!(ran, "a readable variable must run the check");
-    }
-
-    proptest! {
-        #[test]
-        fn a_read_error_never_falls_back_to_settings(file in "[a-z0-9]{1,10}") {
-            let native = native_env(&format!("K: '{file}'"));
-            let got = effective_from_read(Err(anyhow::anyhow!("not utf8")), Some(&native), "K");
-            prop_assert_eq!(got, None);
-        }
-
-        #[test]
-        fn a_set_value_always_wins_over_settings(env in "[a-z0-9]{1,10}", file in "[a-z0-9]{1,10}") {
-            let native = native_env(&format!("K: '{file}'"));
-            let got = effective_from_read(Ok(Some(env.clone())), Some(&native), "K");
-            prop_assert_eq!(got, Some(env));
-        }
-
-        #[test]
-        fn an_unset_value_reads_the_settings_string(file in "[a-z0-9]{1,10}") {
-            let native = native_env(&format!("K: '{file}'"));
-            let got = effective_from_read(Ok(None), Some(&native), "K");
-            prop_assert_eq!(got, Some(file));
-        }
     }
 
     use std::collections::BTreeMap;
@@ -1856,8 +1736,6 @@ mod tests {
         assert!(!has_engine(&[], "claude_code"));
     }
 
-    // -- icm_server_check (#2261) --
-
     // -- mcp_server_check (#2358) --
 
     #[test]
@@ -1879,27 +1757,6 @@ mod tests {
         assert_eq!(level, CheckLevel::Warn);
         assert!(text.contains("did not answer"), "{text}");
         assert!(text.contains("cbm-daemon-internal"), "{text}");
-    }
-
-    #[test]
-    fn icm_server_check_boundaries() {
-        let level = |v| icm_server_check(v).0;
-        assert_eq!(level("0.10.59"), CheckLevel::Warn);
-        assert_eq!(level("0.10.60"), CheckLevel::Warn);
-        assert_eq!(level("0.10.63"), CheckLevel::Warn);
-        assert_eq!(level("0.10.64"), CheckLevel::Pass);
-        assert_eq!(level("0.11.0"), CheckLevel::Pass);
-        assert_eq!(level("v1.0.0"), CheckLevel::Pass);
-        assert_eq!(level("dev"), CheckLevel::Info);
-    }
-
-    #[test]
-    fn icm_server_check_names_the_fix_the_server_lacks() {
-        let (_, old) = icm_server_check("0.10.59");
-        assert!(old.contains("older than 0.10.60"), "{old}");
-        assert!(old.contains("icm upgrade --apply"), "{old}");
-        let (_, mid) = icm_server_check("0.10.62");
-        assert!(mid.contains("older than 0.10.64"), "{mid}");
     }
 
     // -- icm_server_scope (#2261) --
@@ -1941,18 +1798,6 @@ mod tests {
     }
 
     proptest! {
-        /// The verdict depends only on where the version falls against the two floors.
-        #[test]
-        fn icm_server_check_is_monotonic(a in 0u64..3, b in 0u64..20, c in 0u64..100) {
-            let (level, _) = icm_server_check(&format!("{a}.{b}.{c}"));
-            let expected = if (a, b, c) >= ICM_SERVER_RANKING_FIX {
-                CheckLevel::Pass
-            } else {
-                CheckLevel::Warn
-            };
-            prop_assert_eq!(level, expected);
-        }
-
         /// A 1h TTL passes in any letter case and whatever ENABLE_PROMPT_CACHING_1H holds.
         #[test]
         fn prompt_cache_ttl_1h_always_passes(
