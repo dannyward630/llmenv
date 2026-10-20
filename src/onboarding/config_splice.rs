@@ -214,7 +214,7 @@ fn key_value(line: &str, key: &str) -> KeyValue {
     // A comment needs a space before `#`; a `#` inside a value is not one.
     let value = rest.split(" #").next().unwrap_or_default().trim();
     match value {
-        "" if rest.trim_start().starts_with('#') || rest.trim().is_empty() => KeyValue::Block,
+        "" => KeyValue::Block,
         "null" | "~" | "[]" | "{}" => KeyValue::Empty,
         _ => KeyValue::Inline,
     }
