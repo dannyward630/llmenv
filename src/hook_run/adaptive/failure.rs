@@ -194,7 +194,7 @@ pub(in crate::hook_run) async fn tool_failure(
 mod tests {
     use proptest::prelude::*;
 
-    use super::{distinctive_tokens, is_generic, related_records};
+    use super::{GENERIC_MARKERS, STOP_WORDS, distinctive_tokens, is_generic, related_records};
 
     fn rel(body: &str, error: &str) -> String {
         related_records(body, &distinctive_tokens(error))
@@ -269,6 +269,70 @@ mod tests {
                 prop_assert!(t.chars().all(|c| c.is_alphanumeric() || c == '_'));
                 prop_assert!(t.chars().count() >= 3);
             }
+        }
+
+        /// Any reply text gives a result and never panics.
+        #[test]
+        fn any_reply_body_is_handled(body in "\\PC{0,400}", error in "\\PC{0,60}") {
+            let _ = rel(&body, &error);
+        }
+
+        /// The note icm appends after the JSON list never changes the result.
+        #[test]
+        fn a_trailing_note_never_changes_the_result(
+            items in prop::collection::vec(("[a-z]{1,8}", "[a-z ]{0,40}"), 0..6),
+            error in "[a-z ]{0,40}",
+            calls in 0u32..1000,
+        ) {
+            let items: Vec<(&str, &str, &[&str])> =
+                items.iter().map(|(t, s)| (t.as_str(), s.as_str(), &[][..])).collect();
+            let body = reply(&items);
+            let noted = format!("{body}\n\n[ICM: {calls} tool calls since last store.]");
+            prop_assert_eq!(rel(&noted, &error), rel(&body, &error));
+        }
+
+        /// A memory built from words the error does not hold is always dropped.
+        #[test]
+        fn an_unrelated_memory_is_dropped(
+            error_words in prop::collection::vec(prop::sample::select(vec!["kestrel", "quartz", "nimbus"]), 1..4),
+            memory_words in prop::collection::vec(prop::sample::select(vec!["walrus", "tundra", "cobalt"]), 1..4),
+        ) {
+            let summary = memory_words.join(" ");
+            let body = reply(&[("t", &summary, &memory_words)]);
+            prop_assert_eq!(rel(&body, &error_words.join(" ")), "");
+        }
+
+        /// The tokens of a token list are that list, and no token is a stop word or a number.
+        #[test]
+        fn tokens_are_stable_and_exclude_noise(text in "\\PC{0,120}") {
+            let tokens = distinctive_tokens(&text);
+            let joined: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            prop_assert_eq!(distinctive_tokens(&joined.join(" ")), tokens.clone());
+            for t in &tokens {
+                prop_assert!(!STOP_WORDS.contains(&t.as_str()), "{}", t);
+                prop_assert!(!t.chars().all(|c| c.is_ascii_digit()), "{}", t);
+            }
+        }
+
+        /// A marker in any letter case at the start of the first line is generic, and lines after
+        /// the first never change the verdict.
+        #[test]
+        fn is_generic_reads_the_first_line_only(
+            marker in prop::sample::select(GENERIC_MARKERS.to_vec()),
+            upper in prop::collection::vec(any::<bool>(), 32),
+            first in "[a-z ]{0,30}",
+            rest in prop::collection::vec("[a-zA-Z0-9 .:]{0,30}", 0..4),
+        ) {
+            let cased: String = marker
+                .chars()
+                .zip(upper.iter().cycle())
+                .map(|(c, up)| if *up { c.to_ascii_uppercase() } else { c })
+                .collect();
+            let line = format!("{cased} {first}");
+            prop_assert!(is_generic(&line));
+            let tail = rest.join("\n");
+            let text = format!("{first}\n{tail}");
+            prop_assert_eq!(is_generic(&text), is_generic(&first));
         }
 
         /// A memory that repeats the error always shares a token with it, when the error has one.
