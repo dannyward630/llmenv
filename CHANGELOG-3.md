@@ -194,6 +194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Update `rustls` to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and RUSTSEC-2026-0349. They cover TLS secrets in `Debug` output, application data sent after an ECH rejection, unbounded Brotli certificate decompression, and a key-exchange downgrade [fix:deps]
 - The MCP HTTP client ignores the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), so a request to a private address cannot leave through a proxy. An MCP server that is reachable only through a proxy no longer works. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2484) [fix:hook]
+- llmenv stops reading an MCP reply larger than 8 MiB and reports it as an error, so a faulty server cannot use up the memory of a hook. An error reply is cut at 4 KiB in the message (#2960) [fix:mcp]
 
 ## [3.12.2] - 2026-10-10
 
