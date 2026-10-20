@@ -8,8 +8,15 @@ use std::collections::BTreeSet;
 use anyhow::Context;
 use serde::Deserialize;
 
+use super::{
+    AdaptiveCtx, FAILURE_BUDGET_BYTES, FAILURE_LIMIT, FANOUT_LIMIT, Outcome, RECALL_STATE_UNSAVED,
+    RESOLVED_TOPIC, agent_key, note_skipped, note_unless_saved, query, report,
+};
 use crate::hook_run::action::{Action, RecallQuery};
 use crate::hook_run::mcp_client::McpHttpClient;
+use crate::hook_run::recall::RecallBudget;
+use crate::hook_run::relevance;
+use crate::hook_run::session_state::unix_now;
 
 /// Words that appear in most failures and in most memories, so a shared one shows no relation.
 const STOP_WORDS: [&str; 40] = [
@@ -113,6 +120,71 @@ fn is_distinctive(token: &str) -> bool {
     // An error code such as E0063 or ENOENT2 is ASCII, so `len` counts its characters.
     let is_code = token.is_ascii() && token.len() >= 3 && token.bytes().any(|b| b.is_ascii_digit());
     is_code || (token.chars().count() >= 4 && !STOP_WORDS.contains(&token))
+}
+
+/// `PostToolUseFailure`: record the error, then inject related memories once.
+pub(in crate::hook_run) async fn tool_failure(
+    ctx: &AdaptiveCtx<'_>,
+) -> anyhow::Result<crate::hook_run::HookText> {
+    let tool = ctx.payload["tool_name"].as_str().unwrap_or_default();
+    let error = ctx.payload["error"].as_str().unwrap_or_default();
+    let now = unix_now();
+    // One lock covers the error record and the read. Without the read, a busy or
+    // unreadable ledger would drop the record with no log (#2723).
+    let Some(ledger) = ctx.store.update(ctx.session_id, |l| {
+        l.push_error(tool, error, now);
+        l.clone()
+    }) else {
+        tracing::error!(
+            "tool_failure: session {} tool {tool}: error not recorded and recall skipped, \
+             the recall ledger cannot be updated (unsafe session id, busy lock, or unreadable file)",
+            ctx.session_id
+        );
+        note_skipped();
+        return Ok(crate::hook_run::HookText::default());
+    };
+    // A generic failure matches memories from every project, so no recall runs (#2910).
+    if is_generic(error) {
+        return Ok(crate::hook_run::HookText::default());
+    }
+    let (key, record) = agent_key(ctx.payload);
+    let sent = ledger.sent_for(&key);
+    let text = relevance::error_query(tool, error);
+    // The session project comes first, as in `waves`. The shared `errors-resolved` topic is
+    // the only cross-project recall here, and only while `global_topics` lists it (#2950). No
+    // all-projects recall runs on a failure (#2910).
+    let resolved = ctx
+        .global_topics
+        .iter()
+        .any(|t| t.trim() == RESOLVED_TOPIC)
+        .then(|| RecallQuery {
+            topic: Some(RESOLVED_TOPIC.to_string()),
+            ..query(&text, FANOUT_LIMIT)
+        });
+    let scoped = ledger.project.as_deref().map(|p| RecallQuery {
+        project: Some(p.to_string()),
+        ..query(&text, FAILURE_LIMIT)
+    });
+    // The all-projects recall is not run here: it injected other projects' notes (#2910).
+    let (own, fixes) = tokio::join!(
+        recall(ctx.client, scoped, error),
+        recall(ctx.client, resolved, error),
+    );
+    let mut outcome = Outcome::default();
+    outcome.push(own);
+    outcome.push(fixes);
+    let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
+    outcome.texts.iter().for_each(|t| budget.add_text(t));
+    report(ctx, "post_tool_use_failure", &outcome, &budget);
+    if record {
+        let kept = budget.kept_hashes();
+        note_unless_saved(
+            ctx.store
+                .update(ctx.session_id, |l| l.mark_sent(&key, kept)),
+            RECALL_STATE_UNSAVED,
+        );
+    }
+    Ok(budget.hook_text(Vec::new()))
 }
 
 #[cfg(test)]

@@ -128,6 +128,7 @@ mod tests {
             session_id: "s1",
             payload: &payload,
             global_topics: topics,
+            state_dir: dir.path(),
         };
         let mut budget = RecallBudget::default();
         let (outcome, ok) = waves(&ctx, "q", keywords, project, &mut budget).await;
