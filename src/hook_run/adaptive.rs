@@ -384,7 +384,10 @@ pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super:
         ..query(&text, FAILURE_LIMIT)
     });
     // The all-projects recall is not run here: it injected other projects' notes (#2910).
-    let (own, fixes) = tokio::join!(recall(ctx.client, scoped), recall(ctx.client, resolved),);
+    let (own, fixes) = tokio::join!(
+        failure::recall(ctx.client, scoped, error),
+        failure::recall(ctx.client, resolved, error),
+    );
     let mut outcome = Outcome::default();
     outcome.push(own);
     outcome.push(fixes);
