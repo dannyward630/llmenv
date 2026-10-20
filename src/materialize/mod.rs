@@ -117,7 +117,7 @@ pub fn materialize_with_mode(
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&out, crate::paths::bounded::asset(abs)?)?;
+        write_bundle_file(abs, &out)?;
     }
     match std::fs::rename(&staging, &dest) {
         Ok(()) => Ok(Rendered { path: dest, hash }),
@@ -174,9 +174,22 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&out, crate::paths::bounded::asset(abs)?)?;
+        write_bundle_file(abs, &out)?;
     }
     prune_empty_dirs(dest)?;
+    Ok(())
+}
+
+/// Copy one bundle file to `out` with its executable bit, because a skill or a hook can run a
+/// script of the bundle directly.
+fn write_bundle_file(abs: &Path, out: &Path) -> anyhow::Result<()> {
+    std::fs::write(out, crate::paths::bounded::asset(abs)?)?;
+    #[cfg(unix)]
+    if crate::paths::is_executable(abs)? {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(out)?.permissions().mode();
+        std::fs::set_permissions(out, std::fs::Permissions::from_mode(mode | 0o100))?;
+    }
     Ok(())
 }
 
@@ -256,6 +269,41 @@ mod tests {
     use crate::merge::MergedManifest;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
+
+    /// A skill or a hook can run a bundle script directly, so each render mode keeps its
+    /// executable bit, and a plain file stays plain.
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_script_keeps_its_executable_bit_in_each_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let script = tmp.path().join("run.sh");
+        std::fs::write(&script, b"#!/bin/sh\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let plain = tmp.path().join("notes.md");
+        std::fs::write(&plain, b"x").expect("write plain");
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from("skills/s/scripts/run.sh"), script);
+        files.insert(PathBuf::from("skills/s/notes.md"), plain);
+        let m = MergedManifest {
+            files,
+            ..Default::default()
+        };
+        for mode in [HashingMode::Strict, HashingMode::Normal] {
+            let cache = tmp.path().join(format!("cache-{mode:?}"));
+            let out = materialize_with_mode(&m, &cache, mode, "")
+                .expect("render")
+                .path;
+            let mode_of = |rel: &str| {
+                std::fs::metadata(out.join(rel))
+                    .expect("rendered file")
+                    .permissions()
+                    .mode()
+            };
+            assert_ne!(mode_of("skills/s/scripts/run.sh") & 0o100, 0, "{mode:?}");
+            assert_eq!(mode_of("skills/s/notes.md") & 0o111, 0, "{mode:?}");
+        }
+    }
 
     /// #149: a bundle file with a `..` component must be rejected, not joined
     /// into staging (which would escape the cache dir).

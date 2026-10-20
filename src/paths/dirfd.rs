@@ -280,6 +280,17 @@ pub(crate) fn is_regular_file_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Resul
     }
 }
 
+/// Whether the entry `name` in `dir` has an executable bit, without following a symlink. An absent
+/// entry has none.
+///
+/// # Errors
+/// `name` is not a single component, or the entry exists but cannot be read.
+pub(crate) fn is_executable_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<bool> {
+    let execute = Mode::XUSR | Mode::XGRP | Mode::XOTH;
+    Ok(stat_at_nofollow(dir, name)?
+        .is_some_and(|st| Mode::from_raw_mode(st.st_mode).intersects(execute)))
+}
+
 /// Create `name` in `dir` with `mode`, replacing whatever is there — including a
 /// symlink, which is unlinked rather than written through. The file is never briefly more
 /// permissive than `mode`.

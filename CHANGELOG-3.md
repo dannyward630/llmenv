@@ -190,6 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A dotfiles symlink at `settings.json`, `.claude.json`, `plugins/installed_plugins.json`, or `config.yaml` stays a symlink when llmenv writes the file. llmenv writes the link target and leaves its folder's permissions alone. Before, the write replaced the link with a plain file and left the linked file stale. See [troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-config-file-is-a-symlink-to-a-dotfiles-repo) (#2883) [fix:adapter]
 - `llmenv upgrade` stops a new binary that does not answer `--version` in time, then restores the backup with a message. Before, the upgrade blocked with no output (#2885) [fix:upgrade]
 - Network and SSID scope detection stop a `route`, `arp`, `networksetup`, or `ipconfig` call that does not answer in time, and count it as no reading. Before, a stuck call blocked the shell prompt and `llmenv doctor` (#2885) [fix:scope]
+- A skill or bundle script that llmenv renders keeps its executable bit, so a skill that runs its script directly no longer fails with permission denied (#2967) [fix:materialize]
 
 ### Security
 
