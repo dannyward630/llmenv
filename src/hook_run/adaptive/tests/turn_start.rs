@@ -183,7 +183,15 @@ async fn waves_count_every_failed_call() {
     let server = failing_server().await;
     let f = fixture(&server);
     let payload = serde_json::json!({});
-    let (outcome, main_ok) = waves(&ctx(&f, &payload), "q", &["k".to_string()], Some("proj")).await;
+    let mut budget = crate::hook_run::recall::RecallBudget::default();
+    let (outcome, main_ok) = waves(
+        &ctx(&f, &payload),
+        "q",
+        &["k".to_string()],
+        Some("proj"),
+        &mut budget,
+    )
+    .await;
     assert!(!main_ok);
     assert!(outcome.all_failed(), "{outcome:?}");
     // The project recall, the global topics, and one keyword fanout.
@@ -226,4 +234,20 @@ async fn turn_start_sends_activity_terms_as_keyword_filters() {
         .unwrap()
         .text();
     assert!(out.contains("keyword fact"), "{out}");
+}
+
+/// Each hook adds its recall calls to the health ring that doctor reads (#2919).
+#[tokio::test]
+async fn a_hook_records_its_recall_calls_for_doctor() {
+    let server = failing_server().await;
+    let f = fixture(&server);
+    f.store
+        .update("s1", |l| l.project = Some("proj".to_string()));
+    let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nImportError request_ctx"});
+    tool_failure(&ctx(&f, &payload)).await.unwrap();
+    let health = crate::hook_run::recall_health::health(f._dir.path())
+        .unwrap()
+        .expect("the hook wrote the ring");
+    assert!(health.calls > 0, "{health:?}");
+    assert_eq!(health.failed, health.calls, "{health:?}");
 }

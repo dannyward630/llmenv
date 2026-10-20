@@ -229,3 +229,22 @@ async fn the_session_project_ranks_first_after_session_start() {
     let global_at = out.find("global fact").expect("all-projects record");
     assert!(project_at < global_at, "{out}");
 }
+
+/// The wake-up and project-memories calls count in the health ring, so a dead server shows in
+/// doctor even when the session has no scope action (#2919).
+#[tokio::test]
+async fn session_start_records_the_wake_up_and_project_calls() {
+    let server = failing_server().await;
+    let f = fixture(&server);
+    let start = json!({"source": "startup"});
+    let wake = crate::hook_run::action::WakeUpArgs {
+        project: Some("proj".to_string()),
+        ..Default::default()
+    };
+    let out = session_start(&ctx(&f, &start), Action::WakeUp(wake), Vec::new()).await;
+    assert!(out.is_err(), "a failed wake-up is the hook's error");
+    let health = crate::hook_run::recall_health::health(f._dir.path())
+        .unwrap()
+        .expect("session start wrote the ring");
+    assert_eq!((health.calls, health.failed), (2, 2), "{health:?}");
+}

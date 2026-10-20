@@ -77,6 +77,11 @@ impl RecallBudget {
         self.limit.saturating_sub(self.kept_bytes) < MIN_FREE_BYTES
     }
 
+    /// Counts `count` recall queries that did not run because the budget was full.
+    pub(super) fn skip_actions(&mut self, count: usize) {
+        self.skipped_actions += count;
+    }
+
     pub(super) fn add_text(&mut self, text: &str) {
         self.add_records(split_recall_records(text));
     }

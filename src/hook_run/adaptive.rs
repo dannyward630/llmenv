@@ -31,6 +31,7 @@ mod waves;
 #[cfg(test)]
 use cut::cut_items_notice;
 use cut::{drop_cut_items, join_sections, note_cut_items, pack_bytes};
+pub(super) use failure::tool_failure;
 pub(super) use local::record_local;
 use outcome::Outcome;
 use scope::run_scope;
@@ -64,6 +65,8 @@ pub(super) struct AdaptiveCtx<'a> {
     pub(super) payload: &'a Value,
     /// The topics that the main recall reads across every project (#2950).
     pub(super) global_topics: &'a [String],
+    /// Where the recall health ring lives (#2919).
+    pub(super) state_dir: &'a Path,
 }
 
 /// A recall across all projects. ICM's default project filter is the ICM
@@ -92,7 +95,9 @@ fn outage_notice(flow: &str, outcome: &Outcome) -> Option<String> {
 }
 
 /// Print the outage line and the `[LLMENV_CONTEXT]` trace line for one flow.
-fn report(flow: &str, outcome: &Outcome, budget: &RecallBudget) {
+fn report(ctx: &AdaptiveCtx<'_>, flow: &str, outcome: &Outcome, budget: &RecallBudget) {
+    let ok = outcome.calls.saturating_sub(outcome.failed);
+    crate::hook_run::recall_health::record(ctx.state_dir, ok, outcome.failed, unix_now());
     // The engine drops a hook's stderr, so the outage goes to the agent as a notice.
     if let Some(line) = outage_notice(flow, outcome) {
         agent_notice::record_logged(line);
@@ -108,9 +113,10 @@ async fn recall(client: &McpHttpClient, q: Option<RecallQuery>) -> Option<anyhow
     Some(Action::RecallQuery(q?).run(client, "", "").await)
 }
 
-/// The session project's own memories for the wake-up pack. The icm wake-up fills its budget
-/// with global records first, so this project-scoped recall runs beside it (#2756).
-async fn project_memories(client: &McpHttpClient, project: &str) -> String {
+/// The session project's own memories for the wake-up pack, and whether the call answered. The
+/// icm wake-up fills its budget with global records first, so this project-scoped recall runs
+/// beside it (#2756).
+async fn project_memories(client: &McpHttpClient, project: &str) -> (String, bool) {
     let q = RecallQuery {
         project: Some(project.to_string()),
         ..query(project, MAIN_LIMIT)
@@ -123,7 +129,7 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> String {
                 .collect();
             let (kept, cut) = drop_cut_items(&records.join("\n"));
             note_cut_items(cut);
-            kept
+            (kept, true)
         }
         Err(e) => {
             tracing::error!("session start: project memories not recalled for {project}: {e:#}");
@@ -132,7 +138,7 @@ async fn project_memories(client: &McpHttpClient, project: &str) -> String {
                  Fix: run `llmenv doctor` to check the memory server.",
                 mcp_health::tidy_reason(&format!("{e:#}"))
             ));
-            String::new()
+            (String::new(), false)
         }
     }
 }
@@ -179,15 +185,23 @@ pub(super) async fn session_start(
     let (wake, own) = if super::continues_session(ctx.payload) {
         (Ok(String::new()), String::new())
     } else {
-        let own = match &recall_project {
-            Some(p) => project_memories(ctx.client, p).await,
-            None => String::new(),
+        let (own, own_ok) = match &recall_project {
+            Some(p) => {
+                let (text, ok) = project_memories(ctx.client, p).await;
+                (text, Some(ok))
+            }
+            None => (String::new(), None),
         };
         let wake = wake.run(ctx.client, "", "").await.map(|t| {
             let (kept, cut) = drop_cut_items(&t);
             note_cut_items(cut);
             join_sections(&kept, &own)
         });
+        // These two calls are not in the scope outcome, so the health ring counts them here.
+        let results = [Some(wake.is_ok()), own_ok];
+        let ok = results.iter().filter(|r| **r == Some(true)).count();
+        let failed = results.iter().filter(|r| **r == Some(false)).count();
+        crate::hook_run::recall_health::record(ctx.state_dir, ok, failed, unix_now());
         (wake, own)
     };
     // Claude Code spills output over about 10 KB to a file, so the scope set gets
@@ -199,7 +213,7 @@ pub(super) async fn session_start(
     if let Some(notice) = unrun {
         agent_notice::record(notice);
     }
-    report("session_start", &outcome, &budget);
+    report(ctx, "session_start", &outcome, &budget);
     let wake = match wake {
         Ok(text) => text,
         Err(e) if (outcome.all_failed() || scope_len == 0) && own.is_empty() => return Err(e),
@@ -309,12 +323,18 @@ pub(super) async fn turn_start(
     let mut main_ok = false;
     if !repeated && !text.is_empty() {
         let keywords = relevance::fanout_keywords(ledger.activity());
-        let (wave, ok) = waves(ctx, &text, &keywords, ledger.project.as_deref()).await;
-        wave.texts.iter().for_each(|t| budget.add_text(t));
+        let (wave, ok) = waves(
+            ctx,
+            &text,
+            &keywords,
+            ledger.project.as_deref(),
+            &mut budget,
+        )
+        .await;
         main_ok = ok;
         outcome.merge(wave);
     }
-    report("turn_start", &outcome, &budget);
+    report(ctx, "turn_start", &outcome, &budget);
     let kept = budget.kept_hashes();
     let now = unix_now();
     note_unless_saved(
@@ -333,66 +353,6 @@ pub(super) async fn turn_start(
         }),
         RECALL_STATE_UNSAVED,
     );
-    Ok(budget.hook_text(Vec::new()))
-}
-
-/// `PostToolUseFailure`: record the error, then inject related memories once.
-pub(super) async fn tool_failure(ctx: &AdaptiveCtx<'_>) -> anyhow::Result<super::HookText> {
-    let tool = ctx.payload["tool_name"].as_str().unwrap_or_default();
-    let error = ctx.payload["error"].as_str().unwrap_or_default();
-    let now = unix_now();
-    // One lock covers the error record and the read. Without the read, a busy or
-    // unreadable ledger would drop the record with no log (#2723).
-    let Some(ledger) = ctx.store.update(ctx.session_id, |l| {
-        l.push_error(tool, error, now);
-        l.clone()
-    }) else {
-        tracing::error!(
-            "tool_failure: session {} tool {tool}: error not recorded and recall skipped, \
-             the recall ledger cannot be updated (unsafe session id, busy lock, or unreadable file)",
-            ctx.session_id
-        );
-        note_skipped();
-        return Ok(super::HookText::default());
-    };
-    // A generic failure matches memories from every project, so no recall runs (#2910).
-    if failure::is_generic(error) {
-        return Ok(super::HookText::default());
-    }
-    let (key, record) = agent_key(ctx.payload);
-    let sent = ledger.sent_for(&key);
-    let text = relevance::error_query(tool, error);
-    // The session project comes first, as in `waves`. The shared `errors-resolved` topic is
-    // the only cross-project recall here, and only while `global_topics` lists it (#2950). No
-    // all-projects recall runs on a failure (#2910).
-    let resolved = ctx
-        .global_topics
-        .iter()
-        .any(|t| t.trim() == RESOLVED_TOPIC)
-        .then(|| RecallQuery {
-            topic: Some(RESOLVED_TOPIC.to_string()),
-            ..query(&text, FANOUT_LIMIT)
-        });
-    let scoped = ledger.project.as_deref().map(|p| RecallQuery {
-        project: Some(p.to_string()),
-        ..query(&text, FAILURE_LIMIT)
-    });
-    // The all-projects recall is not run here: it injected other projects' notes (#2910).
-    let (own, fixes) = tokio::join!(recall(ctx.client, scoped), recall(ctx.client, resolved),);
-    let mut outcome = Outcome::default();
-    outcome.push(own);
-    outcome.push(fixes);
-    let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
-    outcome.texts.iter().for_each(|t| budget.add_text(t));
-    report("post_tool_use_failure", &outcome, &budget);
-    if record {
-        let kept = budget.kept_hashes();
-        note_unless_saved(
-            ctx.store
-                .update(ctx.session_id, |l| l.mark_sent(&key, kept)),
-            RECALL_STATE_UNSAVED,
-        );
-    }
     Ok(budget.hook_text(Vec::new()))
 }
 
