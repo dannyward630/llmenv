@@ -159,3 +159,25 @@ fn an_empty_plan_is_empty() {
             .unwrap()
     );
 }
+
+#[test]
+fn scope_entries_are_added_without_a_question() {
+    let p =
+        Plan::parse("scope: {content: [{id: rust, match: {glob: Cargo.toml}, tags: [lang-rust]}]}")
+            .unwrap();
+    assert!(!p.is_empty());
+    assert!(p.gated_items().unwrap().is_empty());
+    assert_eq!(p.scope_ids(), ["content rust"]);
+    let additions = p.additions();
+    assert!(
+        matches!(
+            &additions[..],
+            [Addition::Items {
+                key: "scope",
+                sub: Some("content"),
+                ..
+            }]
+        ),
+        "{additions:?}"
+    );
+}

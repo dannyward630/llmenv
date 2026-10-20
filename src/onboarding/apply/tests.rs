@@ -217,3 +217,22 @@ fn a_missing_config_names_the_fix() {
     );
     assert!(!Path::new(&dir.path().join("bundles")).exists());
 }
+
+#[test]
+fn a_scope_makes_the_new_bundle_fire_and_needs_no_item_question() {
+    let plan = "bundles: [{name: rust-dev, when: [lang-rust], files: {AGENTS.md: x}}]\n\
+                scope: {content: [{id: rust, match: {glob: Cargo.toml}, tags: [lang-rust]}]}\n";
+    let s = Setup::new(CONFIG, plan);
+    let mut script = Script::new(&[true, true]);
+    let (result, out) = s.run(&mut script);
+    assert!(result.unwrap(), "{out}");
+    assert_eq!(
+        script.asked,
+        ["Apply this plan?", "Add these lines to config.yaml?"]
+    );
+    let config: serde_yaml::Value = serde_yaml::from_str(&s.config()).unwrap();
+    assert_eq!(
+        config["scope"]["content"][0]["tags"][0],
+        serde_yaml::Value::from("lang-rust")
+    );
+}

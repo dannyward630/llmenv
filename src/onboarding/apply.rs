@@ -145,6 +145,9 @@ fn print_plan(plan: &Plan, out: &mut dyn Write) -> anyhow::Result<()> {
     for name in plan.host_names() {
         writeln!(out, "  host {name}")?;
     }
+    for scope in plan.scope_ids() {
+        writeln!(out, "  scope {scope}")?;
+    }
     let items = plan.gated_items()?.len();
     writeln!(
         out,
