@@ -20,11 +20,13 @@ pub(super) use opencode::claude_only_colon_permission_patterns;
 mod task_text;
 mod token_env;
 use token_env::effective_token_efficiency_var;
+mod icm_server;
+use icm_server::icm_server_check;
 mod recall_health;
 mod tool_availability;
 use tool_availability::run_doctor_tool_availability;
 mod version;
-use version::{cbm_floor_warning, opencode_floor_warning, parse_semver_triple};
+use version::{cbm_floor_warning, opencode_floor_warning};
 
 /// The warning for the first of `keys` whose value is not UTF-8, or `None` when all are readable.
 fn non_utf8_message(keys: &[&str]) -> Option<String> {
@@ -389,12 +391,6 @@ fn parse_version_line(output: &str, binary: &str) -> Option<String> {
     (token != binary && token.chars().any(|c| c.is_ascii_digit())).then(|| token.to_string())
 }
 
-/// ICM server releases that fix recall behavior llmenv depends on (#2261): 0.10.60 applies the
-/// keyword/topic filter before the limit (adaptive recall fanout needs it), and 0.10.64 changes
-/// the full-text query from AND to OR and fixes topic starvation.
-const ICM_SERVER_FILTER_FIX: (u64, u64, u64) = (0, 10, 60);
-const ICM_SERVER_RANKING_FIX: (u64, u64, u64) = (0, 10, 64);
-
 /// Doctor's verdict on one managed MCP server's `initialize` probe (#2358).
 fn mcp_server_check(name: &str, outcome: Result<(), &str>) -> (CheckLevel, String) {
     match outcome {
@@ -451,32 +447,6 @@ fn run_doctor_mcp_servers(
         let reason = down.iter().find(|d| d.name == server.name);
         let outcome = reason.map_or(Ok(()), |d| Err(d.reason.as_str()));
         print_check(mcp_server_check(&server.name, outcome), &pass, &warn, &info);
-    }
-}
-
-/// Doctor's verdict on the version of the `icm` binary that serves memory (#2261).
-fn icm_server_check(version: &str) -> (CheckLevel, String) {
-    let upgrade = "Run `icm upgrade --apply`.";
-    match parse_semver_triple(version) {
-        None => (
-            CheckLevel::Info,
-            format!("ICM server reports version {version:?}, which is not semver"),
-        ),
-        Some(v) if v < ICM_SERVER_FILTER_FIX => (
-            CheckLevel::Warn,
-            format!(
-                "ICM server {version} is older than 0.10.60: it filters recall by keyword and \
-                 topic after the limit, so adaptive recall returns little or nothing. {upgrade}"
-            ),
-        ),
-        Some(v) if v < ICM_SERVER_RANKING_FIX => (
-            CheckLevel::Warn,
-            format!(
-                "ICM server {version} is older than 0.10.64: recall ranking is weaker (AND \
-                 full-text query, topic starvation). {upgrade}"
-            ),
-        ),
-        Some(_) => (CheckLevel::Pass, format!("ICM server {version}")),
     }
 }
 
@@ -1764,8 +1734,6 @@ mod tests {
         assert!(!has_engine(&[], "claude_code"));
     }
 
-    // -- icm_server_check (#2261) --
-
     // -- mcp_server_check (#2358) --
 
     #[test]
@@ -1787,27 +1755,6 @@ mod tests {
         assert_eq!(level, CheckLevel::Warn);
         assert!(text.contains("did not answer"), "{text}");
         assert!(text.contains("cbm-daemon-internal"), "{text}");
-    }
-
-    #[test]
-    fn icm_server_check_boundaries() {
-        let level = |v| icm_server_check(v).0;
-        assert_eq!(level("0.10.59"), CheckLevel::Warn);
-        assert_eq!(level("0.10.60"), CheckLevel::Warn);
-        assert_eq!(level("0.10.63"), CheckLevel::Warn);
-        assert_eq!(level("0.10.64"), CheckLevel::Pass);
-        assert_eq!(level("0.11.0"), CheckLevel::Pass);
-        assert_eq!(level("v1.0.0"), CheckLevel::Pass);
-        assert_eq!(level("dev"), CheckLevel::Info);
-    }
-
-    #[test]
-    fn icm_server_check_names_the_fix_the_server_lacks() {
-        let (_, old) = icm_server_check("0.10.59");
-        assert!(old.contains("older than 0.10.60"), "{old}");
-        assert!(old.contains("icm upgrade --apply"), "{old}");
-        let (_, mid) = icm_server_check("0.10.62");
-        assert!(mid.contains("older than 0.10.64"), "{mid}");
     }
 
     // -- icm_server_scope (#2261) --
@@ -1849,18 +1796,6 @@ mod tests {
     }
 
     proptest! {
-        /// The verdict depends only on where the version falls against the two floors.
-        #[test]
-        fn icm_server_check_is_monotonic(a in 0u64..3, b in 0u64..20, c in 0u64..100) {
-            let (level, _) = icm_server_check(&format!("{a}.{b}.{c}"));
-            let expected = if (a, b, c) >= ICM_SERVER_RANKING_FIX {
-                CheckLevel::Pass
-            } else {
-                CheckLevel::Warn
-            };
-            prop_assert_eq!(level, expected);
-        }
-
         /// A 1h TTL passes in any letter case and whatever ENABLE_PROMPT_CACHING_1H holds.
         #[test]
         fn prompt_cache_ttl_1h_always_passes(
