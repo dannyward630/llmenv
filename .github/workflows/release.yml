@@ -357,6 +357,15 @@ jobs:
             found { print }
           ' "${CHANGELOG_FILE}" | sed '/./,$!d' > changelog-notes.txt
 
+          # A missing heading means a changelog that did not roll, so the
+          # placeholder text below would publish false release notes.
+          # shellcheck disable=SC2016
+          if ! awk -v ver="[${VERSION}]" 'index($0, "## " ver) == 1 { found=1 } END { exit !found }' \
+               "${CHANGELOG_FILE}"; then
+            echo "::error::${CHANGELOG_FILE} has no '## [${VERSION}]' section. Roll the changelog for ${VERSION} and tag again."
+            exit 1
+          fi
+
           # Reflow prose paragraphs for readable GitHub release notes (#320).
           if [[ ! -s changelog-notes.txt ]]; then
             echo "Bug fixes or process changes only, no user-facing changes." > changelog-notes.txt

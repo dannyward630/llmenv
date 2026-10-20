@@ -39,7 +39,8 @@ shared-version = true
 # CHANGELOG-N.md so the docs_changelog_in_sync_with_root test passes in the
 # release commit. roll-changelog.sh auto-discovers the active CHANGELOG file
 # and handles both stable and pre-release versions identically.
-pre-release-hook = ["bash", "-c", "${WORKSPACE_ROOT}/scripts/roll-changelog.sh {{version}}; ${WORKSPACE_ROOT}/scripts/sync-changelog-doc.sh"]
+# `&&` stops the hook at a failed roll, so cargo-release makes no release commit.
+pre-release-hook = ["bash", "-c", "${WORKSPACE_ROOT}/scripts/roll-changelog.sh {{version}} && ${WORKSPACE_ROOT}/scripts/sync-changelog-doc.sh"]
 
 # The changelog roll is done entirely in the pre-release-hook script —
 # no declarative replacements needed.

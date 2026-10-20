@@ -27,11 +27,9 @@ set -euo pipefail
 VERSION="${1:?usage: roll-changelog.sh <version>}"
 
 # cargo-release sets DRY_RUN=true for hooks during a dry run. A dry run must
-# not edit the changelog (#2637).
-if [[ "${DRY_RUN:-}" == "true" ]]; then
-  echo "roll-changelog: dry run, no changes" >&2
-  exit 0
-fi
+# not edit the changelog (#2637), but it runs every check, so that a broken
+# changelog fails the preview and not only the real run.
+DRY_RUN="${DRY_RUN:-false}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -56,10 +54,11 @@ echo "roll-changelog: using $CHANGELOG" >&2
 DATE="$(date +%Y-%m-%d)"
 REPO="https://github.com/phaedrus1992/llmenv"
 
-python3 - "$CHANGELOG" "$VERSION" "$DATE" "$REPO" <<'PYEOF'
+python3 - "$CHANGELOG" "$VERSION" "$DATE" "$REPO" "$DRY_RUN" <<'PYEOF'
 import sys, re
 
 changelog_path, version, date, repo = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+dry_run = sys.argv[5] == "true"
 
 with open(changelog_path) as f:
     content = f.read()
@@ -75,6 +74,13 @@ if "## [Unreleased]" not in content:
     sys.exit(1)
 
 # 1. Replace "[Unreleased] - ReleaseDate" with the versioned heading.
+if "## [Unreleased] - ReleaseDate" not in content:
+    print(
+        "roll-changelog: the [Unreleased] heading has no ' - ReleaseDate' suffix. "
+        "Write it as '## [Unreleased] - ReleaseDate'",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 content = content.replace("## [Unreleased] - ReleaseDate", f"## [{version}] - {date}", 1)
 
 # 2. Replace the [Unreleased] compare URL with the versioned one.
@@ -100,6 +106,13 @@ if n == 0:
 # 4. Seed a fresh [Unreleased] compare link below the next-url marker.
 new_link = f"[Unreleased]: {repo}/compare/v{version}...HEAD"
 content = content.replace("<!-- next-url -->", f"<!-- next-url -->\n{new_link}", 1)
+
+if dry_run:
+    print(
+        f"roll-changelog: dry run, {changelog_path} can roll to {version}, no changes",
+        file=sys.stderr,
+    )
+    sys.exit(0)
 
 with open(changelog_path, 'w') as f:
     f.write(content)
