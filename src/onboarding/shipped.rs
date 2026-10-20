@@ -16,11 +16,11 @@ const MANIFEST: &str = include_str!("../../bundles/shipped.yaml");
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ShippedBundle {
-    pub(crate) name: String,
+    name: String,
     /// The default tags that turn the bundle on. Any one of them is enough.
     pub(crate) when: Vec<String>,
     /// One line for the plan summary.
-    pub(crate) purpose: String,
+    purpose: String,
 }
 
 /// The manifest, in its file order.

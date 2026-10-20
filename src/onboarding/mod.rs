@@ -17,10 +17,10 @@ pub(crate) mod tools;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NewFile {
     /// The path relative to the config folder.
-    pub(crate) rel: PathBuf,
-    pub(crate) text: String,
+    rel: PathBuf,
+    text: String,
     /// Create the file with the executable bit, because a skill runs it directly.
-    pub(crate) executable: bool,
+    executable: bool,
 }
 
 /// Whether anything, a link included, is at `path`.
