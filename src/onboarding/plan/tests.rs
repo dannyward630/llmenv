@@ -306,3 +306,11 @@ fn a_plan_up_to_the_size_limit_loads_and_a_larger_one_is_refused() {
     let err = format!("{:#}", Plan::load(&path).unwrap_err());
     assert!(err.contains("reading the plan"), "{err}");
 }
+
+/// A no to one host keeps the other hosts in their plan order.
+#[test]
+fn a_declined_host_keeps_the_order_of_the_rest() {
+    let mut p = Plan::parse("host: {a: {addr: x}, b: {addr: y}, c: {addr: z}}").unwrap();
+    p.remove_items(&BTreeSet::from([0])).unwrap();
+    assert_eq!(p.host_names(), ["b", "c"]);
+}

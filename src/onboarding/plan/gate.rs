@@ -169,10 +169,10 @@ impl Plan {
                 .get_mut(*bundle)
                 .and_then(|b| b.capabilities.get_mut("env"))
                 .and_then(Value::as_mapping_mut)
-                .is_some_and(|env| env.remove(key).is_some()),
+                .is_some_and(|env| env.shift_remove(key).is_some()),
             Loc::Memory(i) => take(&mut self.features.memory, *i),
             Loc::CodebaseMemory(i) => take(&mut self.features.codebase_memory, *i),
-            Loc::Host(key) => self.host.remove(key).is_some(),
+            Loc::Host(key) => self.host.shift_remove(key).is_some(),
         }
     }
 }

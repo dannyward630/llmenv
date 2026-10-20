@@ -31,9 +31,6 @@ struct PlanBundle {
     /// The files come from the shipped bundle of this name (#2787), not from the plan.
     #[serde(default)]
     shipped: bool,
-    /// The capabilities of the shipped `bundle.yaml`, before any no. Set when the plan loads.
-    #[serde(skip)]
-    shipped_capabilities: Option<Mapping>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -255,8 +252,34 @@ impl Plan {
 }
 
 fn encode_capabilities(bundle: &PlanBundle) -> anyhow::Result<String> {
-    serde_yaml::to_string(&bundle.capabilities)
+    serde_yaml::to_string(&without_empty(&bundle.capabilities))
         .with_context(|| format!("encoding bundle.yaml of {}", bundle.name))
+}
+
+/// `caps` without the lists and mappings that are empty, such as a `hooks` list whose every entry
+/// got a no, so the written file holds only real entries. The second level covers
+/// `permissions.allow`.
+fn without_empty(caps: &Mapping) -> Mapping {
+    let is_empty = |v: &Value| {
+        v.as_sequence().is_some_and(Vec::is_empty) || v.as_mapping().is_some_and(Mapping::is_empty)
+    };
+    let mut out = Mapping::new();
+    for (key, value) in caps {
+        let value = match value.as_mapping() {
+            Some(inner) => Value::Mapping(
+                inner
+                    .iter()
+                    .filter(|(_, v)| !is_empty(v))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+            None => value.clone(),
+        };
+        if !is_empty(&value) {
+            out.insert(key.clone(), value);
+        }
+    }
+    out
 }
 
 fn bundle_entry(bundle: &PlanBundle) -> Value {

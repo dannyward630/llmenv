@@ -13,6 +13,11 @@ use super::{Plan, shown};
 /// code or grant tools in ways the gate cannot show, so they are added by hand after setup.
 const PLAN_CAPABILITY_KEYS: [&str; 5] = ["permissions", "hooks", "plugins", "mcp", "lsp"];
 
+/// The capability keys that a shipped bundle may set: the plan keys, and `env`, whose variables
+/// the gate asks about one by one. The shipped files are copies of another repository, so a later
+/// copy that adds a key the gate cannot show fails the tests instead of reaching a user.
+const SHIPPED_CAPABILITY_KEYS: [&str; 6] = ["permissions", "hooks", "plugins", "mcp", "lsp", "env"];
+
 /// The keys of `permissions` that a plan may set. `default_mode` and `preset` change what the
 /// agent may do without a list entry the gate could show, so a plan cannot set them.
 const PLAN_PERMISSION_KEYS: [&str; 3] = ["allow", "ask", "deny"];
@@ -62,7 +67,7 @@ impl Plan {
                 seen.insert(name.clone()),
                 "bundle {name:?} is in the plan twice"
             );
-            check_capabilities(name, &bundle.capabilities)?;
+            check_capabilities(name, &bundle.capabilities, &PLAN_CAPABILITY_KEYS)?;
         }
         string_keys(&self.host, "the plan's `host`")?;
         for (kind, entries) in self.scope.kinds() {
@@ -80,15 +85,30 @@ impl Plan {
     }
 }
 
-fn check_capabilities(name: &str, caps: &serde_yaml::Mapping) -> anyhow::Result<()> {
+/// The same rules for the capabilities of the shipped bundle `name`, with `env` allowed as a
+/// mapping. Every entry then lands in a list or a mapping that the gate asks about.
+pub(super) fn check_shipped(name: &str, caps: &serde_yaml::Mapping) -> anyhow::Result<()> {
+    check_no_tags(&Value::Mapping(caps.clone()), "the shipped bundle")?;
+    check_capabilities(name, caps, &SHIPPED_CAPABILITY_KEYS)?;
+    if let Some(env) = caps.get("env") {
+        ensure!(env.is_mapping(), "bundle {name:?}: `env` must be a mapping");
+    }
+    Ok(())
+}
+
+fn check_capabilities(
+    name: &str,
+    caps: &serde_yaml::Mapping,
+    allowed: &[&str],
+) -> anyhow::Result<()> {
     let place = format!("bundle {name:?} capabilities");
     for key in string_keys(caps, &place)? {
         ensure!(
-            PLAN_CAPABILITY_KEYS.contains(&key),
+            allowed.contains(&key),
             "bundle {name:?}: an onboarding plan cannot set `{}`. Fix: leave it out, and add it to \
              bundle.yaml by hand after setup. Allowed keys: {}",
             shown(key),
-            PLAN_CAPABILITY_KEYS.join(", ")
+            allowed.join(", ")
         );
     }
     // The gate counts the entries of these lists. A list in another shape would count as none,

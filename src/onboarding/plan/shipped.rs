@@ -3,9 +3,9 @@
 
 use std::path::Path;
 
-use anyhow::ensure;
+use anyhow::{Context as _, ensure};
 
-use super::{Plan, PlanBundle, encode_capabilities};
+use super::{Plan, PlanBundle, encode_capabilities, shape};
 use crate::onboarding::{NewFile, shipped};
 
 impl Plan {
@@ -24,8 +24,15 @@ impl Plan {
                 bundle.when = entry.when;
             }
             let capabilities = shipped::capabilities(&bundle.name)?;
-            bundle.capabilities = capabilities.clone();
-            bundle.shipped_capabilities = Some(capabilities);
+            shape::check_shipped(&bundle.name, &capabilities).with_context(|| {
+                format!(
+                    "the shipped bundle {} has an entry that the setup gate cannot ask about. \
+                     This is a defect in llmenv. Fix: leave the bundle out of the plan, and \
+                     report the error",
+                    bundle.name
+                )
+            })?;
+            bundle.capabilities = capabilities;
         }
         Ok(())
     }
@@ -34,7 +41,7 @@ impl Plan {
 /// The files of a shipped bundle under `dir`. `bundle.yaml` keeps the shipped text when every
 /// entry got a yes. After a no, it holds the entries that remain, and its comments are lost.
 pub(super) fn shipped_files(bundle: &PlanBundle, dir: &Path) -> anyhow::Result<Vec<NewFile>> {
-    let unchanged = bundle.shipped_capabilities.as_ref() == Some(&bundle.capabilities);
+    let unchanged = shipped::capabilities(&bundle.name)? == bundle.capabilities;
     shipped::files(&bundle.name)
         .map(|file| {
             let text = if file.path == "bundle.yaml" && !unchanged {
