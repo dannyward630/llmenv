@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+## [3.13.0] - 2026-10-20
+
 3.13.0 adds onboarding from a scan of your repositories, one cleanup command, and support for opencode 2.x.
 It also scopes memory recall to the session's project, hardens the hooks and the codebase-memory guard, and replaces many silent failures with notices that name the cause and the fix.
 
@@ -1355,7 +1357,8 @@ the rc.1 and rc.2 sections below.
   cleans up the corrupted directory, and forces a fresh clone on retry (#537)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.12.2...HEAD
+[Unreleased]: https://github.com/phaedrus1992/llmenv/compare/v3.13.0...HEAD
+[3.13.0]: https://github.com/phaedrus1992/llmenv/compare/v3.12.2...v3.13.0
 [3.12.2]: https://github.com/phaedrus1992/llmenv/compare/v3.12.1...v3.12.2
 [3.12.1]: https://github.com/phaedrus1992/llmenv/compare/v3.12.0...v3.12.1
 [3.12.0]: https://github.com/phaedrus1992/llmenv/compare/v3.11.2...v3.12.0
