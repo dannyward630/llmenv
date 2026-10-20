@@ -14,6 +14,8 @@ ignores:
   - "tests/fixtures/"
   - "docs/design/"
   - "docs/superpowers/"
+  # Copies of another repository, kept byte for byte so a re-sync diff stays exact (bundles/README.md)
+  - "bundles/*/**"
 
 config:
   # Line length
