@@ -140,6 +140,7 @@ proptest = "=1.11.0"
 criterion = { version = "=0.8.2", features = ["html_reports"] }
 wiremock = "=0.6.5"
 filetime = "=0.2.29"
+regex = "=1.13.1"
 # Enables llmenv-util's shared proptest generators (#1281) for this crate's
 # own tests, without pulling proptest into llmenv-util's default (non-test)
 # dependency graph.

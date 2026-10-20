@@ -1,0 +1,24 @@
+# Capability fragment for the `mac-dev` bundle. Fires for the `macos` tag.
+#
+# Read-only Mach-O/signing inspectors are pre-allowed. Mutating tools
+# (install_name_tool, codesign -s, lipo -create) stay behind the normal
+# permission prompt on purpose — they rewrite binaries.
+
+permissions:
+  allow:
+    - { tool: Bash, pattern: "xcrun otool *" }
+    - { tool: Bash, pattern: "nm *" }
+    - { tool: Bash, pattern: "file *" }
+    - { tool: Bash, pattern: "dyld_info *" }
+    - { tool: Bash, pattern: "xcrun dyld_info *" }
+    - { tool: Bash, pattern: "lipo -info *" }
+    - { tool: Bash, pattern: "lipo -archs *" }
+    - { tool: Bash, pattern: "lipo -detailed_info *" }
+    - { tool: Bash, pattern: "codesign -d*" }
+    - { tool: Bash, pattern: "codesign -v*" }
+    - { tool: Bash, pattern: "codesign --verify*" }
+    - { tool: Bash, pattern: "codesign --display*" }
+    - { tool: Bash, pattern: "spctl -a*" }
+    - { tool: Bash, pattern: "vtool -show*" }
+    - { tool: Bash, pattern: "xcrun vtool -show*" }
+    - { tool: Bash, pattern: "security find-identity *" }

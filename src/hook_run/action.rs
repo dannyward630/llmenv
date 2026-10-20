@@ -15,7 +15,7 @@ pub(crate) use records::split_recall_records;
 #[cfg(test)]
 use records::{MAX_TOPIC_CHARS, is_record_start};
 use records::{SCOPE_CONTEXT_TOPIC, without_unscoped_records};
-use response::strip_advisory;
+pub(crate) use response::strip_advisory;
 
 /// Internal: parse an `<!-- llmenv-<prefix>: X -->` HTML comment marker.
 fn parse_marker<'a>(chunk: &'a str, prefix: &'a str) -> Option<&'a str> {

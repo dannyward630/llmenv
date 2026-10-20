@@ -1,0 +1,27 @@
+# Capability fragment for the `go-dev` bundle. Fires for the `lang-go` tag.
+
+env:
+  GOFLAGS: "-mod=readonly"
+  # Never silently fetch a newer toolchain mid-build — pin what's installed.
+  GOTOOLCHAIN: "local"
+
+permissions:
+  allow:
+    - { tool: Bash, pattern: "go *" }
+    - { tool: Bash, pattern: "gofmt *" }
+    - { tool: Bash, pattern: "goimports *" }
+    - { tool: Bash, pattern: "staticcheck *" }
+    - { tool: Bash, pattern: "golangci-lint *" }
+
+hooks:
+  # Auto-format on every Go edit, then vet the package for correctness issues
+  # gofmt can't catch. Quiet + head-truncated so the hook doesn't spam
+  # terminal output; warnings still surface to the agent. Matcher is a
+  # tool-name regex (Claude Code semantics — file globs never match); the
+  # edited file path comes from the hook's stdin JSON.
+  - event: PostToolUse
+    matcher: "Edit|Write|MultiEdit"
+    handler:
+      type: command
+      command: |
+        f=$(jq -r '.tool_input.file_path // empty') || { echo 'hook: jq failed, so the formatter did not run.' >&2; exit 1; }; case "$f" in *.go) gofmt -w "$f" && cd "$(dirname "$f")" && go vet ./... 2>&1 | head -20;; esac

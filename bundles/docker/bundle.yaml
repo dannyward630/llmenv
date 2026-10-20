@@ -1,0 +1,16 @@
+# Capability fragment for the `docker` bundle. Fires for the `docker` tag.
+#
+# Read-only docker diagnostics pre-allowed. Mutating operations (build, push,
+# run with mounts, exec, compose up) stay prompt-gated.
+
+permissions:
+  allow:
+    - { tool: Bash, pattern: "docker images *" }
+    - { tool: Bash, pattern: "docker ps *" }
+    - { tool: Bash, pattern: "docker inspect *" }
+    - { tool: Bash, pattern: "docker logs *" }
+    - { tool: Bash, pattern: "docker stats *" }
+    - { tool: Bash, pattern: "docker info *" }
+    - { tool: Bash, pattern: "docker version" }
+    - { tool: Bash, pattern: "docker network ls *" }
+    - { tool: Bash, pattern: "docker volume ls *" }
