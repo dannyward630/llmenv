@@ -118,12 +118,12 @@ fn check(plan: &Plan, old: &str, config_dir: &Path) -> anyhow::Result<()> {
     let (new_text, _) = splice(old, &plan.additions())?;
     let tmp = tempfile::tempdir().context("making a folder to check the plan")?;
     std::fs::write(tmp.path().join("config.yaml"), &new_text).context("writing the check copy")?;
-    for (rel, text) in plan.files()? {
-        let path = tmp.path().join(&rel);
+    for file in plan.files()? {
+        let path = tmp.path().join(&file.rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("making the check copy")?;
         }
-        std::fs::write(&path, text).context("writing the check copy")?;
+        std::fs::write(&path, file.text).context("writing the check copy")?;
     }
     let config = Config::load(&tmp.path().join("config.yaml"))
         .context("the config with the plan added does not load")?;
@@ -155,8 +155,8 @@ fn print_plan(plan: &Plan, out: &mut dyn Write) -> anyhow::Result<()> {
     for line in plan.bundle_lines().into_iter().chain(plan.scope_lines()) {
         writeln!(out, "  {line}")?;
     }
-    for (rel, _) in plan.files()? {
-        writeln!(out, "  file {}", rel.display())?;
+    for file in plan.files()? {
+        writeln!(out, "  file {}", file.rel.display())?;
     }
     let items = plan.gated_items()?.len();
     writeln!(
@@ -215,9 +215,6 @@ fn write_all(
          again",
         config_path.display()
     );
-    let bundles_dir = config_dir.join("bundles");
-    std::fs::create_dir_all(&bundles_dir)
-        .with_context(|| format!("making {}", bundles_dir.display()))?;
     let mut made = Vec::new();
     let result = make_files(plan, config_dir, &mut made).and_then(|()| {
         llmenv_paths::write_user_file_atomic(&config_path, new_text.as_bytes())
@@ -233,30 +230,71 @@ fn write_all(
     Ok(())
 }
 
-/// Make each bundle folder with `create_dir`, which fails on anything already at the path, and
-/// each file with `create_new`. Each path made is pushed to `made`.
+/// Make each bundle folder and each folder in it with `create_dir`, which fails on anything
+/// already at the path, and each file with `create_new`. Each path made is pushed to `made`.
 fn make_files(plan: &Plan, config_dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    for name in plan.bundle_names() {
-        let dir = config_dir.join("bundles").join(name);
-        std::fs::create_dir(&dir).with_context(|| {
-            format!(
-                "making {}; llmenv never writes into a folder it did not make",
-                dir.display()
-            )
-        })?;
-        made.push(dir);
+    let bundles_dir = config_dir.join("bundles");
+    if !path_exists(&bundles_dir)? {
+        make_dir(&bundles_dir, made)?;
     }
-    for (rel, text) in plan.files()? {
-        let path = config_dir.join(rel);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+    for name in plan.bundle_names() {
+        make_dir(&config_dir.join("bundles").join(name), made)?;
+    }
+    for file in plan.files()? {
+        let path = config_dir.join(&file.rel);
+        for folder in new_folders(&file.rel) {
+            let dir = config_dir.join(folder);
+            if !made.contains(&dir) {
+                make_dir(&dir, made)?;
+            }
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        if file.executable {
+            set_executable(&mut options);
+        }
+        let mut handle = options
             .open(&path)
             .with_context(|| format!("creating {}", path.display()))?;
         made.push(path.clone());
-        file.write_all(text.as_bytes())
+        handle
+            .write_all(file.text.as_bytes())
             .with_context(|| format!("writing {}", path.display()))?;
     }
+    Ok(())
+}
+
+/// The folders between the bundle folder and the file at `rel`, outermost first. `rel` starts
+/// with `bundles/<name>`, and that folder is made before any file.
+fn new_folders(rel: &Path) -> Vec<&Path> {
+    let bundle_dir: PathBuf = rel.iter().take(2).collect();
+    let mut folders: Vec<&Path> = rel
+        .ancestors()
+        .skip(1)
+        .take_while(|a| *a != bundle_dir)
+        .collect();
+    folders.reverse();
+    folders
+}
+
+#[cfg(unix)]
+fn set_executable(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.mode(0o755);
+}
+
+/// A file off Unix has no executable bit, so there is nothing to set.
+#[cfg(not(unix))]
+fn set_executable(_options: &mut std::fs::OpenOptions) {}
+
+fn make_dir(dir: &Path, made: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    std::fs::create_dir(dir).with_context(|| {
+        format!(
+            "making {}; llmenv never writes into a folder it did not make",
+            dir.display()
+        )
+    })?;
+    made.push(dir.to_path_buf());
     Ok(())
 }
 

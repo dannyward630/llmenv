@@ -1,5 +1,6 @@
 //! The plan entries that need a yes (Q4 of docs/design/issue-2773-onboarding.md): each
-//! permission allow, hook, MCP server, language server, plugin, memory feature entry, and host.
+//! permission allow, hook, MCP server, language server, plugin, environment variable of a
+//! shipped bundle, memory feature entry, and host.
 
 use std::collections::BTreeSet;
 
@@ -24,6 +25,12 @@ enum Loc {
         bundle: usize,
         list: usize,
         index: usize,
+    },
+    /// A plan bundle cannot set `env`, so only a shipped bundle has one. A variable such as
+    /// `RUSTC_WRAPPER` breaks a build when its tool is absent, so each one gets a question.
+    Env {
+        bundle: usize,
+        key: Value,
     },
     Memory(usize),
     CodebaseMemory(usize),
@@ -56,6 +63,19 @@ impl Plan {
                     value,
                 }));
             }
+            let env = bundle.capabilities.get("env").and_then(Value::as_mapping);
+            out.extend(env.into_iter().flatten().map(|(key, value)| {
+                let mut entry = Mapping::new();
+                entry.insert(key.clone(), value.clone());
+                Entry {
+                    loc: Loc::Env {
+                        bundle: b,
+                        key: key.clone(),
+                    },
+                    label: format!("environment variable in bundle {}", bundle.name),
+                    value: Value::Mapping(entry),
+                }
+            }));
         }
         out.extend(
             self.features
@@ -144,9 +164,15 @@ impl Plan {
                     .and_then(|b| gated_list_mut(&mut b.capabilities, key, *sub))
                     .is_some_and(|entries| take(entries, *index))
             }
+            Loc::Env { bundle, key } => self
+                .bundles
+                .get_mut(*bundle)
+                .and_then(|b| b.capabilities.get_mut("env"))
+                .and_then(Value::as_mapping_mut)
+                .is_some_and(|env| env.shift_remove(key).is_some()),
             Loc::Memory(i) => take(&mut self.features.memory, *i),
             Loc::CodebaseMemory(i) => take(&mut self.features.codebase_memory, *i),
-            Loc::Host(key) => self.host.remove(key).is_some(),
+            Loc::Host(key) => self.host.shift_remove(key).is_some(),
         }
     }
 }

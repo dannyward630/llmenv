@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
 - `llmenv doctor` prints a `Memory recall:` section with the failure rate of the last 200 adaptive recall calls. It warns above 20% failed and says the memory server is stuck when the last 10 calls all failed, with no network call. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#doctor) (#2919) [feat:doctor]
 - `llmenv setup --apply PLAN` applies an onboarding plan. It asks for a yes for the plan, for each permission allow, hook, MCP server, and feature entry, and for the `config.yaml` lines. It needs a terminal, creates only absent files, and adds to `config.yaml` without re-serializing it. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---apply) (#2788) [feat:setup]
+- llmenv ships bundles for Rust, Python, Go, C and C++, Objective-C, PowerShell, web, macOS, Docker, Kubernetes, and CMake. `llmenv setup --bundles` lists them, and an onboarding plan adds one with `shipped: true`; each allow, hook, and environment variable in it still needs a yes. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---bundles) (#2787) [feat:bundles]
 
 ### Changed
 
@@ -192,6 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A dotfiles symlink at `settings.json`, `.claude.json`, `plugins/installed_plugins.json`, or `config.yaml` stays a symlink when llmenv writes the file. llmenv writes the link target and leaves its folder's permissions alone. Before, the write replaced the link with a plain file and left the linked file stale. See [troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-config-file-is-a-symlink-to-a-dotfiles-repo) (#2883) [fix:adapter]
 - `llmenv upgrade` stops a new binary that does not answer `--version` in time, then restores the backup with a message. Before, the upgrade blocked with no output (#2885) [fix:upgrade]
 - Network and SSID scope detection stop a `route`, `arp`, `networksetup`, or `ipconfig` call that does not answer in time, and count it as no reading. Before, a stuck call blocked the shell prompt and `llmenv doctor` (#2885) [fix:scope]
+- A skill or bundle script that llmenv renders keeps its executable bit, so a skill that runs its script directly no longer fails with permission denied (#2967) [fix:materialize]
 
 ### Security
 

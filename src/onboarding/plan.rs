@@ -4,12 +4,13 @@
 //! Design: docs/design/issue-2773-onboarding.md ("The plan file and `llmenv setup --apply`").
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context as _;
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
+use super::NewFile;
 use super::config_splice::Addition;
 
 /// A plan holds rules text and a few entries. 1 MiB is far above any real plan, and it stops a
@@ -27,6 +28,9 @@ struct PlanBundle {
     agents_md: String,
     #[serde(default)]
     capabilities: Mapping,
+    /// The files come from the shipped bundle of this name (#2787), not from the plan.
+    #[serde(default)]
+    shipped: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -93,8 +97,9 @@ impl Plan {
     fn parse(text: &str) -> anyhow::Result<Self> {
         let raw: Value = serde_yaml::from_str(text)?;
         shape::check_no_tags(&raw, "the plan")?;
-        let plan: Self = serde_yaml::from_value(raw)?;
+        let mut plan: Self = serde_yaml::from_value(raw)?;
         plan.check_shape()?;
+        plan.resolve_shipped()?;
         Ok(plan)
     }
 
@@ -165,7 +170,14 @@ impl Plan {
     pub(crate) fn bundle_lines(&self) -> Vec<String> {
         self.bundles
             .iter()
-            .map(|b| format!("bundle {} (fires on: {})", b.name, shown_list(&b.when)))
+            .map(|b| {
+                let kind = if b.shipped {
+                    "shipped bundle"
+                } else {
+                    "bundle"
+                };
+                format!("{kind} {} (fires on: {})", b.name, shown_list(&b.when))
+            })
             .collect()
     }
 
@@ -202,22 +214,32 @@ impl Plan {
             .collect()
     }
 
-    /// The files to create, as paths relative to the config folder, with their text: the
-    /// `bundle.yaml` of a bundle with capabilities, and its `AGENTS.md`.
+    /// The files to create, with paths relative to the config folder: the `bundle.yaml` of a
+    /// bundle with capabilities and its `AGENTS.md`, or each file of a shipped bundle.
     ///
     /// # Errors
     /// The capabilities of a bundle cannot be encoded as YAML.
-    pub(crate) fn files(&self) -> anyhow::Result<Vec<(PathBuf, String)>> {
+    pub(crate) fn files(&self) -> anyhow::Result<Vec<NewFile>> {
         let mut out = Vec::new();
         for bundle in &self.bundles {
             let dir = Path::new("bundles").join(&bundle.name);
+            if bundle.shipped {
+                out.extend(shipped_files(bundle, &dir)?);
+                continue;
+            }
             if !bundle.capabilities.is_empty() {
-                let text = serde_yaml::to_string(&bundle.capabilities)
-                    .with_context(|| format!("encoding bundle.yaml of {}", bundle.name))?;
-                out.push((dir.join("bundle.yaml"), text));
+                out.push(NewFile {
+                    rel: dir.join("bundle.yaml"),
+                    text: encode_capabilities(bundle)?,
+                    executable: false,
+                });
             }
             if !bundle.agents_md.is_empty() {
-                out.push((dir.join("AGENTS.md"), bundle.agents_md.clone()));
+                out.push(NewFile {
+                    rel: dir.join("AGENTS.md"),
+                    text: bundle.agents_md.clone(),
+                    executable: false,
+                });
             }
         }
         Ok(out)
@@ -227,6 +249,37 @@ impl Plan {
     pub(crate) fn bundle_names(&self) -> Vec<String> {
         self.bundles.iter().map(|b| b.name.clone()).collect()
     }
+}
+
+fn encode_capabilities(bundle: &PlanBundle) -> anyhow::Result<String> {
+    serde_yaml::to_string(&without_empty(&bundle.capabilities))
+        .with_context(|| format!("encoding bundle.yaml of {}", bundle.name))
+}
+
+/// `caps` without the lists and mappings that are empty, such as a `hooks` list whose every entry
+/// got a no, so the written file holds only real entries. The second level covers
+/// `permissions.allow`.
+fn without_empty(caps: &Mapping) -> Mapping {
+    let is_empty = |v: &Value| {
+        v.as_sequence().is_some_and(Vec::is_empty) || v.as_mapping().is_some_and(Mapping::is_empty)
+    };
+    let mut out = Mapping::new();
+    for (key, value) in caps {
+        let value = match value.as_mapping() {
+            Some(inner) => Value::Mapping(
+                inner
+                    .iter()
+                    .filter(|(_, v)| !is_empty(v))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+            None => value.clone(),
+        };
+        if !is_empty(&value) {
+            out.insert(key.clone(), value);
+        }
+    }
+    out
 }
 
 fn bundle_entry(bundle: &PlanBundle) -> Value {
@@ -264,6 +317,9 @@ fn shown_list(items: &[String]) -> String {
 
 mod gate;
 mod shape;
+mod shipped;
+
+use shipped::shipped_files;
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::panic, reason = "test code")]

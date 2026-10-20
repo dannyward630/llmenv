@@ -504,7 +504,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 crate::paths::write_owner_only(&dest, rendered.as_bytes())?;
             } else {
                 let bytes = crate::paths::bounded::asset(abs)?;
-                crate::paths::write_owner_only(&dest, &bytes)?;
+                crate::paths::write_owner_only_like(&dest, &bytes, abs)?;
             }
             owned.push(rel.clone());
         }

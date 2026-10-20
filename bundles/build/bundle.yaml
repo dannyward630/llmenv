@@ -1,0 +1,3 @@
+# Capability fragment for the `build` bundle. Fires for `lang-c`, `lang-cpp`,
+# and `macos` tags. Currently carries only rules (cmake.md); no permissions,
+# hooks, or env vars needed. This file exists for structural consistency.

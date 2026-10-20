@@ -68,9 +68,9 @@ fn a_declined_item_is_removed_from_the_files_and_the_additions() {
     let files = p.files().unwrap();
     let bundle_yaml = &files
         .iter()
-        .find(|(f, _)| f.ends_with("bundle.yaml"))
+        .find(|f| f.rel.ends_with("bundle.yaml"))
         .unwrap()
-        .1;
+        .text;
     assert!(
         !bundle_yaml.contains("cargo *") && bundle_yaml.contains("rg *"),
         "{bundle_yaml}"
@@ -113,7 +113,7 @@ fn a_host_is_a_gated_item_and_a_no_removes_it() {
 #[test]
 fn files_live_under_the_bundle_folder() {
     let files = plan().files().unwrap();
-    let paths: Vec<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
+    let paths: Vec<PathBuf> = files.iter().map(|f| f.rel.clone()).collect();
     assert_eq!(
         paths,
         [
@@ -305,4 +305,12 @@ fn a_plan_up_to_the_size_limit_loads_and_a_larger_one_is_refused() {
     std::fs::write(&path, plan_of(1024 * 1024)).unwrap();
     let err = format!("{:#}", Plan::load(&path).unwrap_err());
     assert!(err.contains("reading the plan"), "{err}");
+}
+
+/// A no to one host keeps the other hosts in their plan order.
+#[test]
+fn a_declined_host_keeps_the_order_of_the_rest() {
+    let mut p = Plan::parse("host: {a: {addr: x}, b: {addr: y}, c: {addr: z}}").unwrap();
+    p.remove_items(&BTreeSet::from([0])).unwrap();
+    assert_eq!(p.host_names(), ["b", "c"]);
 }
