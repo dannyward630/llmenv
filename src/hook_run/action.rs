@@ -14,7 +14,7 @@ pub(crate) use records::split_recall_records;
 #[cfg(test)]
 use records::{MAX_TOPIC_CHARS, is_record_start};
 use records::{SCOPE_CONTEXT_TOPIC, without_unscoped_records};
-use response::strip_advisory;
+pub(crate) use response::strip_advisory;
 
 /// The keyword prefix under which tag-scoped memory is stored and recalled.
 /// A memory written for tag `work-vpn` carries keyword `llmenv-tag:work-vpn`;

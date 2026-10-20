@@ -312,3 +312,25 @@ fn an_agent_call_without_an_id_or_a_prompt_is_not_queued() {
     let mut ledger = store.load("s1").unwrap();
     assert!(ledger.take_subagent("Explore", unix_now()).is_none());
 }
+
+/// An error with no distinctive token cannot pass the gate, so no recall runs (#2921).
+#[tokio::test]
+async fn a_failure_with_no_distinctive_token_sends_no_recall() {
+    let server = server_with(&[]).await;
+    let f = fixture(&server);
+    let payload = json!({"tool_name": "Bash", "error": "Exit code 1\nerror: failed with 2"});
+    let out = tool_failure(&ctx(&f, &payload)).await.unwrap().text();
+    assert!(out.is_empty(), "{out}");
+    let asked = server.received_requests().await.unwrap_or_default();
+    assert!(
+        asked
+            .iter()
+            .all(|r| !String::from_utf8_lossy(&r.body).contains("icm_memory_recall")),
+        "no recall request"
+    );
+    assert_eq!(
+        f.store.load("s1").unwrap().errors().len(),
+        1,
+        "the error is still recorded"
+    );
+}

@@ -5,14 +5,13 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::Context;
 use serde::Deserialize;
 
 use super::{
     AdaptiveCtx, FAILURE_BUDGET_BYTES, FAILURE_LIMIT, FANOUT_LIMIT, Outcome, RECALL_STATE_UNSAVED,
     RESOLVED_TOPIC, agent_key, note_skipped, note_unless_saved, query, report,
 };
-use crate::hook_run::action::{Action, RecallQuery};
+use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::recall::RecallBudget;
 use crate::hook_run::relevance;
@@ -56,51 +55,48 @@ pub(super) fn is_generic(error: &str) -> bool {
     GENERIC_MARKERS.iter().any(|marker| first.contains(marker))
 }
 
-/// Recalls `query` for a failure, and keeps only the memories that share a distinctive token
-/// with `error`. `None` means no recall ran.
+/// Recalls `query` for a failure, and keeps only the memories that share a token in `wanted`.
+/// `None` means no recall ran.
 ///
 /// ICM normalizes its score per query, so the best of an unrelated set also scores near 1.0
 /// and cannot gate the injection. A raw score is requested upstream (rtk-ai/icm#521).
 async fn recall(
     client: &McpHttpClient,
     query: Option<RecallQuery>,
-    error: &str,
+    wanted: &BTreeSet<String>,
 ) -> Option<anyhow::Result<String>> {
     let action = Action::RecallQuery(query?);
     let mut args = action.arguments("", "");
     args["format"] = serde_json::json!("json");
     let reply = client.call_tool(action.tool_name(), args).await;
-    // The capped query text without the tool name: "bash" would tie every shell note to the
-    // failure, and a long log would tie almost anything.
-    let error = crate::hook_run::relevance::error_query("", error);
-    Some(reply.and_then(|body| related_records(&body, &error)))
+    Some(reply.map(|body| related_records(&body, wanted)))
 }
 
-/// The memories of a JSON recall reply that share a distinctive token with `error`, as
-/// `[topic] summary` records.
-///
-/// # Errors
-/// Fails when the reply does not start with a JSON list of memories.
-fn related_records(body: &str, error: &str) -> anyhow::Result<String> {
+/// The memories of a recall reply that share a token in `wanted`, as `[topic] summary`
+/// records. A JSON reply is matched on the summary and the keywords. ICM before 0.11.3 ignores
+/// `format` and answers in text, which has no keywords, so a text reply is matched on each
+/// record's text.
+fn related_records(body: &str, wanted: &BTreeSet<String>) -> String {
+    let shares = |text: &str| !distinctive_tokens(text).is_disjoint(wanted);
     // Read the first JSON value only, so a note that icm appends after the list is ignored.
-    let memories: Vec<Memory> = serde_json::Deserializer::from_str(body.trim())
-        .into_iter()
-        .next()
-        .context("the reply is empty")?
-        .with_context(|| {
-            let start: String = body.chars().take(80).collect();
-            format!("the failure recall reply is not a JSON list of memories: {start:?}")
-        })?;
-    let wanted = distinctive_tokens(error);
-    let records: Vec<String> = memories
-        .iter()
-        .filter(|m| {
-            let text = format!("{} {}", m.summary, m.keywords.join(" "));
-            !distinctive_tokens(&text).is_disjoint(&wanted)
-        })
-        .map(|m| format!("[{}] {}", m.topic, m.summary))
-        .collect();
-    Ok(records.join("\n"))
+    let first = serde_json::Deserializer::from_str(body.trim())
+        .into_iter::<Vec<Memory>>()
+        .next();
+    let records: Vec<String> = if let Some(Ok(memories)) = first {
+        memories
+            .iter()
+            .filter(|m| shares(&format!("{} {}", m.summary, m.keywords.join(" "))))
+            .map(|m| format!("[{}] {}", m.topic, m.summary))
+            .collect()
+    } else {
+        tracing::debug!("the failure recall reply is not JSON; matching its text records");
+        let text = crate::hook_run::action::strip_advisory(body);
+        split_recall_records(&text)
+            .into_iter()
+            .filter(|r| shares(r))
+            .collect()
+    };
+    records.join("\n")
 }
 
 /// The lowercase tokens of `text` that can tie a memory to a failure: a word of four or more
@@ -147,6 +143,13 @@ pub(in crate::hook_run) async fn tool_failure(
     if is_generic(error) {
         return Ok(crate::hook_run::HookText::default());
     }
+    // The capped query text without the tool name: "bash" would tie every shell note to the
+    // failure, and a long log would tie almost anything. With no token, no memory can pass.
+    let wanted = distinctive_tokens(&relevance::error_query("", error));
+    if wanted.is_empty() {
+        tracing::debug!("tool_failure: the error names no distinctive token, so no recall runs");
+        return Ok(crate::hook_run::HookText::default());
+    }
     let (key, record) = agent_key(ctx.payload);
     let sent = ledger.sent_for(&key);
     let text = relevance::error_query(tool, error);
@@ -167,8 +170,8 @@ pub(in crate::hook_run) async fn tool_failure(
     });
     // The all-projects recall is not run here: it injected other projects' notes (#2910).
     let (own, fixes) = tokio::join!(
-        recall(ctx.client, scoped, error),
-        recall(ctx.client, resolved, error),
+        recall(ctx.client, scoped, &wanted),
+        recall(ctx.client, resolved, &wanted),
     );
     let mut outcome = Outcome::default();
     outcome.push(own);
@@ -188,11 +191,14 @@ pub(in crate::hook_run) async fn tool_failure(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use proptest::prelude::*;
 
     use super::{distinctive_tokens, is_generic, related_records};
+
+    fn rel(body: &str, error: &str) -> String {
+        related_records(body, &distinctive_tokens(error))
+    }
 
     fn reply(items: &[(&str, &str, &[&str])]) -> String {
         let list: Vec<serde_json::Value> = items
@@ -217,31 +223,37 @@ mod tests {
             ("b", "pin mcp below 2", &["request_ctx"]),
             ("c", "the E0063 fix", &[]),
         ]);
-        let out = related_records(&body, "error[E0063]: missing request_ctx").unwrap();
+        let out = rel(&body, "error[E0063]: missing request_ctx");
         assert_eq!(out, "[b] pin mcp below 2\n[c] the E0063 fix");
     }
 
     #[test]
     fn only_stop_words_in_common_is_no_relation() {
         let body = reply(&[("a", "the command failed with an error", &["error"])]);
-        assert_eq!(related_records(&body, "Error: command failed").unwrap(), "");
+        assert_eq!(rel(&body, "Error: command failed"), "");
     }
 
     #[test]
     fn an_empty_list_and_a_trailing_note_are_read() {
-        assert_eq!(related_records("[]", "boom").unwrap(), "");
+        assert_eq!(rel("[]", "boom"), "");
         let body = format!(
             "{}\n\n[ICM: 9 tool calls since last store.]",
             reply(&[("a", "boom fix", &[])])
         );
-        assert_eq!(related_records(&body, "boom").unwrap(), "[a] boom fix");
+        assert_eq!(rel(&body, "boom"), "[a] boom fix");
     }
 
+    /// ICM before 0.11.3 ignores `format` and answers in text, so the text records are matched.
     #[test]
-    fn a_text_reply_is_an_error_that_names_the_reply() {
-        let err = related_records("[errors-resolved] a note", "boom").unwrap_err();
-        assert!(format!("{err:#}").contains("not a JSON list"), "{err:#}");
-        assert!(related_records("", "boom").is_err());
+    fn a_text_reply_from_an_older_icm_is_matched_on_its_records() {
+        let body = "[errors-resolved] pin mcp for request_ctx\n[other] Semgrep notes\n\n\
+                    [ICM: 9 tool calls since last store. Consider saving request_ctx]";
+        assert_eq!(
+            rel(body, "ImportError request_ctx"),
+            "[errors-resolved] pin mcp for request_ctx"
+        );
+        assert_eq!(rel("", "boom"), "");
+        assert_eq!(rel("No memories found.", "boom"), "");
     }
 
     proptest! {
@@ -263,7 +275,7 @@ mod tests {
         #[test]
         fn a_memory_that_quotes_the_error_is_kept(error in "[a-zA-Z0-9_ :]{0,60}") {
             let body = reply(&[("t", &error, &[])]);
-            let out = related_records(&body, &error).unwrap();
+            let out = rel(&body, &error);
             prop_assert_eq!(out.is_empty(), distinctive_tokens(&error).is_empty());
         }
     }
