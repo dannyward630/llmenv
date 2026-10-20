@@ -962,6 +962,7 @@ or to re-authenticate.
 llmenv setup [PATH] [--repo URL] [--no-launch] [--rescan]
 llmenv setup --scan ROOT...
 llmenv setup --tools
+llmenv setup --bundles
 llmenv setup --apply PLAN
 ```
 
@@ -1028,6 +1029,20 @@ The report reads only absolute `PATH` folders, makes no network call, and instal
 A binary counts as found only when the current user can run it.
 A script install downloads the script and prints the command to run it, so you read the script before you run it.
 
+### `setup --bundles`
+
+(added in v3.13.0)
+
+`--bundles` prints the bundles that ship in llmenv, as JSON.
+Each bundle has its name, its default `when` tags, a one-line purpose, and its files.
+The shipped bundles cover languages: Rust, Python, Go, C and C++, Objective-C, PowerShell, web, and TypeScript.
+They also cover environments: macOS, Docker, Kubernetes, and CMake builds.
+It writes nothing.
+
+A plan adds a shipped bundle with `shipped: true` (see `setup --apply`).
+`--apply` copies its files into `bundles/<name>/` in the config folder.
+A later llmenv release does not change the copy.
+
 ### `setup --apply`
 
 (added in v3.13.0)
@@ -1041,6 +1056,11 @@ A plan adds new bundles, each with its `AGENTS.md` text and its `bundle.yaml` ca
 It also adds `features.memory`, `features.codebase_memory`, `host`, and `scope` entries.
 A plan bundle may set only `permissions` (its `allow`, `ask`, and `deny` lists), `hooks`, `plugins`, `mcp`, and `lsp`.
 Add other keys, such as `env` or `skills`, by hand after setup.
+
+(added in v3.13.0) A plan bundle with `shipped: true` takes its files from the shipped bundle of that name (see `setup --bundles`).
+It sets only `name`, `shipped`, and optionally `when`, which defaults to the shipped tags.
+Its `bundle.yaml` can set `env`, because llmenv ships and tests it, and each variable gets a question.
+After a no, `bundle.yaml` is written from the entries that remain, and its comments are lost.
 Design: [`docs/design/issue-2773-onboarding.md`](https://github.com/phaedrus1992/llmenv/blob/main/docs/design/issue-2773-onboarding.md).
 
 `--apply` needs a terminal, so you run it yourself in a terminal window.
@@ -1058,6 +1078,7 @@ It then asks, with no as the default answer:
 1. Apply this plan?
 2. Allow it? This question comes once for each gated entry.
    The gated entries are each permission allow, hook, MCP server, language server, plugin, feature entry, and host.
+   Each environment variable of a shipped bundle is a gated entry too.
    The entry is shown in full, and an entry that gets a no is left out.
 3. Add these lines to `config.yaml`? The lines are shown as a diff. A no writes nothing.
 

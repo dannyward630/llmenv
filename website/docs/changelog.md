@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - At session start, llmenv adds a one-line hint, at most once a UTC day, when `state/tmp` holds entries older than the cache retention. The hint gives the count, the size, and `llmenv clean` (#2815) [feat:hooks]
 - A resume after the prompt cache expired shows you a one-line notice when the cache rewrite costs at least 0.50 USD. The agent does not see it. See [configuration](https://phaedrus1992.github.io/llmenv/docs/configuration) (#2496) [feat:hooks]
 - `llmenv setup --apply PLAN` applies an onboarding plan. It asks for a yes for the plan, for each permission allow, hook, MCP server, and feature entry, and for the `config.yaml` lines. It needs a terminal, creates only absent files, and adds to `config.yaml` without re-serializing it. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---apply) (#2788) [feat:setup]
+- llmenv ships bundles for Rust, Python, Go, C and C++, Objective-C, PowerShell, web, macOS, Docker, Kubernetes, and CMake. `llmenv setup --bundles` lists them, and an onboarding plan adds one with `shipped: true`; each allow, hook, and environment variable in it still needs a yes. See [commands](https://phaedrus1992.github.io/llmenv/docs/commands#setup---bundles) (#2787) [feat:bundles]
 
 ### Changed
 

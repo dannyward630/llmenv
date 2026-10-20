@@ -104,10 +104,10 @@ A rule is personal when it names one of those.
   A templating layer is speculative until a rule cannot be split without it.
 - Each shipped component carries four fields: a name, a scope (its tags), a one-line purpose, and a switch.
   The switch is the tag that enables it in a scope.
+  The implementation keeps three fields: any tag in `when` is a switch (see "Shipped bundles").
 
 A CI check fails when a shipped bundle contains a personal pattern.
-The pattern list is a file in the repository.
-This check is a follow-up issue.
+The pattern list is a file in the repository: `bundles/personal-patterns.txt` (#2787).
 
 ### Q4. Trust
 
@@ -278,6 +278,58 @@ On a configured machine, `llmenv setup` offers a merge as the default choice and
 The merge keeps every file, refreshes the skill and its state, and hands off to the engine.
 The skill then builds a plan, and `--apply` skips existing bundles and files as above.
 After a write, `--apply` runs `llmenv validate`, then `llmenv regenerate`.
+
+## Shipped bundles (#2787)
+
+This section was added during implementation.
+
+### Where they live
+
+The owner chose to embed the bundles in the binary (decision on #2787).
+The language and environment bundles of `phaedrus1992/my-llmenv` are copied, unchanged, into `bundles/` at the repository root.
+`bundles/README.md` records the source commit, so a later copy can diff against it.
+The files stay byte for byte, so markdownlint skips the bundle folders.
+
+`src/onboarding/shipped/files.rs` embeds each file with `include_str!`, with a flag for the executable bit.
+A skill script that runs directly, such as `check-arc-ownership.sh`, needs that bit.
+A test compares the table with the folder: the file list, the text, and the bit.
+A build script could generate the table, but the table is short and a test catches drift with no build step.
+
+### The manifest
+
+`bundles/shipped.yaml` gives each bundle a `name`, its default `when` tags, and a one-line `purpose`.
+Q3 asked for a separate switch field.
+A bundle fires when a scope emits any of its `when` tags, so each tag is a switch, and a fourth field would repeat `when`.
+`llmenv setup --bundles` prints the manifest and the file list of each bundle as JSON, for the skill.
+
+### Shipped bundles in a plan
+
+A plan bundle with `shipped: true` names a shipped bundle.
+It sets only `name` and, optionally, `when`, which defaults to the manifest tags.
+On load, its capabilities come from the embedded `bundle.yaml`, so the gate asks about each allow, hook, MCP server, language server, and plugin as for any plan bundle.
+
+A shipped `bundle.yaml` may set `env`, and a plan bundle may not.
+The plan rule exists because the agent writes the plan, and an `env` entry such as `BASH_ENV` can run code.
+llmenv reviews and tests a shipped bundle, so the same risk does not apply.
+Each variable still gets its own question.
+`rust-dev` sets `RUSTC_WRAPPER: sccache`, and on a machine without sccache, cargo fails.
+
+With every answer yes, the shipped `bundle.yaml` is written byte for byte.
+After a no, it is written from the remaining entries under a one-line header, and its comments are lost.
+A shipped hook can run a script of its bundle, such as `hooks/ruff-report.sh`, because the script also comes from the binary.
+
+`--apply` makes each folder in a bundle with the same create-only call as the bundle folder.
+A failure removes the files and folders, newest first.
+The written files are a copy: a later llmenv release does not change them.
+
+### The personal-pattern check
+
+`bundles/personal-patterns.txt` lists named shapes: an email address, a home path, an mDNS host, a tailnet host, and an IPv4 address.
+The test `shipped_bundles_hold_no_personal_pattern` scans every file under `bundles/` and `skills/`.
+Each regular expression matches a shape only, and code checks the meaning.
+An email at a documentation domain (RFC 2606 and RFC 6761) and the `git@` login of a Git host are allowed.
+An IPv4 address is personal only when `Ipv4Addr` reports it as private or link-local.
+The test runs in CI with the rest of the unit tests.
 
 ## Not in scope
 
