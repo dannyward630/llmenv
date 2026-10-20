@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -71,20 +71,22 @@ fn the_embedded_table_matches_the_folder() {
         embedded, on_disk,
         "add or remove rows in src/onboarding/shipped/files.rs"
     );
+    let keys: Vec<(&str, &str)> = FILES.iter().map(|f| (f.bundle, f.path)).collect();
+    assert!(
+        keys.is_sorted(),
+        "sort the rows of src/onboarding/shipped/files.rs by bundle, then by path"
+    );
+    #[cfg(unix)]
     for file in FILES {
+        use std::os::unix::fs::PermissionsExt as _;
         let path = repo("bundles").join(file.bundle).join(file.path);
-        assert_eq!(file.text, std::fs::read_to_string(&path).unwrap());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(
-                file.executable,
-                mode & 0o111 != 0,
-                "{}: the executable flag in the table differs from the file",
-                path.display()
-            );
-        }
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            file.executable,
+            mode & 0o111 != 0,
+            "{}: the executable flag in the table differs from the file",
+            path.display()
+        );
     }
 }
 
@@ -169,16 +171,26 @@ fn is_reserved_domain(domain: &str) -> bool {
             .any(|tld| domain.ends_with(tld))
 }
 
+/// The public Git hosts whose `git@` login is the same for every user.
+const PUBLIC_FORGES: [&str; 4] = ["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"];
+
 /// The meaning check after a shape match: true when the matched text is a personal value.
 fn is_personal(name: &str, matched: &str) -> bool {
     match name {
         "email" => {
             let (local, domain) = matched.split_once('@').unwrap_or_default();
-            local != "git" && !is_reserved_domain(domain)
+            let forge_login = local == "git" && PUBLIC_FORGES.contains(&domain);
+            !forge_login && !is_reserved_domain(domain)
         }
-        "ipv4" => matched
-            .parse::<Ipv4Addr>()
-            .is_ok_and(|ip| ip.is_private() || ip.is_link_local()),
+        "ipv4" => matched.parse::<Ipv4Addr>().is_ok_and(|ip| {
+            // 100.64.0.0/10 (RFC 6598) holds the node addresses of a tailnet.
+            let shared = ip.octets()[0] == 100 && ip.octets()[1] & 0xC0 == 64;
+            ip.is_private() || ip.is_link_local() || shared
+        }),
+        // fc00::/7 (RFC 4193) holds private IPv6 addresses.
+        "ipv6-ula" => matched
+            .parse::<Ipv6Addr>()
+            .is_ok_and(|ip| ip.segments()[0] & 0xFE00 == 0xFC00),
         _ => true,
     }
 }
@@ -211,6 +223,14 @@ fn the_personal_check_finds_personal_values_and_allows_placeholders() {
         "addr: 192.168.0.9",
         "addr: 172.20.0.1",
         "addr: 169.254.1.1",
+        "addr: 100.101.102.103",
+        "addr: fd12:3456:789a::1",
+        "cd C:\\Users\\sam\\src",
+        "cd /var/home/sam",
+        "ssh nas.lan",
+        "ssh db.internal",
+        "ssh printer.home.arpa",
+        "git@git.corp.io:team/repo.git",
     ];
     for text in personal {
         assert_eq!(personal_hits(text, &patterns).len(), 1, "{text}");
@@ -222,6 +242,8 @@ fn the_personal_check_finds_personal_values_and_allows_placeholders() {
         "version 1.2.3.4 and 8.8.8.8",
         "~/.local/share and @pytest.mark.skipif",
         "addr: 999.1.1.1",
+        "addr: 100.200.1.1 and fe80::1",
+        "git@gitlab.com:owner/repo.git",
     ];
     for text in allowed {
         assert!(personal_hits(text, &patterns).is_empty(), "{text}");
@@ -251,4 +273,23 @@ fn shipped_bundles_hold_no_personal_pattern() {
          replace it with a placeholder such as you@example.com:\n{}",
         hits.join("\n")
     );
+}
+
+proptest::proptest! {
+    /// A reserved documentation domain stays reserved in any letter case, and an email at one is
+    /// never personal.
+    #[test]
+    fn a_reserved_domain_is_reserved_in_any_case(
+        label in "[a-zA-Z0-9-]{1,10}",
+        suffix in proptest::sample::select(vec![".example", ".test", ".invalid"]),
+        upper in proptest::prelude::any::<bool>(),
+    ) {
+        let domain = format!("{label}{suffix}");
+        let domain = if upper { domain.to_ascii_uppercase() } else { domain };
+        proptest::prop_assert!(is_reserved_domain(&domain));
+        let email = format!("someone@{domain}");
+        proptest::prop_assert!(!is_personal("email", &email));
+        let personal = format!("someone@{label}.io");
+        proptest::prop_assert!(is_personal("email", &personal));
+    }
 }

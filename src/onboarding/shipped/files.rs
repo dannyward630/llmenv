@@ -50,6 +50,7 @@ pub(crate) const FILES: &[Embedded] = &[
     embed!("mac-dev", "rules/signing-notarization.md"),
     embed!("mac-dev", "rules/universal-binaries.md"),
     embed!("objc-dev", "rules/objc.md"),
+    embed!("objc-dev", "skills/arc-ownership-check/SKILL.md"),
     embed!(
         "objc-dev",
         "skills/arc-ownership-check/scripts/arc_ownership_check.py"
@@ -63,7 +64,6 @@ pub(crate) const FILES: &[Embedded] = &[
         "objc-dev",
         "skills/arc-ownership-check/scripts/test_arc_ownership_check.py"
     ),
-    embed!("objc-dev", "skills/arc-ownership-check/SKILL.md"),
     embed!("python-dev", "bundle.yaml"),
     embed!("python-dev", "hooks/ruff-report.sh"),
     embed!("python-dev", "hooks/test-ruff-report.sh"),
