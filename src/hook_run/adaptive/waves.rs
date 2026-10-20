@@ -15,7 +15,8 @@ use crate::hook_run::relevance;
 /// not run.
 ///
 /// The fanouts run only when the main recalls leave room in `budget`. Their records come
-/// after the main records, so a full budget would drop them all (#2920).
+/// after the main records, so a full budget would drop them all (#2920). No call runs when
+/// `budget` is full before the main recalls.
 pub(super) async fn waves(
     ctx: &AdaptiveCtx<'_>,
     text: &str,
@@ -30,6 +31,14 @@ pub(super) async fn waves(
         })
     };
     let client = ctx.client;
+    // The scope fallback can fill the budget before this runs. Every record would then be
+    // dropped, so no call runs. The query is not finished, so the next turn runs it again.
+    if budget.is_full() {
+        let has_global = ctx.global_topics.iter().any(|t| !t.trim().is_empty());
+        let fanouts = project.map_or(0, |_| 1 + keywords.len().min(2));
+        budget.skip_actions(usize::from(has_global) + fanouts);
+        return (Outcome::default(), false);
+    }
     let start = Instant::now();
     let (own, main) = tokio::join!(
         recall(client, in_project(query(text, MAIN_LIMIT))),
@@ -77,6 +86,15 @@ pub(super) async fn waves(
             recall(client, t1),
         );
         push_into(&mut outcome, budget, [k0, k1, t0, t1]);
+    } else {
+        // A slow server would push the prompt past the latency it tolerates. The skip is not a
+        // budget skip, so it is logged rather than counted in the budget notice.
+        tracing::error!(
+            "adaptive recall: {} fanout recall(s) skipped, the main recalls took {:?} (cutoff {:?})",
+            fanouts.iter().flatten().count(),
+            start.elapsed(),
+            WAVE2_CUTOFF
+        );
     }
     (outcome, main_ok)
 }
@@ -338,5 +356,49 @@ mod tests {
         assert_eq!(outcome.calls, 1, "calls={}", outcome.calls);
         let notice = budget.notice().unwrap_or_default();
         assert!(notice.contains("4 recall queries skipped"), "{notice}");
+    }
+
+    /// The scope fallback can fill the budget first; then no recall runs and the query is not
+    /// marked finished (#2920).
+    #[tokio::test]
+    async fn a_budget_full_before_the_waves_runs_no_recall() {
+        let server = MockServer::start().await;
+        mount(&server, "initialize", "").await;
+        mount(
+            &server,
+            r#""project":"proj-b""#,
+            "[context-proj-b] own fact",
+        )
+        .await;
+        let client = McpHttpClient::test_new(server.uri(), Duration::from_secs(2)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::hook_run::session_ledger::LedgerStore::new(dir.path());
+        let payload = json!({});
+        let global = topics(&["preferences"]);
+        let ctx = AdaptiveCtx {
+            client: &client,
+            store: &store,
+            session_id: "s1",
+            payload: &payload,
+            global_topics: &global,
+            state_dir: dir.path(),
+        };
+        let mut budget = RecallBudget::default();
+        budget.add_text(&format!("[scope] {}", "z".repeat(RECALL_BUDGET_BYTES - 50)));
+        assert!(budget.is_full());
+        let keywords = topics(&["k1"]);
+        let (outcome, main_ok) = waves(&ctx, "q", &keywords, Some("proj-b"), &mut budget).await;
+        assert!(!main_ok);
+        assert_eq!(outcome.calls, 0);
+        let notice = budget.notice().unwrap_or_default();
+        assert!(notice.contains("3 recall queries skipped"), "{notice}");
+        let asked = server.received_requests().await.unwrap_or_default();
+        assert!(
+            asked
+                .iter()
+                .all(|r| String::from_utf8_lossy(&r.body).contains("initialize")
+                    || !String::from_utf8_lossy(&r.body).contains("icm_memory_recall")),
+            "no recall request"
+        );
     }
 }

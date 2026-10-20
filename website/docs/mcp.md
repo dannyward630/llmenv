@@ -664,7 +664,9 @@ See [`memory:`](configuration.md#featuresmemory) and [`hook-run`](commands.md#ho
 
 (changed in v3.13.0) A prompt recalls the session project and the global topics first.
 The keyword and topic fanouts run only when those recalls leave room in the 8,000-byte budget, because fanout memories only fill the bytes that are left.
-A skipped fanout counts in the "recall queries skipped" notice.
+A recall skipped for the budget counts in the "recall queries skipped" notice.
+When the budget is already full before the first recall, no recall runs for that prompt.
+When the first recalls take more than 1.5 seconds, the fanouts do not run, and the llmenv log records the skip.
 
 (changed in v3.13.0) After a tool error, a memory is injected only when its summary or keywords share a distinctive word or an error code with the error.
 A distinctive word has four or more characters and is not a common error word such as "error" or "failed".
