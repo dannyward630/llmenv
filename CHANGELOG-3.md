@@ -11,6 +11,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+3.13.0 adds onboarding from a scan of your repositories, one cleanup command, and support for opencode 2.x.
+It also scopes memory recall to the session's project, hardens the hooks and the codebase-memory guard, and replaces many silent failures with notices that name the cause and the fix.
+
+**Onboarding.**
+`llmenv setup --scan` and `llmenv setup --tools` print the evidence and the tools that onboarding can use (#2785, #2791).
+The `setup-llmenv` skill writes a plan, and `llmenv setup --apply` applies it with a yes for each change (#2786, #2788).
+llmenv ships bundles for common languages and platforms, and `llmenv setup` on a configured machine merges by default (#2787, #2789).
+
+**Cleanup.**
+`llmenv clean` replaces `llmenv prune` and `llmenv doctor --gc`, which are deprecated (#2917).
+It sweeps the state temp folder by age, rotates the session log, and keeps entries with a future mtime (#2814, #2816, #2836, #2860).
+
+**opencode 2.x.**
+llmenv supports opencode 2.x only (#2840, #2841).
+The plugin, rule files, agents, permissions, and skill scope follow the 2.x formats, and each client gets its own background server (#2842, #2843, #2844, #2845, #2846).
+
+**Memory recall.**
+Recall reads the session's project plus the topics in `global_topics`, so other projects' facts stay out of a session (#2950, #2765, #2938, #2911).
+The session wake-up includes the project's own memories (#2756).
+A tool failure recalls only memories that share a word or an error code with the error (#2910, #2921, #2755).
+`llmenv doctor` reports the recall failure rate (#2919).
+
+**codebase-memory.**
+The floor is now codebase-memory-mcp 0.12.0 (#2853).
+Allowed roots come only from `allowed_roots`, and the `index_repository` guard reads the roots of the entry that serves the session (#2916, #2922).
+
+**Hooks and the commit gate.**
+The commit gate sees a commit behind `eval`, `sh -c`, `timeout`, `env`, and the other wrappers, and it denies a commit that it cannot check (#2627, #2542, #2630, #2747).
+Each subagent keeps its own hook state, and hook state files are locked for each update (#2936, #2901, #2678).
+
+**Security.**
+The MCP HTTP client ignores the proxy variables, and an MCP reply larger than 8 MiB is an error (#2484, #2960).
+llmenv runs its helper programs from absolute `PATH` folders only, and its state writes refuse a symlink (#2932, #2948, #2599, #2686, #2685).
+A FIFO or an oversized file in place of a config, a marker, or a bundle file is refused at once (#2945, #2942, #2933).
+`rustls` is updated for four advisories.
+
+**Errors that reach the agent.**
+Hook, memory, and task failures reach the agent as notices with the cause and the fix (#2664, #2729, #2736, #2751, #2868).
+A corrupt or unreadable task, session, or state file is named instead of read as empty (#2628, #2658, #2665).
+A non-UTF-8 environment variable fails with an error that names it (#2600, #2607, #2644, #2645).
+
 ### Added
 
 - When llmenv cannot connect to an MCP server or the umans usage API and `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY` is set, the error names the variable, because llmenv sends these requests without a proxy. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp#memory-backend-memory) (#2884) [feat:mcp]
@@ -41,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **BREAKING:** Support for opencode 1.x. llmenv supports opencode 2.x only, and `llmenv doctor` reports an older opencode as unsupported. See [engines](https://phaedrus1992.github.io/llmenv/docs/engines#the-opencode-adapter) (#2840) [fix:adapter]
 - The task tracker no longer redirects opencode's `todowrite` tool: opencode 2.x has no todo tool, and llmenv supports opencode 2.x only (#2846) [fix:hook]
 
 ### Fixed
@@ -99,7 +141,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Session reminders say that the task store cannot be read, instead of reporting that no session is open or that a session has no tasks. `llmenv task session summary`, `llmenv task session show`, `llmenv task ls --all`, and `llmenv task show current` fail with an error when a task file cannot be read (#2608) [fix:task]
 - A non-UTF-8 `LLMENV_CONFIG_DIR`, `LLMENV_STATE_DIR`, or `HOME` that the resolved path reads fails with an error that names the variable. A non-UTF-8 `CLAUDE_CODE_VERSION` is logged and ignored in the hook, so the hook does not stop. `llmenv doctor` warns about a non-UTF-8 token-efficiency variable (#2607) [fix:cli]
 - A non-UTF-8 `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID` stops a `llmenv task` command with an error that names the variable. Before, it was logged and read as unset. See [troubleshooting](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#an-error-says-an-environment-variable-is-not-valid-utf-8) (#2644) [fix:task]
-- A `cargo release` dry run no longer rolls the changelog. `scripts/roll-changelog.sh` exits without changes when `DRY_RUN` is true (#2637) [fix:release]
 - The codebase-memory health notice says the server did not answer yet, and asks for one `list_projects` call before the kill step. Before, it said the graph tools do not work, and the agent skipped them for the session (#2639) [fix:hook]
 - The adaptive recall scope fallback stops at the first failed call, and runs once per session instead of on every turn. The failure log keeps the full error chain (#2897) [fix:hook]
 - A tool failure with no memory-worthy signal, such as exit 127 or a script parse error, runs no recall. The all-projects failure recall is removed, so a typo no longer injects notes from other projects (#2910) [fix:hook]
@@ -198,7 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Security
 
 - Update `rustls` to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348, and RUSTSEC-2026-0349. They cover TLS secrets in `Debug` output, application data sent after an ECH rejection, unbounded Brotli certificate decompression, and a key-exchange downgrade [fix:deps]
-- The MCP HTTP client ignores the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), so a request to a private address cannot leave through a proxy. An MCP server that is reachable only through a proxy no longer works. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2484) [fix:hook]
+- **BREAKING:** The MCP HTTP client ignores the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), so a request to a private address cannot leave through a proxy. An MCP server that is reachable only through a proxy no longer works. See [MCP](https://phaedrus1992.github.io/llmenv/docs/mcp) (#2484) [fix:hook]
 - llmenv stops reading an MCP reply larger than 8 MiB and reports it as an error, so a faulty server cannot use up the memory of a hook. An error reply is cut at 4 KiB in the message (#2960) [fix:mcp]
 
 ## [3.12.2] - 2026-10-10
