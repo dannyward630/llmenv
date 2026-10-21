@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
 
+### Security
+
+- Update `rustls-webpki` and `webpki-root-certs` to clear RUSTSEC-2026-0382 and RUSTSEC-2026-0383, which accept distrusted certificate intermediates. [chore:deps]
+
 ## [3.13.0] - 2026-10-20
 
 3.13.0 adds onboarding from a scan of your repositories, one cleanup command, and an opencode adapter updated for opencode 2.x.
