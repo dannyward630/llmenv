@@ -88,6 +88,10 @@ pub(super) const CTX_MUTATION: &[&str] = &[
 
 pub(super) const CTX_DESTRUCTIVE: &[&str] = &["ctx_purge", "ctx_upgrade"];
 
+/// The context-mode tools that run code. They are also in `CTX_MUTATION`, which Claude Code
+/// allows. opencode asks for them by default (see `opencode/tiers.rs`).
+pub(super) const CTX_EXECUTE: &[&str] = &["ctx_execute", "ctx_execute_file", "ctx_batch_execute"];
+
 /// #1323: Built-in codebase-memory-mcp server tool tiers, rendered the same
 /// way as the ICM/context-mode tiers above. Source-verified against
 /// `codebase-memory-mcp`'s own `TOOL_ANNOTATIONS` table (`src/mcp/mcp.c`),
