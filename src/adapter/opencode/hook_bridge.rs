@@ -7,6 +7,18 @@
 
 use std::path::{Path, PathBuf};
 
+/// opencode supports exactly these hook events via its JS plugin API.
+/// See spec §3 for the event mapping.
+pub(super) const SUPPORTED_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+];
+
 /// The plugin module. It reads `llmenv-hooks.json` from its own folder.
 const PLUGIN_JS: &str = include_str!("plugin.js");
 
