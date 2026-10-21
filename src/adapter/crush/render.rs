@@ -3,7 +3,12 @@
 //! `crush.rs` merges these fragments into the rendered config. Each function is
 //! one capability, so a change to one model key does not touch the others.
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
 use serde_json::json;
+
+use crate::util::dedup;
 
 pub(super) fn render_lsp(
     servers: &[llmenv_config::LspServer],
@@ -153,8 +158,15 @@ pub(super) fn render_default_models(
 /// Use the dedicated `native_permissions.crush` / `native_hooks.crush` / `native_mcp.crush` /
 /// `native_model_providers.crush` / `native_default_models.crush` channels instead, which
 /// merge in the safe direction.
-pub(super) const CRUSH_MODELED_KEYS: &[&str] =
-    &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
+pub(super) const CRUSH_MODELED_KEYS: &[&str] = &[
+    "permissions",
+    "hooks",
+    "mcp",
+    "lsp",
+    "providers",
+    "models",
+    "env",
+];
 
 pub(super) fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
     rules.iter().flat_map(render_permission_rule).collect()
@@ -262,3 +274,139 @@ pub(super) fn render_permission_rule(rule: &crate::config::PermissionRule) -> Ve
         }
     }
 }
+
+/// Split the neutral permission rules into Crush's `allowed_tools` and `disabled_tools`.
+///
+/// A tool named by an `ask` or `deny` rule is withheld from `allowed_tools`, so it still
+/// prompts. Crush has no other way to enforce a conflicting deny.
+pub(super) fn render_permission_lists(
+    perms: &crate::config::Permissions,
+    native: Option<&crate::config::NativePermissionRules>,
+) -> (Vec<String>, Vec<String>) {
+    let mut allowed = render_rules_to_strings(&perms.allow);
+    if let Some(n) = native {
+        allowed.extend(n.allow.iter().cloned());
+    }
+    let withheld: BTreeSet<&str> = perms
+        .deny
+        .iter()
+        .chain(&perms.ask)
+        .filter_map(|rule| crush_tool_name(&rule.tool))
+        .collect();
+    allowed.retain(|t| !withheld.contains(t.as_str()));
+    dedup(&mut allowed);
+    (allowed, render_disabled_tools(&perms.deny))
+}
+
+/// Crush removes a tool listed in `options.disabled_tools` from the agent, so an unscoped
+/// deny maps onto it. A `pattern` or `paths` scope cannot be expressed that way, and
+/// disabling the whole tool would be broader than the rule. Such a rule is logged and
+/// not rendered.
+fn render_disabled_tools(deny: &[crate::config::PermissionRule]) -> Vec<String> {
+    let mut disabled = Vec::new();
+    for rule in deny {
+        if rule.pattern.is_some() || !rule.paths.is_empty() {
+            tracing::error!(
+                "crush: deny rule `{}` is scoped to a pattern or paths, which Crush cannot \
+                 express. The rule is not rendered, so `{}` stays available, with its prompt.",
+                rule.tool,
+                rule.tool
+            );
+            continue;
+        }
+        match crush_tool_name(&rule.tool) {
+            Some(name) => disabled.push(name.to_string()),
+            None => tracing::error!(
+                "crush: no equivalent tool for neutral deny rule `{}`. Crush has no matching \
+                 tool, so this rule cannot take effect.",
+                rule.tool
+            ),
+        }
+    }
+    dedup(&mut disabled);
+    disabled
+}
+
+/// Build the `options` object: `skills_paths` when skills exist, and `disabled_tools` when a
+/// deny rule removes tools. Returns `None` when neither applies, so no empty key is written.
+pub(super) fn render_options(
+    out: &Path,
+    has_skills: bool,
+    disabled_tools: &[String],
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let mut options = serde_json::Map::new();
+    if has_skills {
+        let skills_out = out
+            .join("skills")
+            .into_os_string()
+            .into_string()
+            .map_err(|p| {
+                anyhow::anyhow!(
+                    "skills output path is not valid UTF-8: {}",
+                    PathBuf::from(p).display()
+                )
+            })?;
+        options.insert("skills_paths".into(), json!([skills_out]));
+    }
+    if !disabled_tools.is_empty() {
+        options.insert("disabled_tools".into(), json!(disabled_tools));
+    }
+    Ok((!options.is_empty()).then_some(serde_json::Value::Object(options)))
+}
+
+/// Build the `mcp` object, keyed by server name, with `native_mcp.crush` overlaid last.
+///
+/// Crush's `MCPConfig.Type` is required and takes exactly `stdio`, `sse`, or `http`. Its MCP
+/// client returns "unsupported mcp type" for anything else, so every server carries one of
+/// those values. Returns `None` when no server remains, so no empty key is written.
+pub(super) fn render_mcp(
+    manifest: &crate::merge::MergedManifest,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let mut mcp_obj = serde_json::Map::new();
+    for mcp in &manifest.mcps {
+        use crate::mcp::resolve::ResolvedKind;
+        let mut e = match &mcp.kind {
+            ResolvedKind::Stdio { command, args, env } => {
+                let mut e = serde_json::Map::new();
+                e.insert("type".into(), json!("stdio"));
+                e.insert("command".into(), json!(command));
+                e.insert("args".into(), json!(args));
+                if !env.is_empty() {
+                    e.insert("env".into(), json!(env));
+                }
+                e
+            }
+            ResolvedKind::Remote { url, transport } => {
+                let mut e = serde_json::Map::new();
+                e.insert(
+                    "type".into(),
+                    json!(crate::adapter::remote_transport_type_str(*transport)),
+                );
+                e.insert("url".into(), json!(url));
+                e
+            }
+        };
+        // Fields common to both transports (fix 6: parity).
+        if !mcp.headers.is_empty() {
+            e.insert("headers".into(), json!(mcp.headers));
+        }
+        if let Some(t) = mcp.timeout {
+            e.insert("timeout".into(), json!(t));
+        }
+        if !mcp.disabled_tools.is_empty() {
+            e.insert("disabled_tools".into(), json!(mcp.disabled_tools));
+        }
+        mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
+    }
+    let mut mcp_value = serde_json::Value::Object(mcp_obj);
+    crate::adapter::overlay_native_json(
+        &mut mcp_value,
+        manifest.capabilities.native_mcp.get("crush"),
+        "native_mcp.crush",
+    )?;
+    Ok((!mcp_value.as_object().is_none_or(serde_json::Map::is_empty)).then_some(mcp_value))
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests;
