@@ -43,7 +43,7 @@ pub(super) fn blocks_by_exit_code(engine: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::neutralize_crush_tool_name;
+    use super::{neutralize_crush_tool_name, neutralize_for_engine};
 
     #[test]
     fn crush_bash_becomes_neutral_bash_and_keeps_its_input() {
@@ -65,6 +65,22 @@ mod tests {
         let mut payload = json!({ "tool_name": "agentic_fetch" });
         neutralize_crush_tool_name(&mut payload);
         assert_eq!(payload["tool_name"], "agentic_fetch");
+    }
+
+    #[test]
+    fn engine_gate_renames_crush_payloads_only() {
+        let mut crush = json!({ "tool_name": "bash" });
+        neutralize_for_engine("crush", Some(&mut crush));
+        assert_eq!(crush["tool_name"], "Bash");
+
+        let mut other = json!({ "tool_name": "bash" });
+        neutralize_for_engine("claude-code", Some(&mut other));
+        assert_eq!(other["tool_name"], "bash");
+    }
+
+    #[test]
+    fn engine_gate_accepts_a_missing_payload() {
+        neutralize_for_engine("crush", None);
     }
 
     #[test]
