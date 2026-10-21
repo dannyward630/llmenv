@@ -268,7 +268,10 @@ export default {
       const failed = e.status !== "completed";
       const response = failed ? { error: String(e.error?.message ?? e.error) } : e.result;
       const event = failed ? "PostToolUseFailure" : "PostToolUse";
-      const out = await runHooks(event, e.sessionID, { tool_name: neutral.name, tool_input: neutral.input, tool_response: response }, neutral.name);
+      const payload = { tool_name: neutral.name, tool_input: neutral.input, tool_response: response };
+      // The failure consumer reads the top-level error, as Claude Code sends it.
+      if (failed) payload.error = response.error;
+      const out = await runHooks(event, e.sessionID, payload, neutral.name);
       const s = state(e.sessionID);
       s.errors.push(...out.errors);
       if (out.context.length) s.turn.push(...out.context);

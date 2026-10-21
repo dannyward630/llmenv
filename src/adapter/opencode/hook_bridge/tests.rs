@@ -125,7 +125,7 @@ fn the_plugin_runs_hooks_as_opencode_would() {
         failed.contains("\"hook_event_name\":\"PostToolUseFailure\""),
         "{failed}"
     );
-    assert!(failed.contains("boom"), "{failed}");
+    assert!(failed.contains("\"error\":\"boom\""), "{failed}");
     let posted = std::fs::read_to_string(&log).unwrap();
     assert!(
         !posted.contains("boom"),
