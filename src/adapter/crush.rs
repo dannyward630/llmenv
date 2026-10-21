@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::AgentAdapter;
-use super::resolve_bundle_relative_paths;
 use crate::merge::MergedManifest;
 
+mod mcp;
 mod render;
 use render::{CRUSH_MODELED_KEYS, render_default_models, render_lsp, render_model_providers};
 
@@ -247,41 +247,7 @@ impl AgentAdapter for CrushAdapter {
         // Claude Code's { matcher, hooks: [{ type, command, tool }] } nesting.
         // Rendering the nested shape here means Crush reads an empty `command`
         // off the wrapper object and rejects the whole config at load time.
-        let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
-            std::collections::BTreeMap::new();
-        for hook in &compatible_hooks {
-            // P2-6: mcp_tool hooks are filtered out at the gate above, so `command`
-            // is always present for the remaining Command-kind hooks.
-            let resolved_command =
-                hook.handler
-                    .command
-                    .as_ref()
-                    .map(|cmd| match &hook.bundle_origin {
-                        Some(bundle_dir) => resolve_bundle_relative_paths(cmd, bundle_dir)
-                            .unwrap_or_else(|| {
-                                tracing::warn!(
-                                    "failed to resolve bundle-relative path for command in {:?}: {cmd:?}",
-                                    bundle_dir
-                                );
-                                cmd.clone()
-                            }),
-                        None => cmd.clone(),
-                    });
-            let mut entry = serde_json::Map::new();
-            if let Some(matcher) = &hook.matcher {
-                entry.insert("matcher".into(), json!(matcher));
-            }
-            // Omit `command` when absent rather than emitting `"command": null`
-            // — a null-valued key violates the no-null invariant and Crush
-            // rejects a wrapper carrying an empty command anyway (#720).
-            if let Some(command) = &resolved_command {
-                entry.insert("command".into(), json!(command));
-            }
-            hooks_by_event
-                .entry(hook.event.clone())
-                .or_default()
-                .push(serde_json::Value::Object(entry));
-        }
+        let mut hooks_by_event = render::render_hook_entries(&compatible_hooks);
 
         hooks_by_event
             .entry("PreToolUse".into())
@@ -342,7 +308,7 @@ impl AgentAdapter for CrushAdapter {
         }
 
         // MCP servers: the transport and field shapes live in `render::render_mcp`.
-        if let Some(mcp) = render::render_mcp(manifest)? {
+        if let Some(mcp) = mcp::render_mcp(manifest)? {
             doc.insert("mcp".into(), mcp);
         }
 
@@ -394,7 +360,7 @@ impl AgentAdapter for CrushAdapter {
         // Bundle env vars (capabilities.env) become Crush's top-level `env`. Crush
         // shell-expands each value at startup, so a literal `$` needs escaping.
         if !manifest.capabilities.env.is_empty() {
-            doc.insert("env".into(), json!(manifest.capabilities.env));
+            doc.insert("env".into(), render::render_env(&manifest.capabilities.env));
         }
 
         // 6. native.crush passthrough — highest-precedence layer
@@ -402,6 +368,7 @@ impl AgentAdapter for CrushAdapter {
         // keys have dedicated rendering paths and must not clobber the security output.
         // Use native_permissions.crush / native_hooks.crush / native_mcp.crush /
         // native_model_providers.crush / native_default_models.crush instead.
+        render::reject_native_disabled_tools(manifest.native.get("crush"))?;
         if let Some(native) = manifest.native.get("crush") {
             super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
         }

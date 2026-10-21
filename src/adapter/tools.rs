@@ -264,6 +264,16 @@ mod tests {
     }
 
     #[test]
+    fn crush_keys_are_unique() {
+        // `neutral_for_crush` returns the first match, so a duplicate key would hide a neutral tool.
+        let mut keys: Vec<&str> = NEUTRAL_TOOLS.iter().filter_map(|t| t.crush.key()).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "two neutral tools map to one crush key");
+    }
+
+    #[test]
     fn crush_tool_names_map_back_to_neutral_names() {
         assert_eq!(neutral_for_crush("bash"), Some("Bash"));
         assert_eq!(neutral_for_crush("view"), Some("Read"));
