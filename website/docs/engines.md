@@ -227,10 +227,10 @@ See [Which hooks each engine supports](#which-hooks-each-engine-supports) for th
 | `PreToolUse` | yes | yes | yes |
 | `PostToolUse` | yes | yes | no |
 | `Stop` | yes | yes | no |
-| `Notification`, `SubagentStop`, `PreCompact` | yes | no | no |
+| `Notification`, `SubagentStop`, `PreCompact` | yes | yes (added in v3.14.0) | no |
 | `PostToolUseFailure` | yes | yes (added in v3.14.0) | no |
-| `PostToolBatch`, `SubagentStart` | yes | no | no |
-| `PostModelSwitch` | yes | no | no |
+| `PostToolBatch`, `SubagentStart` | yes | yes (added in v3.14.0) | no |
+| `PostModelSwitch` | yes | yes (added in v3.14.0) | no |
 
 An event that an engine does not support is dropped with a warning on opencode and is a hard error on Crush.
 Crush runs only `command`-kind `PreToolUse` handlers.
@@ -359,8 +359,9 @@ capabilities:
 into the llmenv cache directory and discovered via `OPENCODE_CONFIG_DIR`.
 
 Unlike Crush, opencode is a full-featured target: it supports plugins, LSP,
-custom agents/commands, and six hook events, so it reaches near-parity with the
-Claude Code adapter.
+custom agents/commands, and most Claude Code hook events, so it reaches near-parity with the
+Claude Code adapter. The events and their opencode sources are listed under
+[Hook events on opencode](#hook-events-on-opencode).
 
 (changed in v3.13.0) The opencode adapter is updated for opencode 2.x, and llmenv no longer supports opencode 1.x.
 The llmenv plugin uses the opencode 2.0 plugin API, which opencode 1.x cannot load.
@@ -379,6 +380,29 @@ The text of a `Stop` hook reaches the next request, because opencode cannot cont
 opencode's `patch` tool keeps its own name, and the llmenv config guard checks each file in its patch text.
 When `plugin/llmenv-hooks.json` cannot be read, no hook runs, and each request says so with the fix.
 Hooks run under `/bin/sh`.
+
+### Hook events on opencode
+
+Each row names the Claude Code event and the opencode source that feeds it.
+A bus event, such as `Notification` or `PreCompact`, cannot block the work it reports, so a block from its hook reaches the next request.
+
+| Event | opencode source | Notes |
+| ----- | --------------- | ----- |
+| `SessionStart`, `SessionEnd` | session created and deleted | |
+| `UserPromptSubmit` | session `prompt` hook | |
+| `PreToolUse` | tool `execute.before` | |
+| `PostToolUse`, `PostToolUseFailure` | tool `execute.after` | A failed call goes to `PostToolUseFailure` only. |
+| `Stop` | `session.execution.succeeded` | The text reaches the next request. |
+| `SubagentStart` | tool `execute.before` on `subagent` | Added in v3.14.0. Runs at launch. A block or `deny` stops the launch, as it does for `PreToolUse`. Its other text reaches the parent session's next request, not the subagent. The matcher names the agent. |
+| `SubagentStop` | tool `execute.after` on `subagent` | Added in v3.14.0. Foreground runs only. A background run reports `running` at launch, so its stop is not reported. The matcher names the agent. |
+| `Notification` | `permission.asked` event | Added in v3.14.0. The message is the permission action and its resources. |
+| `PreCompact` | `session.compaction.started` event | Added in v3.14.0. `trigger` is `auto` or `manual`. opencode reports no overflow reason. |
+| `PostModelSwitch` | `session.model.selected` event | Added in v3.14.0. `from_model` and `to_model` are `provider/model#variant`. |
+| `PostToolBatch` | `session.step.ended` event | Added in v3.14.0. The closest boundary, not the same one: it ends each model step, including a step with no tool call. No `transcript_path` is sent, so the transcript layer of adaptive recall does nothing. |
+
+Not bridged yet: a `PreToolUse` `ask` decision, a `Stop` block that continues a finished turn, `transcript_path`, `mcp_tool` handlers, and a stop for a background `SubagentStop`.
+Each one has an open issue on the v3.14.0 milestone: #2997, #2998, #2999, #3000, and #3001.
+A matcher on `Notification`, `PostModelSwitch`, or `PostToolBatch` is ignored, because those events pass no matcher subject yet (#3003).
 
 ### Env vars
 

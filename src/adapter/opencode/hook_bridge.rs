@@ -17,6 +17,12 @@ pub(super) const SUPPORTED_HOOK_EVENTS: &[&str] = &[
     "PostToolUse",
     "PostToolUseFailure",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
+    "Notification",
+    "PreCompact",
+    "PostModelSwitch",
+    "PostToolBatch",
 ];
 
 /// The plugin module. It reads `llmenv-hooks.json` from its own folder.
