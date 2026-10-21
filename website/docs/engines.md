@@ -270,7 +270,8 @@ See [Which hooks each engine supports](#which-hooks-each-engine-supports) for th
 | `PostToolUse` | yes | yes | no |
 | `Stop` | yes | yes | no |
 | `Notification`, `SubagentStop`, `PreCompact` | yes | no | no |
-| `PostToolBatch`, `PostToolUseFailure`, `SubagentStart` | yes | no | no |
+| `PostToolUseFailure` | yes | yes (added in v3.14.0) | no |
+| `PostToolBatch`, `SubagentStart` | yes | no | no |
 | `PostModelSwitch` | yes | no | no |
 
 An event that an engine does not support is dropped with a warning on opencode and is a hard error on Crush.
@@ -326,6 +327,7 @@ coexist in a single shell session without conflict.
 | Plugins / marketplace | **Hard error** | Crush has no plugin or marketplace concept; non-skill plugin content (custom `agents/`, `commands/`) produces an actionable error naming the plugin |
 | Custom agents | **Unsupported** | Crush hardcodes exactly two agent roles (coder/task); `agents/*.md` from plugins cannot be loaded |
 | Model providers (`model_providers`/`default_models`) | Supported | Rendered to `providers`/`models` using catwalk's field names; `api_type` passes through as `type` verbatim |
+| Global instructions (`agents_md`) | Supported | Written to `CRUSH.md` in the Crush config dir, which Crush loads as global context (added in v3.14.0) |
 
 ### The `native.crush` escape hatch
 
@@ -485,21 +487,22 @@ alongside Claude Code and Codex.
 
 ### Capability map
 
-| Feature | Crush support | Notes |
-| --------- | -------------- | ------- |
-| Permissions (`allow`) | **Coarse — tool-level only** | An unscoped rule (no `pattern`/`paths`) is translated from llmenv's neutral tool vocabulary (`Bash`, `Read`, `WebFetch` — Claude Code's PascalCase names) to Crush's own tool identifiers (`bash`, `view`, `fetch`, ...) and rendered to `allowed_tools` (changed in v3.10.0 — previously rendered the neutral name verbatim, which never matched Crush's case-sensitive, differently-named tools; see [#1321](https://github.com/phaedrus1992/llmenv/issues/1321)). A neutral tool with no Crush equivalent (`Task`, `NotebookEdit`, ...) is dropped and logged, same as a `pattern`/`paths`-scoped rule below — the neutral permission list is shared across engines, so a Claude-Code-only tool name is a normal config, not a Crush-specific error. **`Edit`/`MultiEdit` also imply file creation** under Crush: its `edit`/`multiedit` tools create missing files and parent directories on an empty old-content diff, unlike Claude Code's `Edit`, which requires an existing path — allowing `Edit` for Crush is closer to allowing `Edit` **and** `Write` combined. A `pattern`/`paths`-scoped rule is dropped entirely rather than widened to a whole-tool grant, since Crush's matcher can't express scoping at all (changed in v3.10.0; see [#1306](https://github.com/phaedrus1992/llmenv/issues/1306)) |
-| Permissions (`ask`/`deny`) | **No dedicated rendering, but cross-checked against `allow`** | Crush's `PermissionsConfig` has no `denied_tools`/`default_mode` concept, so `ask`/`deny` rules produce no key of their own. As of v3.10.0 they still suppress a same-tool entry in `allowed_tools` (Crush has nothing else to enforce a conflicting deny with) — before the `allow`-side name mapping landed, `allow` never matched a real Crush tool either, so this cross-check wasn't needed; see [#1321](https://github.com/phaedrus1992/llmenv/issues/1321) |
-| Hooks — `PreToolUse` | Supported | `command`-kind handlers only |
-| Hooks — other events | **Hard error** | Crush supports only `PreToolUse`; any other event in config is an error |
-| Hooks — `mcp_tool` kind | **Hard error** | No Crush equivalent; use `command`-kind instead |
-| MCP servers | Supported | Includes `headers`, `disabled_tools`, `timeout` |
-| LSP servers | Supported | Rendered to `lsp.<name>` entries |
-| Skills (first-class) | Supported | Written via `options.skills_paths` |
-| Skills (plugin-projected) | Supported | Plugin `skills/` subdirs are projected into Crush's skill paths |
-| Output styles | **Fallback — generated skill** | Crush has no output-style concept; `output_styles` entries render as `skills/<name>/SKILL.md` instead, same `name`/`description`/`content` (added in v3.10.0, [#1130](https://github.com/phaedrus1992/llmenv/issues/1130)) |
-| Plugins / marketplace | **Hard error** | Crush has no plugin or marketplace concept; non-skill plugin content (custom `agents/`, `commands/`) produces an actionable error naming the plugin |
-| Custom agents | **Unsupported** | Crush hardcodes exactly two agent roles (coder/task); `agents/*.md` from plugins cannot be loaded |
-| Model providers (`model_providers`/`default_models`) | Supported | Rendered to `providers`/`models` using catwalk's field names; `api_type` passes through as `type` verbatim |
+| Feature | opencode support | Notes |
+| --------- | ---------------- | ------- |
+| Permissions (`allow`/`ask`/`deny`) | Supported for the documented neutral tool vocabulary | Rendered as opencode 2.x's ordered `permissions` list of `{action, resource, effect}` rules; opencode applies the last rule that matches (changed in v3.13.0; earlier versions wrote the 1.x `permission` map). `ask` is native (no fail-closed collapse). The neutral tool name is mapped to opencode's action by the [neutral tool vocabulary](#the-neutral-tool-vocabulary); a tool with no opencode 2.x equivalent is dropped, with a `warning:` line naming the tool (fixed in v3.11.0, [#1345](https://github.com/phaedrus1992/llmenv/issues/1345)). `native_permissions.opencode` strings are opencode's own vocabulary (`lsp`, `question`, `external_directory`, a bare `*` deny-all, ...), lowercased; a 1.x key is renamed as opencode renames it (`bash` to `shell`, `task` to `subagent`, `write` and `patch` to `edit`, added in v3.13.0). A native rule is a bare `tool` or `tool(pattern)`, and text after the closing `)` is an error (changed in v3.13.0). Because `Write` and `MultiEdit` collapse onto the same `edit` action as `Edit`, rules for any of the three interact under that one action. A rule pair whose order inverts the user's intent is rejected at regeneration time (fixed in v3.11.0, [#1328](https://github.com/phaedrus1992/llmenv/issues/1328)) — see [Permission rules opencode cannot represent](#permission-rules-opencode-cannot-represent) |
+| MCP tool tiers (ICM, codebase-memory-mcp, context-mode) | Supported | Rendered as `permissions` rules on `<server>_<tool>`: read-only and mutation tools `allow`, destructive tools `ask`, overridable with `mcp_permissions`. The context-mode code-running tools (`ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) ask by default, even when `mutation` is `allow` (added in v3.14.0) |
+| Effort (`effort_level`, `model_effort`) | Supported for the `large` model | Appended to the `model` as a variant, `provider/model#<effort>`; the `small` model takes no effort (added in v3.14.0) |
+| Model `reasoning` flag | **Not emitted** | opencode 2.x drops the field as unsupported, so llmenv no longer writes it (changed in v3.14.0) |
+| Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim. A failed tool call goes to `PostToolUseFailure` and no longer to `PostToolUse` (changed in v3.14.0) |
+| Hooks — other events | **Warned, skipped** | Unsupported events are dropped with an actionable warning rather than a hard error |
+| Hooks — `mcp_tool` kind | **Warned, skipped** | No opencode equivalent; use a `command`-kind handler |
+| MCP servers | Supported | Local (`command`, `${HOME}`-expanded) and remote (`http`/`sse`) transports |
+| LSP servers | Supported | Rendered to `lsp.<name>` entries, with `initialization_options` |
+| Skills (first-class + plugin-projected) | Supported | Native `SKILL.md` format |
+| Output styles | **Fallback — generated skill** | opencode has no output-style concept; `output_styles` entries render as `skills/<name>/SKILL.md` instead, same `name`/`description`/`content` (added in v3.10.0, [#1130](https://github.com/phaedrus1992/llmenv/issues/1130)) |
+| Plugins / marketplace | Supported | Plugin commands, agents, MCP, skills, and hooks are translated |
+| Custom agents | Supported | Plugin `agent/*.md` are emitted with `mode: subagent` |
+| Model providers (`model_providers`/`default_models`) | Supported | Rendered to `provider.<id>` / `model` / `small_model`; `api_type` maps to the AI SDK `npm` package (e.g. `openai` → `@ai-sdk/openai-compatible`). `default_models` only has `large`/`small` slots — other role names are a no-op |
 
 ### The `native.crush` escape hatch
 
