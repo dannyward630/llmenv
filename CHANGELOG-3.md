@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- Write the merged agent instructions to `CRUSH.md` in the Crush config dir, so Crush loads them as global context. [feat:crush]
+- Render opencode MCP tool tiers as permission rules. Read-only and mutation tools allow, and destructive tools ask. [feat:opencode]
+- Send the effort level to the opencode large model as a variant, `provider/model#<effort>`. [feat:opencode]
+
+### Changed
+
+- Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
+- Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
+
 ## [3.13.0] - 2026-10-20
 
 3.13.0 adds onboarding from a scan of your repositories, one cleanup command, and an opencode adapter updated for opencode 2.x.
