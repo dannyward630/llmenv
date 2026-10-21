@@ -183,7 +183,14 @@ const NEUTRAL_TOOLS: &[NeutralTool] = &[
     NeutralTool {
         name: "Task",
         opencode: ToolMapping::Renamed("subagent"),
-        crush: ToolMapping::Unsupported { note: CRUSH_ABSENT },
+        crush: ToolMapping::Renamed("agent"),
+    },
+    NeutralTool {
+        // Crush added `question` in v0.85.0. Older Crush has no such tool, so an
+        // allow rule for it matches nothing there.
+        name: "AskUserQuestion",
+        opencode: ToolMapping::Renamed("question"),
+        crush: ToolMapping::Renamed("question"),
     },
     NeutralTool {
         // In the vocabulary specifically so it reads as "no engine analog"
@@ -231,6 +238,17 @@ pub(crate) fn crush_key(neutral: &str) -> Option<&'static str> {
     lookup(neutral).and_then(|t| t.crush.key())
 }
 
+/// The neutral name for a crush tool identifier, or `None` when no neutral name maps to it.
+///
+/// The reverse of [`crush_key`]. A hook payload from crush names its tool this way, so
+/// the guards need the neutral name to match on.
+pub(crate) fn neutral_for_crush(crush_tool: &str) -> Option<&'static str> {
+    NEUTRAL_TOOLS
+        .iter()
+        .find(|t| t.crush.key() == Some(crush_tool))
+        .map(|t| t.name)
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
@@ -243,6 +261,24 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "a duplicate name would shadow an entry");
+    }
+
+    #[test]
+    fn crush_keys_are_unique() {
+        // `neutral_for_crush` returns the first match, so a duplicate key would hide a neutral tool.
+        let mut keys: Vec<&str> = NEUTRAL_TOOLS.iter().filter_map(|t| t.crush.key()).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "two neutral tools map to one crush key");
+    }
+
+    #[test]
+    fn crush_tool_names_map_back_to_neutral_names() {
+        assert_eq!(neutral_for_crush("bash"), Some("Bash"));
+        assert_eq!(neutral_for_crush("view"), Some("Read"));
+        assert_eq!(neutral_for_crush("agent"), Some("Task"));
+        assert_eq!(neutral_for_crush("agentic_fetch"), None);
     }
 
     #[test]
