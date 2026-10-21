@@ -21,6 +21,7 @@ mod models;
 mod permissions;
 mod tiers;
 mod translate;
+use hook_bridge::SUPPORTED_HOOK_EVENTS;
 use models::{render_opencode_default_models, render_opencode_providers};
 #[cfg(test)]
 use translate::{OPENCODE_AGENT_KEYS, dropped_agent_keys, split_frontmatter};
@@ -191,17 +192,6 @@ struct LspServerEntry {
     #[serde(skip_serializing_if = "Option::is_none", rename = "initialization")]
     init_options: Option<serde_json::Value>,
 }
-
-/// opencode supports exactly these hook events via its JS plugin API.
-/// See spec §3 for the event mapping.
-const SUPPORTED_HOOK_EVENTS: &[&str] = &[
-    "SessionStart",
-    "SessionEnd",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "Stop",
-];
 
 // ── Plugin hooks manifest deserialization ──
 

@@ -227,7 +227,8 @@ See [Which hooks each engine supports](#which-hooks-each-engine-supports) for th
 | `PostToolUse` | yes | yes | no |
 | `Stop` | yes | yes | no |
 | `Notification`, `SubagentStop`, `PreCompact` | yes | no | no |
-| `PostToolBatch`, `PostToolUseFailure`, `SubagentStart` | yes | no | no |
+| `PostToolUseFailure` | yes | yes (added in v3.14.0) | no |
+| `PostToolBatch`, `SubagentStart` | yes | no | no |
 | `PostModelSwitch` | yes | no | no |
 
 An event that an engine does not support is dropped with a warning on opencode and is a hard error on Crush.
@@ -407,7 +408,7 @@ opencode 2.x also loads every skill in `~/.agents/skills`, and no setting turns 
 | MCP tool tiers (ICM, codebase-memory-mcp, context-mode) | Supported | Rendered as `permissions` rules on `<server>_<tool>`: read-only and mutation tools `allow`, destructive tools `ask`, overridable with `mcp_permissions` (added in v3.14.0) |
 | Effort (`effort_level`, `model_effort`) | Supported for the `large` model | Appended to the `model` as a variant, `provider/model#<effort>`; the `small` model takes no effort (added in v3.14.0) |
 | Model `reasoning` flag | **Not emitted** | opencode 2.x drops the field as unsupported, so llmenv no longer writes it (changed in v3.14.0) |
-| Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim |
+| Hooks — `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` | Supported | Bridged through the generated `plugin/llmenv.js` shim. A failed tool call goes to `PostToolUseFailure` and no longer to `PostToolUse` (changed in v3.14.0) |
 | Hooks — other events | **Warned, skipped** | Unsupported events are dropped with an actionable warning rather than a hard error |
 | Hooks — `mcp_tool` kind | **Warned, skipped** | No opencode equivalent; use a `command`-kind handler |
 | MCP servers | Supported | Local (`command`, `${HOME}`-expanded) and remote (`http`/`sse`) transports |
