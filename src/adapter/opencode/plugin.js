@@ -33,7 +33,7 @@ let workDir = process.cwd();
 
 /** The neutral tool name and Claude argument keys for an opencode tool call. */
 export function toNeutral(tool, input) {
-  const mapped = TABLE.tools[tool];
+  const mapped = Object.hasOwn(TABLE.tools, tool) ? TABLE.tools[tool] : undefined;
   if (mapped) return { name: mapped.name, input: renameKeys(input, mapped.args) };
   for (const [namespace, server] of NAMESPACES) {
     const prefix = `${namespace}_`;
@@ -46,7 +46,7 @@ export function toNeutral(tool, input) {
 
 /** `input` with the opencode keys put back, for an `updatedInput` from a hook. */
 export function fromNeutral(tool, input) {
-  const mapped = TABLE.tools[tool];
+  const mapped = Object.hasOwn(TABLE.tools, tool) ? TABLE.tools[tool] : undefined;
   if (!mapped) return input;
   const back = Object.fromEntries(Object.entries(mapped.args).map(([from, to]) => [to, from]));
   return renameKeys(input, back);
@@ -316,7 +316,7 @@ export default {
       const neutral = toNeutral(e.tool, e.input ?? {});
       // Claude Code sends a failed call to PostToolUseFailure, not to PostToolUse.
       const failed = e.status !== "completed";
-      const response = failed ? { error: String(e.error?.message ?? e.error) } : e.result;
+      const response = failed ? { error: String(e.error?.message ?? e.error ?? "unknown error") } : e.result;
       const event = failed ? "PostToolUseFailure" : "PostToolUse";
       const payload = { tool_name: neutral.name, tool_input: neutral.input, tool_response: response };
       // The failure consumer reads the top-level error, as Claude Code sends it.

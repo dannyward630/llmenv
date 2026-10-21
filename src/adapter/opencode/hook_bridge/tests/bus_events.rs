@@ -135,7 +135,6 @@ fn a_stop_reminder_reaches_the_next_request() {
     let plugin = write_plugin(dir.path(), &table(hooks, serde_json::json!({})));
     let driver = r#"
 const plugin = (await import(process.argv[1])).default;
-const m = await import(process.argv[1]);
 const hooks = {};
 const ctx = {
   location: { directory: process.argv[2] },
