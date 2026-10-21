@@ -122,9 +122,13 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Write the merged agent instructions to `CRUSH.md` in the Crush config dir, so Crush loads them as global context. [feat:crush]
 - Render opencode MCP tool tiers as permission rules. Read-only and mutation tools allow, and destructive tools ask. [feat:opencode]
 - Send the effort level to the opencode large model as a variant, `provider/model#<effort>`. [feat:opencode]
+- Render an unscoped Crush `deny` rule to `options.disabled_tools`, which removes the tool from the agent. A rule scoped to a pattern or path is still not rendered, and it is logged. [feat:crush]
+- Map `Task` to Crush's `agent` tool, and add `AskUserQuestion` as a neutral tool that maps to Crush's `question` tool (Crush v0.85.0 or later). [feat:crush]
+- Render bundle env vars (`capabilities.env`) to the top-level `env` key in `crush.json`. [feat:crush]
 
 ### Changed
 
+- Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
 
