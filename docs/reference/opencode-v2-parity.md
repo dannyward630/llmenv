@@ -82,7 +82,7 @@ Status key: **parity** (works the same), **partial** (works with a loss), **brok
 | `PostToolUse` | shim on `tool.execute.after` | broken | `execute.after` with mutable `result` |
 | `PostToolUseFailure` (adaptive recall) | not registered | missing | `execute.after` with `status: "error"` |
 | `PostToolBatch` (adaptive recall) | not registered | bridged (v3.14.0); transcript layer inert (#2997) | `session.step.ended` event (closest; not the same boundary) |
-| `SubagentStart`, `SubagentStop`, `subagent_task` | not registered | bridged (v3.14.0); background stop missing (#3001) | `execute.before` on tool `subagent` (start); `execute.after` with `result.status` `completed` (stop, foreground only). The `subagent` input names the agent `agent`, not `subagent_type` |
+| `SubagentStart`, `SubagentStop`, `subagent_task` | not registered | bridged (v3.14.0); background stop missing (#3001) | `execute.before` on tool `subagent` (start); `execute.after` with `result.output.status` `completed` (stop, foreground only; the subagent's own Output is `result.output`). The `subagent` input names the agent `agent`, not `subagent_type` |
 | `Stop` | shim on `session.idle`, cannot block | broken | `session.execution.succeeded` event; a block becomes `ctx.session.prompt` with the reason |
 | `Notification` | not registered | bridged (v3.14.0) | `permission.asked` event |
 | `PreCompact` | not registered | bridged (v3.14.0); `reason` is `auto` or `manual`, no `overflow` | `session.compaction.started` event |

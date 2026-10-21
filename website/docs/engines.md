@@ -227,10 +227,10 @@ See [Which hooks each engine supports](#which-hooks-each-engine-supports) for th
 | `PreToolUse` | yes | yes | yes |
 | `PostToolUse` | yes | yes | no |
 | `Stop` | yes | yes | no |
-| `Notification`, `SubagentStop`, `PreCompact` | yes | no | no |
+| `Notification`, `SubagentStop`, `PreCompact` | yes | yes (added in v3.14.0) | no |
 | `PostToolUseFailure` | yes | yes (added in v3.14.0) | no |
-| `PostToolBatch`, `SubagentStart` | yes | no | no |
-| `PostModelSwitch` | yes | no | no |
+| `PostToolBatch`, `SubagentStart` | yes | yes (added in v3.14.0) | no |
+| `PostModelSwitch` | yes | yes (added in v3.14.0) | no |
 
 An event that an engine does not support is dropped with a warning on opencode and is a hard error on Crush.
 Crush runs only `command`-kind `PreToolUse` handlers.
@@ -393,8 +393,8 @@ A bus event, such as `Notification` or `PreCompact`, cannot block the work it re
 | `PreToolUse` | tool `execute.before` | |
 | `PostToolUse`, `PostToolUseFailure` | tool `execute.after` | A failed call goes to `PostToolUseFailure` only. |
 | `Stop` | `session.execution.succeeded` | The text reaches the next request. |
-| `SubagentStart` | tool `execute.before` on `subagent` | Added in v3.14.0. Runs at launch. Its text reaches the parent session's next request, not the subagent. |
-| `SubagentStop` | tool `execute.after` on `subagent` | Added in v3.14.0. Foreground runs only. A background run returns `running` at launch, so its stop is not reported. |
+| `SubagentStart` | tool `execute.before` on `subagent` | Added in v3.14.0. Runs at launch. A block or `deny` stops the launch, as it does for `PreToolUse`. Its other text reaches the parent session's next request, not the subagent. The matcher names the agent. |
+| `SubagentStop` | tool `execute.after` on `subagent` | Added in v3.14.0. Foreground runs only. A background run reports `running` at launch, so its stop is not reported. The matcher names the agent. |
 | `Notification` | `permission.asked` event | Added in v3.14.0. The message is the permission action and its resources. |
 | `PreCompact` | `session.compaction.started` event | Added in v3.14.0. `trigger` is `auto` or `manual`. opencode reports no overflow reason. |
 | `PostModelSwitch` | `session.model.selected` event | Added in v3.14.0. `from_model` and `to_model` are `provider/model#variant`. |
@@ -402,6 +402,7 @@ A bus event, such as `Notification` or `PreCompact`, cannot block the work it re
 
 Not bridged yet: a `PreToolUse` `ask` decision, a `Stop` block that continues a finished turn, `transcript_path`, `mcp_tool` handlers, and a stop for a background `SubagentStop`.
 Each one has an open issue on the v3.14.0 milestone: #2997, #2998, #2999, #3000, and #3001.
+A matcher on `Notification`, `PostModelSwitch`, or `PostToolBatch` is ignored, because those events pass no matcher subject yet (#3003).
 
 ### Env vars
 

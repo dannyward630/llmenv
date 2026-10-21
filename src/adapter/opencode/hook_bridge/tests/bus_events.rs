@@ -31,11 +31,14 @@ await plugin.setup(ctx);
 const call = { sessionID: "ses_1", agent: "build", messageID: "m", tool: "subagent" };
 const input = { agent: "explore", description: "find it", prompt: "look" };
 await hooks["tool.execute.before"]({ ...call, id: "s1", input });
+// The subagent's own Output sits in `result.output`, as opencode 2.0.31 sends it.
 await hooks["tool.execute.after"]({
-  ...call, id: "s1", input, status: "completed", result: { sessionID: "c1", status: "completed", output: "found it" },
+  ...call, id: "s1", input, status: "completed",
+  result: { output: { sessionID: "c1", status: "completed", output: "found it" }, metadata: {} },
 });
 await hooks["tool.execute.after"]({
-  ...call, id: "s2", input, status: "completed", result: { sessionID: "c2", status: "running", output: "" },
+  ...call, id: "s2", input, status: "completed",
+  result: { output: { sessionID: "c2", status: "running", output: "" }, metadata: {} },
 });
 // Poll until the six payloads are logged and the Notification text is delivered. The event
 // stream runs on its own schedule, so a fixed sleep is too short under load.
@@ -61,7 +64,7 @@ fn the_plugin_bridges_bus_events_and_subagent_stops() {
     let log = dir.path().join("payloads.jsonl");
     let log_s = log.display();
     // One printf writes a whole line, so hooks that run at once cannot interleave their payloads.
-    let record = format!("p=$(cat); printf '%s\\n' \"$p\" >> {log_s}");
+    let record = format!("p=$(cat); printf '%s\\n' \"$p\" >> '{log_s}'");
     let note = r#"{"hookSpecificOutput":{"additionalContext":"notify note"}}"#;
     let hooks = vec![
         hook("SubagentStart", None, &record),
@@ -170,5 +173,109 @@ console.log(JSON.stringify({ first: first.system.map((p) => p.text), second: sec
             .unwrap()
             .contains(&serde_json::json!("stop note")),
         "{out}"
+    );
+}
+
+/// Drives one `subagent` launch per agent through `execute.before`, and reports which launch was blocked.
+const LAUNCH_DRIVER: &str = r#"
+const plugin = (await import(process.argv[1])).default;
+const hooks = {};
+const ctx = {
+  location: { directory: process.argv[2] },
+  tool: { hook: async (name, cb) => { hooks["tool." + name] = cb; } },
+  session: { hook: async (name, cb) => { hooks["session." + name] = cb; } },
+  event: { subscribe: () => (async function* () {})() },
+};
+await plugin.setup(ctx);
+const launch = async (agent) => {
+  const e = { sessionID: "ses_1", agent: "build", messageID: "m", id: "c", tool: "subagent",
+    input: { agent, description: "d", prompt: "p" } };
+  try {
+    await hooks["tool.execute.before"](e);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+};
+const out = { explore: await launch("explore"), general: await launch("general") };
+console.log(JSON.stringify(out));
+"#;
+
+#[test]
+fn a_subagent_start_block_stops_a_matching_launch_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no explore"}}"#;
+    let hooks = vec![hook(
+        "SubagentStart",
+        Some("explore"),
+        &format!("echo '{deny}'"),
+    )];
+    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]);
+    table["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|h| !h["command"].as_str().unwrap().starts_with("llmenv "));
+    let plugin = write_plugin(dir.path(), &table);
+    let out = run_node(LAUNCH_DRIVER, &[&plugin, dir.path()]);
+
+    assert_eq!(out["explore"]["ok"], false, "{out}");
+    assert_eq!(out["explore"]["reason"], "no explore");
+    // The matcher names the agent, so a launch of another agent is not blocked.
+    assert_eq!(out["general"]["ok"], true, "{out}");
+}
+
+/// Sends a malformed bus event and an inherited property name. Neither may run a hook.
+const MALFORMED_DRIVER: &str = r#"
+const plugin = (await import(process.argv[1])).default;
+const hooks = {};
+const events = [
+  { type: "session.created", data: { sessionID: "ses_1" } },
+  { type: "constructor", data: { sessionID: "ses_1" } },
+  { type: "permission.asked", data: { sessionID: "ses_1", id: "p1", action: "shell" } },
+];
+const ctx = {
+  location: { directory: process.argv[2] },
+  tool: { hook: async (name, cb) => { hooks["tool." + name] = cb; } },
+  session: { hook: async (name, cb) => { hooks["session." + name] = cb; } },
+  event: { subscribe: () => (async function* () { for (const ev of events) yield ev; })() },
+};
+await plugin.setup(ctx);
+const system = [];
+for (let i = 0; i < 500 && !system.some((p) => p.text.includes("permission.asked")); i++) {
+  await new Promise((r) => setTimeout(r, 10));
+  await hooks["session.context"]({ sessionID: "ses_1", system });
+}
+console.log(JSON.stringify(system.map((p) => p.text)));
+"#;
+
+#[test]
+fn a_malformed_bus_event_is_named_and_an_inherited_name_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("payloads.jsonl");
+    let log_s = log.display();
+    let record = format!("p=$(cat); printf '%s\\n' \"$p\" >> '{log_s}'");
+    let hooks = vec![hook("Notification", None, &record)];
+    let mut table = hook_table(&hooks, &[], &["codebase-memory-mcp"]);
+    table["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|h| !h["command"].as_str().unwrap().starts_with("llmenv "));
+    let plugin = write_plugin(dir.path(), &table);
+    let system = run_node(MALFORMED_DRIVER, &[&plugin, dir.path()]);
+
+    let named = system
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t.as_str())
+        .find(|t| t.contains("permission.asked"))
+        .unwrap_or_default();
+    assert!(
+        named.starts_with("llmenv: the permission.asked event hook failed:"),
+        "{system}"
+    );
+    assert!(
+        !log.exists(),
+        "neither bad event may run the Notification hook"
     );
 }
