@@ -264,8 +264,14 @@ export default {
     });
     await ctx.tool.hook("execute.after", async (e) => {
       const neutral = toNeutral(e.tool, e.input ?? {});
-      const response = e.status === "completed" ? e.result : { error: String(e.error?.message ?? e.error) };
-      const out = await runHooks("PostToolUse", e.sessionID, { tool_name: neutral.name, tool_input: neutral.input, tool_response: response }, neutral.name);
+      // Claude Code sends a failed call to PostToolUseFailure, not to PostToolUse.
+      const failed = e.status !== "completed";
+      const response = failed ? { error: String(e.error?.message ?? e.error) } : e.result;
+      const event = failed ? "PostToolUseFailure" : "PostToolUse";
+      const payload = { tool_name: neutral.name, tool_input: neutral.input, tool_response: response };
+      // The failure consumer reads the top-level error, as Claude Code sends it.
+      if (failed) payload.error = response.error;
+      const out = await runHooks(event, e.sessionID, payload, neutral.name);
       const s = state(e.sessionID);
       s.errors.push(...out.errors);
       if (out.context.length) s.turn.push(...out.context);
