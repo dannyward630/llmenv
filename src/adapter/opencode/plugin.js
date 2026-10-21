@@ -229,18 +229,57 @@ export function systemParts(sessionID) {
   return [...table, ...s.start, ...s.turn, ...once, ...errors].map((text) => ({ type: "text", text }));
 }
 
+/**
+ * Hand a hook result to the next request. opencode cannot continue a finished turn or a subagent
+ * call, so a reminder or a block from a Stop, subagent, or bus-event hook waits for the next request.
+ */
+function deliverLater(sessionID, out) {
+  const s = state(sessionID);
+  s.once.push(...out.context);
+  if (out.block) s.once.push(out.block);
+  s.errors.push(...out.errors);
+}
+
+/** The Claude payload fields of a `subagent` call. opencode names the agent `agent`, not `subagent_type`. */
+function subagentFields(input) {
+  return { agent_type: input.agent ?? "", description: input.description ?? "", prompt: input.prompt ?? "" };
+}
+
+/** The model text llmenv reads, `provider/model#variant`, from an opencode model reference. */
+function modelText(ref) {
+  if (!ref) return "";
+  return `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+}
+
+/**
+ * Claude hook events that opencode raises as bus events: the Claude event name and its payload.
+ * `session.step.ended` is the closest boundary to PostToolBatch, not the same one: it ends each
+ * model step, including a step with no tool call.
+ */
+const BUS_HOOKS = {
+  "permission.asked": (d) => ({
+    event: "Notification",
+    payload: { message: d.message ?? `Permission needed for ${d.action}: ${(d.resources ?? []).join(", ")}` },
+  }),
+  "session.compaction.started": (d) => ({ event: "PreCompact", payload: { trigger: d.reason } }),
+  "session.model.selected": (d) => ({
+    event: "PostModelSwitch",
+    payload: { from_model: modelText(d.previous), to_model: modelText(d.model) },
+  }),
+  "session.step.ended": () => ({ event: "PostToolBatch", payload: {} }),
+};
+
 async function onEvent(ev) {
   const sessionID = ev?.data?.sessionID;
   if (!sessionID) return;
   if (ev.type === "session.created") await startSession(sessionID);
   else if (ev.type === "session.execution.succeeded") {
-    const out = await runHooks("Stop", sessionID, { stop_hook_active: false });
-    // opencode cannot continue a finished turn, so a Stop reminder or block goes to the next request.
-    const s = state(sessionID);
-    s.once.push(...out.context);
-    if (out.block) s.once.push(out.block);
-    s.errors.push(...out.errors);
+    deliverLater(sessionID, await runHooks("Stop", sessionID, { stop_hook_active: false }));
   } else if (ev.type === "session.deleted") await endSession(sessionID);
+  else if (BUS_HOOKS[ev.type]) {
+    const { event, payload } = BUS_HOOKS[ev.type](ev.data);
+    deliverLater(sessionID, await runHooks(event, sessionID, payload));
+  }
 }
 
 /** Log `text`, and give it to the next request of every open session. */
@@ -261,6 +300,9 @@ export default {
       if (out.block) throw new Error(out.block);
       if (out.updatedInput) e.input = fromNeutral(e.tool, out.updatedInput);
       if (out.context.length) state(e.sessionID).turn.push(...out.context);
+      if (e.tool === "subagent") {
+        deliverLater(e.sessionID, await runHooks("SubagentStart", e.sessionID, subagentFields(e.input ?? {})));
+      }
     });
     await ctx.tool.hook("execute.after", async (e) => {
       const neutral = toNeutral(e.tool, e.input ?? {});
@@ -275,6 +317,12 @@ export default {
       const s = state(e.sessionID);
       s.errors.push(...out.errors);
       if (out.context.length) s.turn.push(...out.context);
+      // A background subagent returns a result of "running" at launch. Its stop is not reported
+      // here, so no SubagentStop runs for it (see docs/reference/opencode-v2-parity.md).
+      if (e.tool === "subagent" && e.result?.status === "completed") {
+        const stop = { stop_hook_active: false, ...subagentFields(e.input ?? {}), last_assistant_message: e.result?.output ?? "" };
+        deliverLater(e.sessionID, await runHooks("SubagentStop", e.sessionID, stop));
+      }
     });
     await ctx.session.hook("prompt", async (e) => {
       await startSession(e.sessionID);
