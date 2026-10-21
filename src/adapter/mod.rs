@@ -3,6 +3,7 @@ pub mod crush;
 pub(crate) mod hook_command;
 mod json_nulls;
 pub(crate) mod llmenv_skill;
+pub(crate) mod mcp_tiers;
 pub(crate) mod model_settings;
 pub(crate) mod native_keys;
 pub mod opencode;
