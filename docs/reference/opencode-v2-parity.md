@@ -77,20 +77,20 @@ Status key: **parity** (works the same), **partial** (works with a loss), **brok
 | `SessionEnd` | shim on `session.deleted` and `dispose` | broken | `session.deleted` event; plugin cleanup function |
 | `UserPromptSubmit` (`turn_start` recall, rules digest, throttle) | shim on `chat.message`; throttle not wired | broken; throttle missing | `ctx.session.hook("prompt")` (mutable prompt) |
 | `PreToolUse` deny | exit code 2 only | broken | `ctx.tool.hook("execute.before")` fails with `Tool.Error` |
-| `PreToolUse` `ask` decision | not supported | missing | `ctx.permission.hook("evaluate")` sets `effect` to `ask` (`opencode/packages/plugin/src/effect/permission.ts:10-22`) |
+| `PreToolUse` `ask` decision | not supported | missing (#2998) | `ctx.permission.hook("evaluate")` sets `effect` to `ask` (`opencode/packages/plugin/src/effect/permission.ts:10-22`) |
 | `PreToolUse` `updatedInput` | not supported | missing | `execute.before` has a mutable `input` (`opencode/packages/plugin/src/effect/tool.ts:20-28`) |
 | `PostToolUse` | shim on `tool.execute.after` | broken | `execute.after` with mutable `result` |
 | `PostToolUseFailure` (adaptive recall) | not registered | missing | `execute.after` with `status: "error"` |
-| `PostToolBatch` (adaptive recall) | not registered | missing | `session.step.ended` event (closest; not the same boundary) |
-| `SubagentStart`, `SubagentStop`, `subagent_task` | not registered | missing | `execute.before` and `execute.after` on tool `subagent` |
+| `PostToolBatch` (adaptive recall) | not registered | bridged (v3.14.0); transcript layer inert (#2997) | `session.step.ended` event (closest; not the same boundary) |
+| `SubagentStart`, `SubagentStop`, `subagent_task` | not registered | bridged (v3.14.0); background stop missing (#3001) | `execute.before` on tool `subagent` (start); `execute.after` with `result.status` `completed` (stop, foreground only). The `subagent` input names the agent `agent`, not `subagent_type` |
 | `Stop` | shim on `session.idle`, cannot block | broken | `session.execution.succeeded` event; a block becomes `ctx.session.prompt` with the reason |
-| `Notification` | not registered | missing | `permission.asked` event |
-| `PreCompact` | not registered | missing | `ctx.session.hook("compaction")`, or `session.compaction.started` |
-| `PostModelSwitch` (agent-config doc, #2398) | not registered | missing | `session.model.selected` event |
+| `Notification` | not registered | bridged (v3.14.0) | `permission.asked` event |
+| `PreCompact` | not registered | bridged (v3.14.0); `reason` is `auto` or `manual`, no `overflow` | `session.compaction.started` event |
+| `PostModelSwitch` (agent-config doc, #2398) | not registered | bridged (v3.14.0) | `session.model.selected` event |
 | Tool matcher on bundle hooks | matcher dropped; every hook runs on every tool (`generate_shim_js`) | broken (also wrong on v1) | filter in the plugin before the spawn |
-| `mcp_tool` hook handler | dropped with a warning | missing | plugin calls the MCP tool through the `mcp` domain (not verified) |
+| `mcp_tool` hook handler | dropped with a warning | missing (#3000) | plugin calls the MCP tool through the `mcp` domain (not verified) |
 | `session_id` on the hook payload | read from `OPENCODE_SESSION_ID`, which v2 sets only in shell-tool children (`opencode/packages/core/src/tool/plugin/shell.ts:216`) | broken (empty) | every v2 hook input carries `sessionID` |
-| `transcript_path` | absent | missing | plugin writes a JSONL transcript under the llmenv state dir, or hook-run reads messages through the session API |
+| `transcript_path` | absent | missing (#2997) | plugin writes a JSONL transcript under the llmenv state dir, or hook-run reads messages through the session API |
 
 ### 3.2 hook-run handlers that key on Claude names
 
