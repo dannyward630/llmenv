@@ -3,6 +3,8 @@
 
 use super::*;
 
+mod bus_events;
+
 /// A fake opencode 2.x plugin context. It records the hook callbacks, sends one
 /// `session.created` event, and then drives the callbacks the way opencode does.
 const DRIVER: &str = r#"
@@ -306,50 +308,4 @@ console.log(JSON.stringify({ a: m.systemParts("s1"), b: m.systemParts("s1") }));
             "{out}"
         );
     }
-}
-
-/// The text of a Stop hook reaches the next request, one time.
-#[test]
-fn a_stop_reminder_reaches_the_next_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let hooks = serde_json::json!([
-        { "event": "Stop", "matcher": null, "command": "echo stop note", "timeout": 5000 },
-    ]);
-    let plugin = write_plugin(dir.path(), &table(hooks, serde_json::json!({})));
-    let driver = r#"
-const plugin = (await import(process.argv[1])).default;
-const m = await import(process.argv[1]);
-const hooks = {};
-const ctx = {
-  location: { directory: process.argv[2] },
-  tool: { hook: async (name, cb) => { hooks["tool." + name] = cb; } },
-  session: { hook: async (name, cb) => { hooks["session." + name] = cb; } },
-  event: { subscribe: () => (async function* () {
-    yield { type: "session.created", data: { sessionID: "ses_1" } };
-    yield { type: "session.execution.succeeded", data: { sessionID: "ses_1" } };
-  })() },
-};
-await plugin.setup(ctx);
-await new Promise((r) => setTimeout(r, 300));
-const first = { sessionID: "ses_1", system: [] };
-await hooks["session.context"](first);
-const second = { sessionID: "ses_1", system: [] };
-await hooks["session.context"](second);
-console.log(JSON.stringify({ first: first.system.map((p) => p.text), second: second.system.map((p) => p.text) }));
-"#;
-    let out = run_node(driver, &[&plugin, dir.path()]);
-    assert!(
-        out["first"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("stop note")),
-        "{out}"
-    );
-    assert!(
-        !out["second"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("stop note")),
-        "{out}"
-    );
 }
