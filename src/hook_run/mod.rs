@@ -16,9 +16,11 @@ pub(crate) mod checkpoint;
 pub(crate) mod detached_cbm;
 pub(crate) mod detached_consolidation;
 pub(crate) mod detached_store;
+mod engine_rules;
 mod event;
 mod notice;
 use bundle_names::recall_bundle_names;
+use engine_rules::blocks_by_exit_code;
 #[cfg(test)]
 pub(crate) use event::HOOK_EVENT_NAMES;
 pub(crate) use event::HookEvent;
@@ -394,20 +396,6 @@ fn append_read_once_result(out: &mut String, text: &str) {
     out.push_str(text);
 }
 
-/// Whether `engine`'s hook bridge decides a tool call was blocked from the
-/// process exit code rather than the JSON envelope on stdout.
-///
-/// opencode's generated plugin shim checks `code === 2` and ignores stdout for
-/// the block decision, so a deny that exits 0 there is silently allowed.
-/// Claude Code honours the envelope itself, and exit 2 would only duplicate a
-/// decision it has already made.
-///
-/// `engine` is [`crate::adapter::AgentAdapter::name`]'s hyphenated cache-dir
-/// form, the same value `should_check_stale` takes — see the warning there.
-fn blocks_by_exit_code(engine: &str) -> bool {
-    engine == "opencode"
-}
-
 /// Whether a hook decision can be returned immediately, or has to fall through
 /// so session logging still sees the event.
 ///
@@ -614,7 +602,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
              Fix: check how the engine runs the hook command."
         ));
     }
-    let stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf)
+    let mut stdin_json = serde_json::from_str::<serde_json::Value>(&stdin_buf)
         .inspect_err(|e| {
             // Empty stdin is no payload, not a broken one, so it adds no notice.
             if !stdin_buf.trim().is_empty() {
@@ -625,6 +613,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
             }
         })
         .ok();
+    engine_rules::neutralize_for_engine(engine, stdin_json.as_mut());
     // Unparseable stdin leaves the engine's name unknown, so the argv event supplies it (#2748).
     let hook_event_name = engine_event_for(
         stdin_json

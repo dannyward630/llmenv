@@ -2434,9 +2434,9 @@ mod tests {
 
     #[test]
     fn inexact_mapping_covers_a_dropped_tool() {
-        // `Task` has no crush equivalent — the rule is dropped there, which is
+        // `NotebookEdit` has no crush equivalent — the rule is dropped there, which is
         // exactly what a user needs told.
-        let found = inexact_tool_mappings(&caps_with_allow("Task", "*"), &["crush"]);
+        let found = inexact_tool_mappings(&caps_with_allow("NotebookEdit", "*"), &["crush"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].engine, "crush");
     }

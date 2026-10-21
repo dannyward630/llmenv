@@ -3,15 +3,11 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::AgentAdapter;
-use super::resolve_bundle_relative_paths;
 use crate::merge::MergedManifest;
-use crate::util::dedup;
 
+mod mcp;
 mod render;
-use render::{
-    CRUSH_MODELED_KEYS, crush_tool_name, render_default_models, render_lsp, render_model_providers,
-    render_rules_to_strings,
-};
+use render::{CRUSH_MODELED_KEYS, render_default_models, render_lsp, render_model_providers};
 
 /// Adapter for Crush: writes `crush.json` into the cache dir and exports
 /// `CRUSH_GLOBAL_CONFIG` / `CRUSH_GLOBAL_DATA` so Crush discovers it.
@@ -23,6 +19,8 @@ pub struct CrushAdapter;
 
 const CRUSH_JSON_FILE: &str = "crush.json";
 const CRUSH_MD_FILE: &str = "CRUSH.md";
+/// Command for llmenv's own PreToolUse guards. They run on every tool call, as on Claude Code.
+const CRUSH_HOOK_RUN_PRE_TOOL: &str = "llmenv hook-run --engine crush pre_tool_use";
 
 /// Crush only supports PreToolUse hooks today.
 const SUPPORTED_HOOK_EVENTS: &[&str] = &["PreToolUse"];
@@ -249,41 +247,12 @@ impl AgentAdapter for CrushAdapter {
         // Claude Code's { matcher, hooks: [{ type, command, tool }] } nesting.
         // Rendering the nested shape here means Crush reads an empty `command`
         // off the wrapper object and rejects the whole config at load time.
-        let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
-            std::collections::BTreeMap::new();
-        for hook in &compatible_hooks {
-            // P2-6: mcp_tool hooks are filtered out at the gate above, so `command`
-            // is always present for the remaining Command-kind hooks.
-            let resolved_command =
-                hook.handler
-                    .command
-                    .as_ref()
-                    .map(|cmd| match &hook.bundle_origin {
-                        Some(bundle_dir) => resolve_bundle_relative_paths(cmd, bundle_dir)
-                            .unwrap_or_else(|| {
-                                tracing::warn!(
-                                    "failed to resolve bundle-relative path for command in {:?}: {cmd:?}",
-                                    bundle_dir
-                                );
-                                cmd.clone()
-                            }),
-                        None => cmd.clone(),
-                    });
-            let mut entry = serde_json::Map::new();
-            if let Some(matcher) = &hook.matcher {
-                entry.insert("matcher".into(), json!(matcher));
-            }
-            // Omit `command` when absent rather than emitting `"command": null`
-            // — a null-valued key violates the no-null invariant and Crush
-            // rejects a wrapper carrying an empty command anyway (#720).
-            if let Some(command) = &resolved_command {
-                entry.insert("command".into(), json!(command));
-            }
-            hooks_by_event
-                .entry(hook.event.clone())
-                .or_default()
-                .push(serde_json::Value::Object(entry));
-        }
+        let mut hooks_by_event = render::render_hook_entries(&compatible_hooks);
+
+        hooks_by_event
+            .entry("PreToolUse".into())
+            .or_default()
+            .push(json!({ "command": CRUSH_HOOK_RUN_PRE_TOOL }));
 
         let mut hooks_value = serde_json::Value::Object(
             hooks_by_event
@@ -325,32 +294,12 @@ impl AgentAdapter for CrushAdapter {
         // Rendering extra keys here previously did nothing (Crush's plain
         // `json.Unmarshal` silently drops unknown fields), so this was already
         // a no-op, not a security regression — just dead output (#554).
-        let perms = &manifest.capabilities.permissions;
-        let native_perms = manifest.capabilities.native_permissions.get("crush");
-
-        let mut allowed_tools = render_rules_to_strings(&perms.allow);
-        if let Some(n) = native_perms {
-            allowed_tools.extend(n.allow.iter().cloned());
-        }
-
-        // #1325 (security-audit on #1321): that "ask/deny needs no rendering"
-        // reasoning only held while `allow` was inert too — before #1321's
-        // tool-name mapping, an unscoped allow rendered a PascalCase string
-        // that never matched a real Crush tool, so the deny-by-default
-        // fallback covered every case by accident. Now that `allow` lands as
-        // a real, matching grant, a tool also named in `deny`/`ask` must be
-        // withheld here — Crush has no `denied_tools` of its own to enforce
-        // it. Unmapped deny/ask tools are skipped, not hard-errored: there's
-        // no Crush grant to withhold in the first place.
-        let withheld: std::collections::BTreeSet<&str> = perms
-            .deny
-            .iter()
-            .chain(&perms.ask)
-            .filter_map(|rule| crush_tool_name(&rule.tool))
-            .collect();
-        allowed_tools.retain(|t| !withheld.contains(t.as_str()));
-
-        dedup(&mut allowed_tools);
+        // #1325: a tool named in `deny`/`ask` is withheld from `allowed_tools`, because an
+        // `allow` grant would otherwise override it. `disabled_tools` (below) carries the deny.
+        let (allowed_tools, disabled_tools) = render::render_permission_lists(
+            &manifest.capabilities.permissions,
+            manifest.capabilities.native_permissions.get("crush"),
+        );
 
         if !allowed_tools.is_empty() {
             let mut perm_obj = serde_json::Map::new();
@@ -358,62 +307,9 @@ impl AgentAdapter for CrushAdapter {
             doc.insert("permissions".into(), serde_json::Value::Object(perm_obj));
         }
 
-        // MCP servers (fix 6: headers/timeout/disabled_tools)
-        //
-        // Crush's MCPConfig.Type (internal/config/config.go) is a *required* field
-        // with exactly three valid values: "stdio", "sse", "http". Its MCP client
-        // dispatches on this field (internal/agent/tools/mcp/init.go) and returns
-        // "unsupported mcp type" for anything else, including a missing/empty
-        // value — so every server previously failed to initialize: stdio entries
-        // carried no `type` at all, and remote entries carried the invalid
-        // literal `"remote"`.
-        if !manifest.mcps.is_empty() || manifest.capabilities.native_mcp.contains_key("crush") {
-            let mut mcp_obj = serde_json::Map::new();
-            for mcp in &manifest.mcps {
-                use crate::mcp::resolve::ResolvedKind;
-                let mut e = match &mcp.kind {
-                    ResolvedKind::Stdio { command, args, env } => {
-                        let mut e = serde_json::Map::new();
-                        e.insert("type".into(), json!("stdio"));
-                        e.insert("command".into(), json!(command));
-                        e.insert("args".into(), json!(args));
-                        if !env.is_empty() {
-                            e.insert("env".into(), json!(env));
-                        }
-                        e
-                    }
-                    ResolvedKind::Remote { url, transport } => {
-                        let mut e = serde_json::Map::new();
-                        e.insert(
-                            "type".into(),
-                            json!(super::remote_transport_type_str(*transport)),
-                        );
-                        e.insert("url".into(), json!(url));
-                        e
-                    }
-                };
-                // Fields common to both transports (fix 6: parity).
-                if !mcp.headers.is_empty() {
-                    e.insert("headers".into(), json!(mcp.headers));
-                }
-                if let Some(t) = mcp.timeout {
-                    e.insert("timeout".into(), json!(t));
-                }
-                if !mcp.disabled_tools.is_empty() {
-                    e.insert("disabled_tools".into(), json!(mcp.disabled_tools));
-                }
-                mcp_obj.insert(mcp.name.clone(), serde_json::Value::Object(e));
-            }
-            // fix 7: overlay native_mcp.crush into the mcp object
-            let mut mcp_value = serde_json::Value::Object(mcp_obj);
-            super::overlay_native_json(
-                &mut mcp_value,
-                manifest.capabilities.native_mcp.get("crush"),
-                "native_mcp.crush",
-            )?;
-            if !mcp_value.as_object().is_none_or(serde_json::Map::is_empty) {
-                doc.insert("mcp".into(), mcp_value);
-            }
+        // MCP servers: the transport and field shapes live in `render::render_mcp`.
+        if let Some(mcp) = mcp::render_mcp(manifest)? {
+            doc.insert("mcp".into(), mcp);
         }
 
         // LSP servers (fix 1): skip disabled servers; omit "lsp" key if none remain.
@@ -454,23 +350,17 @@ impl AgentAdapter for CrushAdapter {
 
         // options.skills_paths: emit whenever any skills exist (first-class or plugin-projected).
         // P1-2: must include plugin_skill_paths — plugin-only skill sets omit this key otherwise.
-        if !skill_paths.is_empty()
+        let has_skills = !skill_paths.is_empty()
             || !plugin_skill_paths.is_empty()
-            || !llmenv_skill_paths.is_empty()
-        {
-            let skills_out = out
-                .join("skills")
-                .into_os_string()
-                .into_string()
-                .map_err(|p| {
-                    anyhow::anyhow!(
-                        "skills output path is not valid UTF-8: {}",
-                        PathBuf::from(p).display()
-                    )
-                })?;
-            let mut options_obj = serde_json::Map::new();
-            options_obj.insert("skills_paths".into(), json!([skills_out]));
-            doc.insert("options".into(), serde_json::Value::Object(options_obj));
+            || !llmenv_skill_paths.is_empty();
+        if let Some(options) = render::render_options(out, has_skills, &disabled_tools)? {
+            doc.insert("options".into(), options);
+        }
+
+        // Bundle env vars (capabilities.env) become Crush's top-level `env`. Crush
+        // shell-expands each value at startup, so a literal `$` needs escaping.
+        if !manifest.capabilities.env.is_empty() {
+            doc.insert("env".into(), render::render_env(&manifest.capabilities.env));
         }
 
         // 6. native.crush passthrough — highest-precedence layer
@@ -478,6 +368,7 @@ impl AgentAdapter for CrushAdapter {
         // keys have dedicated rendering paths and must not clobber the security output.
         // Use native_permissions.crush / native_hooks.crush / native_mcp.crush /
         // native_model_providers.crush / native_default_models.crush instead.
+        render::reject_native_disabled_tools(manifest.native.get("crush"))?;
         if let Some(native) = manifest.native.get("crush") {
             super::reject_modeled_native_keys(native, CRUSH_MODELED_KEYS, "crush")?;
         }
@@ -514,9 +405,10 @@ impl AgentAdapter for CrushAdapter {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
-    use super::render::render_permission_rule;
+    use super::render::{crush_tool_name, render_permission_rule};
     use super::{
-        CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS, crush_tool_name,
+        CRUSH_HOOK_RUN_PRE_TOOL, CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter,
+        SUPPORTED_HOOK_EVENTS,
     };
     use crate::adapter::AgentAdapter;
     use crate::adapter::skills::arb_yaml_value;
@@ -735,14 +627,17 @@ mod tests {
     }
 
     #[test]
-    fn materialize_empty_config_produces_empty_object() {
+    fn materialize_empty_config_carries_only_the_llmenv_hook() {
         let tmp = tempfile::tempdir().unwrap();
         CrushAdapter
             .materialize(&empty_manifest(), tmp.path())
             .unwrap();
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc, serde_json::json!({}));
+        assert_eq!(
+            doc,
+            serde_json::json!({ "hooks": { "PreToolUse": [{ "command": CRUSH_HOOK_RUN_PRE_TOOL }] } })
+        );
     }
 
     // ── materialize: hooks ────────────────────────────────────────────────────
@@ -880,9 +775,10 @@ mod tests {
         assert!(owned.contains(&PathBuf::from(CRUSH_JSON_FILE)));
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert!(
-            doc.get("hooks").is_none(),
-            "unsupported hook must not appear in output: {doc}"
+        assert_eq!(
+            doc["hooks"]["PreToolUse"],
+            serde_json::json!([{ "command": CRUSH_HOOK_RUN_PRE_TOOL }]),
+            "unsupported hook must not appear in output, so only llmenv's own hook remains: {doc}"
         );
     }
 
@@ -1023,7 +919,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut caps = Capabilities::default();
         caps.permissions.allow.push(PermissionRule {
-            tool: "Task".into(),
+            tool: "NotebookEdit".into(),
             pattern: None,
             paths: vec![],
         });
@@ -1316,7 +1212,7 @@ mod tests {
     #[test]
     fn render_unmapped_tool_is_dropped() {
         let rule = PermissionRule {
-            tool: "Task".into(),
+            tool: "NotebookEdit".into(),
             pattern: None,
             paths: vec![],
         };
@@ -1576,9 +1472,10 @@ mod tests {
         assert!(owned.contains(&PathBuf::from(CRUSH_JSON_FILE)));
         let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert!(
-            doc.get("hooks").is_none(),
-            "mcp_tool hook must not appear in output: {doc}"
+        assert_eq!(
+            doc["hooks"]["PreToolUse"],
+            serde_json::json!([{ "command": CRUSH_HOOK_RUN_PRE_TOOL }]),
+            "mcp_tool hook must not appear in output, so only llmenv's own hook remains: {doc}"
         );
     }
 
@@ -2714,5 +2611,25 @@ mod tests {
             map.insert(role, llmenv_config::ModelRef { provider, model });
             let _ = super::render_default_models(&map);
         }
+    }
+
+    #[test]
+    fn materialize_renders_env_and_unscoped_deny_as_disabled_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut caps = Capabilities::default();
+        caps.env.insert("TOKEN_FILE".into(), "/run/tok".into());
+        caps.permissions.deny.push(PermissionRule {
+            tool: "Bash".into(),
+            pattern: None,
+            paths: vec![],
+        });
+        CrushAdapter
+            .materialize(&manifest_with_caps(caps), tmp.path())
+            .unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join(CRUSH_JSON_FILE)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["env"]["TOKEN_FILE"], "/run/tok");
+        assert_eq!(doc["options"]["disabled_tools"][0], "bash");
+        assert!(doc.get("permissions").is_none(), "{doc}");
     }
 }
