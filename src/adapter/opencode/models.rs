@@ -12,7 +12,7 @@ use super::*;
 /// literal `@ai-sdk/...` package name) passes through unchanged, since a
 /// caller who already knows the exact package should be able to name it
 /// directly rather than being forced through a fixed enum.
-pub(super) fn opencode_provider_npm(api_type: Option<&str>) -> String {
+fn opencode_provider_npm(api_type: Option<&str>) -> String {
     match api_type {
         Some("openai") => "@ai-sdk/openai-compatible".to_string(),
         Some("anthropic") => "@ai-sdk/anthropic".to_string(),

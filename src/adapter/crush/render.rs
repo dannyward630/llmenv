@@ -99,7 +99,7 @@ pub(super) fn render_model_providers(
 ///
 /// Cost fields are flat on the Model struct (not nested under "cost"), matching
 /// catwalk's `CostPer1MIn` / `CostPer1MOut` / `CostPer1MInCached` / `CostPer1MOutCached`.
-pub(super) fn render_model_source(m: &llmenv_config::ModelSource) -> serde_json::Value {
+fn render_model_source(m: &llmenv_config::ModelSource) -> serde_json::Value {
     let mut entry = serde_json::Map::new();
     entry.insert("id".into(), json!(m.id));
     if let Some(name) = &m.name {
