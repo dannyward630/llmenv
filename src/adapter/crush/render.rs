@@ -168,7 +168,7 @@ pub(super) const CRUSH_MODELED_KEYS: &[&str] = &[
     "env",
 ];
 
-pub(super) fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
+fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
     rules.iter().flat_map(render_permission_rule).collect()
 }
 
