@@ -3,7 +3,12 @@
 //! `crush.rs` merges these fragments into the rendered config. Each function is
 //! one capability, so a change to one model key does not touch the others.
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
 use serde_json::json;
+
+use crate::util::dedup;
 
 pub(super) fn render_lsp(
     servers: &[llmenv_config::LspServer],
@@ -153,10 +158,17 @@ pub(super) fn render_default_models(
 /// Use the dedicated `native_permissions.crush` / `native_hooks.crush` / `native_mcp.crush` /
 /// `native_model_providers.crush` / `native_default_models.crush` channels instead, which
 /// merge in the safe direction.
-pub(super) const CRUSH_MODELED_KEYS: &[&str] =
-    &["permissions", "hooks", "mcp", "lsp", "providers", "models"];
+pub(super) const CRUSH_MODELED_KEYS: &[&str] = &[
+    "permissions",
+    "hooks",
+    "mcp",
+    "lsp",
+    "providers",
+    "models",
+    "env",
+];
 
-pub(super) fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
+fn render_rules_to_strings(rules: &[crate::config::PermissionRule]) -> Vec<String> {
     rules.iter().flat_map(render_permission_rule).collect()
 }
 
@@ -262,3 +274,186 @@ pub(super) fn render_permission_rule(rule: &crate::config::PermissionRule) -> Ve
         }
     }
 }
+
+/// Split the neutral permission rules into Crush's `allowed_tools` and `disabled_tools`.
+///
+/// A tool named by an `ask` or `deny` rule is withheld from `allowed_tools`, so it still
+/// prompts. Crush has no other way to enforce a conflicting deny.
+pub(super) fn render_permission_lists(
+    perms: &crate::config::Permissions,
+    native: Option<&crate::config::NativePermissionRules>,
+) -> (Vec<String>, Vec<String>) {
+    let mut allowed = render_rules_to_strings(&perms.allow);
+    let mut withheld: BTreeSet<String> = perms
+        .deny
+        .iter()
+        .chain(&perms.ask)
+        .filter_map(|rule| crush_tool_name(&rule.tool))
+        .map(str::to_string)
+        .collect();
+    // Crush's `edit` and `multiedit` also create missing files, so a `Write` deny needs their grants withheld.
+    if perms.deny.iter().any(|rule| rule.tool == "Write") {
+        withheld.extend(["edit".to_string(), "multiedit".to_string()]);
+    }
+    let mut disabled = render_disabled_tools(&perms.deny);
+    if let Some(n) = native {
+        allowed.extend(n.allow.iter().cloned());
+        withheld.extend(n.ask.iter().cloned());
+        withheld.extend(n.deny.iter().cloned());
+        disabled.extend(n.deny.iter().cloned());
+    }
+    allowed.retain(|t| !withheld.contains(t));
+    dedup(&mut allowed);
+    dedup(&mut disabled);
+    (allowed, disabled)
+}
+
+fn render_disabled_tools(deny: &[crate::config::PermissionRule]) -> Vec<String> {
+    let mut disabled = Vec::new();
+    for rule in deny {
+        if rule.pattern.is_some() || !rule.paths.is_empty() {
+            tracing::error!(
+                "crush: deny rule `{}` is scoped to a pattern or paths, which Crush cannot \
+                 express. The rule is not rendered, so `{}` stays available, with its prompt.",
+                rule.tool,
+                rule.tool
+            );
+            continue;
+        }
+        match crush_tool_name(&rule.tool) {
+            Some(name) => {
+                disabled.push(name.to_string());
+                disabled.extend(crush_aliases(name).iter().map(|alias| alias.to_string()));
+            }
+            None => tracing::error!(
+                "crush: no equivalent tool for neutral deny rule `{}`, so the rule cannot take \
+                 effect on Crush. Fix: write a Crush deny in native_permissions.crush.deny, or \
+                 remove the rule.",
+                rule.tool
+            ),
+        }
+    }
+    dedup(&mut disabled);
+    disabled
+}
+
+/// Crush tools that a neutral tool also reaches: `multiedit` edits files like `edit`, and
+/// `agentic_fetch` fetches URLs like `fetch`. A deny on the neutral tool covers them too.
+fn crush_aliases(crush_name: &str) -> &'static [&'static str] {
+    match crush_name {
+        "edit" => &["multiedit"],
+        "fetch" => &["agentic_fetch"],
+        _ => &[],
+    }
+}
+
+pub(super) fn render_options(
+    out: &Path,
+    has_skills: bool,
+    disabled_tools: &[String],
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let mut options = serde_json::Map::new();
+    if has_skills {
+        let skills_out = out
+            .join("skills")
+            .into_os_string()
+            .into_string()
+            .map_err(|p| {
+                anyhow::anyhow!(
+                    "skills output path is not valid UTF-8: {}",
+                    PathBuf::from(p).display()
+                )
+            })?;
+        options.insert("skills_paths".into(), json!([skills_out]));
+    }
+    if !disabled_tools.is_empty() {
+        options.insert("disabled_tools".into(), json!(disabled_tools));
+    }
+    Ok((!options.is_empty()).then_some(serde_json::Value::Object(options)))
+}
+
+/// Builds the top-level `env` object. Crush expands each value as a shell word at startup, so
+/// `$` and backticks are escaped. Without the escape, `$(...)` in a bundle value runs a command
+/// when Crush starts, while the other engines read the same value literally.
+pub(super) fn render_env(env: &std::collections::BTreeMap<String, String>) -> serde_json::Value {
+    let escaped: serde_json::Map<String, serde_json::Value> = env
+        .iter()
+        .map(|(key, value)| (key.clone(), json!(escape_for_crush_expansion(value))))
+        .collect();
+    serde_json::Value::Object(escaped)
+}
+
+/// Escapes a value for Crush's document-style shell expansion. Single quotes are not special there.
+fn escape_for_crush_expansion(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
+}
+
+/// `options.disabled_tools` carries the rendered deny rules. A native overlay on `options`
+/// replaces or deletes that key without an error, so the native fragment may not set it.
+pub(super) fn reject_native_disabled_tools(
+    native: Option<&serde_yaml::Value>,
+) -> anyhow::Result<()> {
+    let sets_disabled = native
+        .and_then(|n| n.get("options"))
+        .and_then(|o| o.get("disabled_tools"))
+        .is_some();
+    anyhow::ensure!(
+        !sets_disabled,
+        "native.crush sets options.disabled_tools, which llmenv renders from the deny rules. \
+         Remove that key from native.crush. Write the deny in permissions.deny, or in \
+         native_permissions.crush.deny."
+    );
+    Ok(())
+}
+
+/// Builds the event-keyed hook entries for Crush. Crush's `HookConfig` is a flat object, so
+/// each entry carries `matcher` and `command` directly. Claude Code nests them under `hooks`.
+pub(super) fn render_hook_entries(
+    hooks: &[&crate::config::Hook],
+) -> std::collections::BTreeMap<String, Vec<serde_json::Value>> {
+    let mut hooks_by_event: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    for hook in hooks {
+        // P2-6: mcp_tool hooks are filtered out at the gate above, so `command`
+        // is always present for the remaining Command-kind hooks.
+        let resolved_command = hook
+            .handler
+            .command
+            .as_ref()
+            .map(|cmd| match &hook.bundle_origin {
+                Some(bundle_dir) => crate::adapter::hook_command::resolve_bundle_relative_paths(
+                    cmd, bundle_dir,
+                )
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "failed to resolve bundle-relative path for command in {:?}: {cmd:?}",
+                        bundle_dir
+                    );
+                    cmd.clone()
+                }),
+                None => cmd.clone(),
+            });
+        let mut entry = serde_json::Map::new();
+        if let Some(matcher) = &hook.matcher {
+            entry.insert("matcher".into(), json!(matcher));
+        }
+        // Omit `command` when absent rather than emitting `"command": null`
+        // — a null-valued key violates the no-null invariant and Crush
+        // rejects a wrapper carrying an empty command anyway (#720).
+        if let Some(command) = &resolved_command {
+            entry.insert("command".into(), json!(command));
+        }
+        hooks_by_event
+            .entry(hook.event.clone())
+            .or_default()
+            .push(serde_json::Value::Object(entry));
+    }
+    hooks_by_event
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test code")]
+mod tests;
