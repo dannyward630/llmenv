@@ -14,14 +14,13 @@ use super::*;
 /// directly rather than being forced through a fixed enum.
 fn opencode_provider_npm(api_type: Option<&str>) -> String {
     match api_type {
-        Some("openai") => "@ai-sdk/openai-compatible".to_string(),
         Some("anthropic") => "@ai-sdk/anthropic".to_string(),
         Some("google") => "@ai-sdk/google".to_string(),
-        Some(other) => other.to_string(),
+        Some(other) if other != "openai" => other.to_string(),
         // No documented default for opencode; openai-compatible covers the
         // overwhelming majority of self-hosted/proxy providers this feature
         // targets (Ollama, vLLM, LM Studio, most OpenAI-compatible proxies).
-        None => "@ai-sdk/openai-compatible".to_string(),
+        Some(_) | None => "@ai-sdk/openai-compatible".to_string(),
     }
 }
 
@@ -33,16 +32,12 @@ pub(super) fn render_opencode_providers(
         .iter()
         .filter(|p| !p.disabled)
         .map(|p| {
-            let models = if p.models.is_empty() {
-                None
-            } else {
-                Some(
-                    p.models
-                        .iter()
-                        .map(|m| (m.id.clone(), render_opencode_model(m)))
-                        .collect(),
-                )
-            };
+            let models = (!p.models.is_empty()).then(|| {
+                p.models
+                    .iter()
+                    .map(|m| (m.id.clone(), render_opencode_model(m)))
+                    .collect()
+            });
             let entry = OpencodeProviderEntry {
                 npm: opencode_provider_npm(p.api_type.as_deref()),
                 name: p.name.clone(),
@@ -174,5 +169,45 @@ mod tests {
         caps.effort_level = Some("high".into());
         let (_, small) = render_opencode_default_models(&caps);
         assert_eq!(small.as_deref(), Some("anthropic/tiny"));
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::render_opencode_default_models;
+    use llmenv_config::{Capabilities, ModelEffort, ModelRef};
+
+    fn large_caps(model: &str) -> Capabilities {
+        let mut caps = Capabilities::default();
+        caps.default_models.insert(
+            "large".into(),
+            ModelRef {
+                provider: "p".into(),
+                model: model.into(),
+            },
+        );
+        caps
+    }
+
+    proptest::proptest! {
+        /// The variant is the global effort for any model id, and a per-model effort wins.
+        #[test]
+        fn variant_follows_the_global_then_the_per_model_effort(
+            model in "[a-z0-9.-]{1,12}",
+            global in "[a-z]{1,8}",
+            own in "[a-z]{1,8}",
+        ) {
+            let mut caps = large_caps(&model);
+            caps.effort_level = Some(global.clone());
+            let (plain, _) = render_opencode_default_models(&caps);
+            proptest::prop_assert_eq!(plain, Some(format!("p/{model}#{global}")));
+
+            caps.model_effort.insert(
+                model.clone(),
+                ModelEffort { effort_level: Some(own.clone()), max_effort_level: None },
+            );
+            let (overridden, _) = render_opencode_default_models(&caps);
+            proptest::prop_assert_eq!(overridden, Some(format!("p/{model}#{own}")));
+        }
     }
 }
