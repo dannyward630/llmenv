@@ -7,7 +7,7 @@ fn materialize_hook_unsupported_event_skipped() {
     let tmp = tempfile::tempdir().unwrap();
     let mut manifest = MergedManifest::default();
     manifest.capabilities.hooks.push(crate::config::Hook {
-        event: "Notification".into(),
+        event: "ConfigChange".into(),
         matcher: None,
         handler: crate::config::HookHandler {
             kind: crate::config::HookHandlerKind::Command,
@@ -18,7 +18,7 @@ fn materialize_hook_unsupported_event_skipped() {
     });
     OpencodeAdapter.materialize(&manifest, tmp.path()).unwrap();
     let shim_src = std::fs::read_to_string(tmp.path().join("plugin/llmenv-hooks.json")).unwrap();
-    assert!(!shim_src.contains("\"event\":\"Notification\""));
+    assert!(!shim_src.contains("\"event\":\"ConfigChange\""));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn materialize_plugin_hooks_happy_and_warnings() {
         serde_json::json!({
             "hooks": {
                 "PreToolUse": [{"hooks": [{"type": "command", "command": "echo ok"}]}],
-                "Notification": [{"hooks": [{"type": "command", "command": "echo n"}]}],
+                "ConfigChange": [{"hooks": [{"type": "command", "command": "echo n"}]}],
             }
         })
         .to_string(),
@@ -87,7 +87,7 @@ fn materialize_plugin_hooks_happy_and_warnings() {
     OpencodeAdapter.materialize(&manifest, out.path()).unwrap();
     let shim_src = std::fs::read_to_string(out.path().join("plugin/llmenv-hooks.json")).unwrap();
     assert!(shim_src.contains("echo ok"));
-    assert!(!shim_src.contains("echo n"), "Notification is unsupported");
+    assert!(!shim_src.contains("echo n"), "ConfigChange is unsupported");
 }
 
 #[test]

@@ -33,7 +33,7 @@ let workDir = process.cwd();
 
 /** The neutral tool name and Claude argument keys for an opencode tool call. */
 export function toNeutral(tool, input) {
-  const mapped = TABLE.tools[tool];
+  const mapped = Object.hasOwn(TABLE.tools, tool) ? TABLE.tools[tool] : undefined;
   if (mapped) return { name: mapped.name, input: renameKeys(input, mapped.args) };
   for (const [namespace, server] of NAMESPACES) {
     const prefix = `${namespace}_`;
@@ -46,7 +46,7 @@ export function toNeutral(tool, input) {
 
 /** `input` with the opencode keys put back, for an `updatedInput` from a hook. */
 export function fromNeutral(tool, input) {
-  const mapped = TABLE.tools[tool];
+  const mapped = Object.hasOwn(TABLE.tools, tool) ? TABLE.tools[tool] : undefined;
   if (!mapped) return input;
   const back = Object.fromEntries(Object.entries(mapped.args).map(([from, to]) => [to, from]));
   return renameKeys(input, back);
@@ -211,8 +211,8 @@ async function endSession(sessionID) {
   if (!s || s.ended) return;
   s.ended = true;
   const out = await runHooks("SessionEnd", sessionID, {});
-  // The session is over, so no request can carry these errors.
-  for (const error of out.errors) console.error(error);
+  // The session is over, so no request can carry these texts. Log them, so none is lost silently.
+  for (const text of [...out.errors, ...s.errors, ...s.once]) console.error(text);
   sessions.delete(sessionID);
 }
 
@@ -229,18 +229,62 @@ export function systemParts(sessionID) {
   return [...table, ...s.start, ...s.turn, ...once, ...errors].map((text) => ({ type: "text", text }));
 }
 
+/**
+ * Hand a hook result to the next request. opencode cannot continue a finished turn or a subagent
+ * call, so a reminder or a block from a Stop, subagent, or bus-event hook waits for the next request.
+ */
+function deliverLater(sessionID, out) {
+  const s = sessions.get(sessionID);
+  // A hook result for a session that was never started, or that already ended, has no request to reach.
+  if (!s) {
+    for (const text of [...out.context, ...(out.block ? [out.block] : []), ...out.errors]) console.error(text);
+    return;
+  }
+  s.once.push(...out.context);
+  if (out.block) s.once.push(out.block);
+  s.errors.push(...out.errors);
+}
+
+/** The Claude payload fields of a `subagent` call. opencode names the agent `agent`, not `subagent_type`. */
+function subagentFields(input) {
+  return { agent_type: input.agent, description: input.description, prompt: input.prompt };
+}
+
+/** The model text llmenv reads, `provider/model#variant`, from an opencode model reference. */
+function modelText(ref) {
+  return `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+}
+
+/**
+ * Claude hook events that opencode raises as bus events: the Claude event name and its payload.
+ * `session.step.ended` is the closest boundary to PostToolBatch, not the same one: it ends each
+ * model step, including a step with no tool call.
+ */
+const BUS_HOOKS = {
+  "permission.asked": (d) => ({
+    event: "Notification",
+    payload: { message: d.message ?? `Permission needed for ${d.action}: ${d.resources.join(", ")}` },
+  }),
+  "session.compaction.started": (d) => ({ event: "PreCompact", payload: { trigger: d.reason }, subject: d.reason }),
+  "session.model.selected": (d) => ({
+    event: "PostModelSwitch",
+    payload: { ...(d.previous ? { from_model: modelText(d.previous) } : {}), to_model: modelText(d.model) },
+  }),
+  "session.step.ended": () => ({ event: "PostToolBatch", payload: {} }),
+};
+
 async function onEvent(ev) {
   const sessionID = ev?.data?.sessionID;
   if (!sessionID) return;
   if (ev.type === "session.created") await startSession(sessionID);
   else if (ev.type === "session.execution.succeeded") {
-    const out = await runHooks("Stop", sessionID, { stop_hook_active: false });
-    // opencode cannot continue a finished turn, so a Stop reminder or block goes to the next request.
-    const s = state(sessionID);
-    s.once.push(...out.context);
-    if (out.block) s.once.push(out.block);
-    s.errors.push(...out.errors);
+    deliverLater(sessionID, await runHooks("Stop", sessionID, { stop_hook_active: false }));
   } else if (ev.type === "session.deleted") await endSession(sessionID);
+  // A plain object inherits `constructor` and friends, so only an own key names a bus hook.
+  else if (Object.hasOwn(BUS_HOOKS, ev.type)) {
+    const { event, payload, subject } = BUS_HOOKS[ev.type](ev.data);
+    deliverLater(sessionID, await runHooks(event, sessionID, payload, subject));
+  }
 }
 
 /** Log `text`, and give it to the next request of every open session. */
@@ -261,12 +305,18 @@ export default {
       if (out.block) throw new Error(out.block);
       if (out.updatedInput) e.input = fromNeutral(e.tool, out.updatedInput);
       if (out.context.length) state(e.sessionID).turn.push(...out.context);
+      if (e.tool === "subagent") {
+        // A block stops the launch, as a PreToolUse block does. The other output still reaches the model.
+        const { block, ...rest } = await runHooks("SubagentStart", e.sessionID, subagentFields(e.input ?? {}), e.input?.agent);
+        deliverLater(e.sessionID, rest);
+        if (block) throw new Error(block);
+      }
     });
     await ctx.tool.hook("execute.after", async (e) => {
       const neutral = toNeutral(e.tool, e.input ?? {});
       // Claude Code sends a failed call to PostToolUseFailure, not to PostToolUse.
       const failed = e.status !== "completed";
-      const response = failed ? { error: String(e.error?.message ?? e.error) } : e.result;
+      const response = failed ? { error: String(e.error?.message ?? e.error ?? "unknown error") } : e.result;
       const event = failed ? "PostToolUseFailure" : "PostToolUse";
       const payload = { tool_name: neutral.name, tool_input: neutral.input, tool_response: response };
       // The failure consumer reads the top-level error, as Claude Code sends it.
@@ -275,6 +325,13 @@ export default {
       const s = state(e.sessionID);
       s.errors.push(...out.errors);
       if (out.context.length) s.turn.push(...out.context);
+      // The subagent's own Output is `result.output`. A background call returns "running" there at
+      // launch, so its stop is not reported here (see docs/reference/opencode-v2-parity.md).
+      const run = e.tool === "subagent" && e.status === "completed" ? e.result?.output : undefined;
+      if (run?.status === "completed") {
+        const stop = { stop_hook_active: false, ...subagentFields(e.input ?? {}), last_assistant_message: run.output };
+        deliverLater(e.sessionID, await runHooks("SubagentStop", e.sessionID, stop, e.input?.agent));
+      }
     });
     await ctx.session.hook("prompt", async (e) => {
       await startSession(e.sessionID);
@@ -290,9 +347,9 @@ export default {
     // Not awaited: setup must return, and the event stream never ends.
     void (async () => {
       for await (const ev of ctx.event.subscribe()) {
-        await onEvent(ev).catch((err) => toEverySession(`llmenv: an event hook failed: ${err.message}`));
+        await onEvent(ev).catch((err) => toEverySession(`llmenv: the ${ev.type} event hook failed: ${err?.message ?? err}`));
       }
-    })().catch((err) => toEverySession(`llmenv: the event stream stopped, so SessionStart, Stop, and SessionEnd hooks no longer run: ${err.message}`));
+    })().catch((err) => toEverySession(`llmenv: the event stream stopped, so SessionStart, Stop, SessionEnd, Notification, PreCompact, PostModelSwitch, and PostToolBatch hooks no longer run: ${err?.message ?? err}`));
     return async () => {
       await Promise.all([...sessions.keys()].map(endSession));
     };

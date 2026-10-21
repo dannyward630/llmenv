@@ -115,6 +115,7 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Added
 
+- Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode]
 - Write the merged agent instructions to `CRUSH.md` in the Crush config dir, so Crush loads them as global context. [feat:crush]
 - Render opencode MCP tool tiers as permission rules. Read-only and mutation tools allow, and destructive tools ask. [feat:opencode]
 - Send the effort level to the opencode large model as a variant, `provider/model#<effort>`. [feat:opencode]
