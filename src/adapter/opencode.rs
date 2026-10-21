@@ -17,8 +17,12 @@ use crate::merge::MergedManifest;
 pub struct OpencodeAdapter;
 
 mod hook_bridge;
+mod models;
 mod permissions;
+mod tiers;
 mod translate;
+use hook_bridge::SUPPORTED_HOOK_EVENTS;
+use models::{render_opencode_default_models, render_opencode_providers};
 #[cfg(test)]
 use translate::{OPENCODE_AGENT_KEYS, dropped_agent_keys, split_frontmatter};
 use translate::{translate_agent_md, translate_command_md};
@@ -139,8 +143,6 @@ struct OpencodeModelEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<OpencodeModelLimit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cost: Option<OpencodeModelCost>,
@@ -190,17 +192,6 @@ struct LspServerEntry {
     #[serde(skip_serializing_if = "Option::is_none", rename = "initialization")]
     init_options: Option<serde_json::Value>,
 }
-
-/// opencode supports exactly these hook events via its JS plugin API.
-/// See spec §3 for the event mapping.
-const SUPPORTED_HOOK_EVENTS: &[&str] = &[
-    "SessionStart",
-    "SessionEnd",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "Stop",
-];
 
 // ── Plugin hooks manifest deserialization ──
 
@@ -771,10 +762,17 @@ impl AgentAdapter for OpencodeAdapter {
         };
 
         // 9. Permissions — an ordered rule list; opencode applies the last rule that matches.
-        let config_permissions = permissions::render(
-            &manifest.capabilities.permissions,
-            manifest.capabilities.native_permissions.get("opencode"),
-        )?;
+        // Tier rules come first: opencode applies the last matching rule, so a user rule wins.
+        let config_permissions = {
+            let mut rules = tiers::tier_rules(manifest);
+            if let Some(user) = permissions::render(
+                &manifest.capabilities.permissions,
+                manifest.capabilities.native_permissions.get("opencode"),
+            )? {
+                rules.extend(user);
+            }
+            (!rules.is_empty()).then_some(rules)
+        };
 
         // 9b. Model providers + default models.
         let config_provider = {
@@ -791,7 +789,7 @@ impl AgentAdapter for OpencodeAdapter {
                 .then_some(value)
         };
         let (config_model, config_small_model) =
-            render_opencode_default_models(&manifest.capabilities.default_models);
+            render_opencode_default_models(&manifest.capabilities);
 
         // 10. Native overlay — reject modeled keys, then deep-merge
         const OPENCODE_MODELED_KEYS: &[&str] = &[
@@ -939,95 +937,6 @@ impl AgentAdapter for OpencodeAdapter {
             super::SessionStartContext::Accepted,
         )
     }
-}
-
-/// Map llmenv's `ModelProvider.api_type` (an open wire-format string) to the
-/// AI SDK npm package opencode's `provider.<id>.npm` field expects.
-///
-/// Known short forms expand to the common case; anything else (including a
-/// literal `@ai-sdk/...` package name) passes through unchanged, since a
-/// caller who already knows the exact package should be able to name it
-/// directly rather than being forced through a fixed enum.
-fn opencode_provider_npm(api_type: Option<&str>) -> String {
-    match api_type {
-        Some("openai") => "@ai-sdk/openai-compatible".to_string(),
-        Some("anthropic") => "@ai-sdk/anthropic".to_string(),
-        Some("google") => "@ai-sdk/google".to_string(),
-        Some(other) => other.to_string(),
-        // No documented default for opencode; openai-compatible covers the
-        // overwhelming majority of self-hosted/proxy providers this feature
-        // targets (Ollama, vLLM, LM Studio, most OpenAI-compatible proxies).
-        None => "@ai-sdk/openai-compatible".to_string(),
-    }
-}
-
-/// Render `capabilities.model_providers` into opencode's `provider.<id>` map.
-fn render_opencode_providers(
-    providers: &[llmenv_config::ModelProvider],
-) -> BTreeMap<String, OpencodeProviderEntry> {
-    providers
-        .iter()
-        .filter(|p| !p.disabled)
-        .map(|p| {
-            let models = if p.models.is_empty() {
-                None
-            } else {
-                Some(
-                    p.models
-                        .iter()
-                        .map(|m| (m.id.clone(), render_opencode_model(m)))
-                        .collect(),
-                )
-            };
-            let entry = OpencodeProviderEntry {
-                npm: opencode_provider_npm(p.api_type.as_deref()),
-                name: p.name.clone(),
-                options: OpencodeProviderOptions {
-                    base_url: p.base_url.clone(),
-                    api_key: p.api_key.clone(),
-                    headers: (!p.headers.is_empty()).then(|| p.headers.clone()),
-                },
-                models,
-            };
-            (p.id.clone(), entry)
-        })
-        .collect()
-}
-
-fn render_opencode_model(m: &llmenv_config::ModelSource) -> OpencodeModelEntry {
-    OpencodeModelEntry {
-        name: m.name.clone(),
-        reasoning: m.reasoning.then_some(true),
-        // opencode's schema requires both `context` and `output` when `limit`
-        // is present at all — only emit it when llmenv has both.
-        limit: match (m.context_window, m.max_tokens) {
-            (Some(context), Some(output)) => Some(OpencodeModelLimit { context, output }),
-            _ => None,
-        },
-        cost: m.cost.as_ref().map(|c| OpencodeModelCost {
-            input: c.input,
-            output: c.output,
-            cache_read: c.cache_read,
-            cache_write: c.cache_write,
-        }),
-        modalities: (!m.modalities.is_empty()).then(|| OpencodeModalities {
-            input: m.modalities.clone(),
-        }),
-    }
-}
-
-/// Render `default_models` into opencode's `model`/`small_model` top-level
-/// fields, as `provider_id/model_id` strings. opencode has exactly two
-/// default-model slots — `large` maps to `model`, `small` maps to
-/// `small_model` — so any other role name has no destination and is dropped.
-fn render_opencode_default_models(
-    models: &std::collections::BTreeMap<String, llmenv_config::ModelRef>,
-) -> (Option<String>, Option<String>) {
-    let render = |r#ref: &llmenv_config::ModelRef| format!("{}/{}", r#ref.provider, r#ref.model);
-    (
-        models.get("large").map(render),
-        models.get("small").map(render),
-    )
 }
 
 /// Write the translation of the bundle file `rel` over its copy in `out`.
@@ -1524,7 +1433,8 @@ mod tests {
 
         let model = &provider["models"]["llama3.1:70b"];
         assert_eq!(model["name"], serde_json::json!("Llama 3.1 70B"));
-        assert_eq!(model["reasoning"], serde_json::json!(true));
+        // opencode 2.x rejects a model `reasoning` field, so llmenv does not emit one (#2847).
+        assert!(model.get("reasoning").is_none());
         assert_eq!(model["limit"]["context"], serde_json::json!(128_000));
         assert_eq!(model["limit"]["output"], serde_json::json!(8192));
         assert_eq!(model["cost"]["input"], serde_json::json!(0.0));
@@ -4041,20 +3951,16 @@ mod tests {
     fn arb_opencode_model_entry() -> impl Strategy<Value = OpencodeModelEntry> {
         (
             proptest::option::of("[a-z ]{1,10}"),
-            proptest::option::of(proptest::bool::ANY),
             proptest::option::of(arb_opencode_model_limit()),
             proptest::option::of(arb_opencode_model_cost()),
             proptest::option::of(arb_opencode_modalities()),
         )
-            .prop_map(
-                |(name, reasoning, limit, cost, modalities)| OpencodeModelEntry {
-                    name,
-                    reasoning,
-                    limit,
-                    cost,
-                    modalities,
-                },
-            )
+            .prop_map(|(name, limit, cost, modalities)| OpencodeModelEntry {
+                name,
+                limit,
+                cost,
+                modalities,
+            })
     }
 
     fn arb_opencode_provider_options() -> impl Strategy<Value = OpencodeProviderOptions> {

@@ -27,6 +27,7 @@ out.allowed = await call("shell", { command: "ls" });
 out.exit2 = await call("read", { path: "/etc/hosts" });
 out.edit = await call("edit", { path: "/a", oldString: "x", newString: "y" });
 await hooks["tool.execute.after"]({ tool: "codebase-memory-mcp_index_repository", sessionID: "ses_1", agent: "build", messageID: "m", id: "c2", input: { repo_path: "/r" }, status: "completed", result: { content: "ok" } });
+await hooks["tool.execute.after"]({ tool: "codebase-memory-mcp_index_repository", sessionID: "ses_1", agent: "build", messageID: "m", id: "c3", input: { repo_path: "/r" }, status: "error", error: new Error("boom") });
 const prompt = { sessionID: "ses_1", messageID: "m", prompt: { text: "hi" }, delivery: "immediate" };
 await hooks["session.prompt"](prompt);
 const context = { sessionID: "ses_1", system: [] };
@@ -71,6 +72,8 @@ fn the_plugin_runs_hooks_as_opencode_would() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("payloads.jsonl");
     let log_s = log.display();
+    let failures = dir.path().join("failures.jsonl");
+    let fail_s = failures.display();
     let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no drop"}}"#;
     let hooks = vec![
         hook(
@@ -89,6 +92,11 @@ fn the_plugin_runs_hooks_as_opencode_would() {
             "PostToolUse",
             None,
             &format!("cat >> {log_s}; echo >> {log_s}"),
+        ),
+        hook(
+            "PostToolUseFailure",
+            None,
+            &format!("cat >> {fail_s}; echo >> {fail_s}"),
         ),
         hook(
             "UserPromptSubmit",
@@ -111,6 +119,18 @@ fn the_plugin_runs_hooks_as_opencode_would() {
     assert_eq!(out["allowed"]["ok"], true);
     assert_eq!(out["exit2"]["reason"], "read is blocked");
     assert_eq!(out["edit"]["ok"], true, "no hook selects Edit");
+    // A failed call goes to PostToolUseFailure only, as Claude Code sends it.
+    let failed = std::fs::read_to_string(&failures).unwrap();
+    assert!(
+        failed.contains("\"hook_event_name\":\"PostToolUseFailure\""),
+        "{failed}"
+    );
+    assert!(failed.contains("\"error\":\"boom\""), "{failed}");
+    let posted = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !posted.contains("boom"),
+        "a failed call reached PostToolUse: {posted}"
+    );
     let system: Vec<&str> = out["system"]
         .as_array()
         .unwrap()
