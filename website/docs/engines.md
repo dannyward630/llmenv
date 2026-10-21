@@ -283,6 +283,7 @@ coexist in a single shell session without conflict.
 | Plugins / marketplace | **Hard error** | Crush has no plugin or marketplace concept; non-skill plugin content (custom `agents/`, `commands/`) produces an actionable error naming the plugin |
 | Custom agents | **Unsupported** | Crush hardcodes exactly two agent roles (coder/task); `agents/*.md` from plugins cannot be loaded |
 | Model providers (`model_providers`/`default_models`) | Supported | Rendered to `providers`/`models` using catwalk's field names; `api_type` passes through as `type` verbatim |
+| Global instructions (`agents_md`) | Supported | Written to `CRUSH.md` in the Crush config dir, which Crush loads as global context (added in v3.14.0) |
 
 ### The `native.crush` escape hatch
 
