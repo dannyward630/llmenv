@@ -3884,13 +3884,11 @@ mod tests {
         // the gate actually receives. Asserting both directions keeps a future
         // refactor from swapping one for the other unnoticed.
         // SessionStart + "claude-code" triggers the check; other engines do not.
-        assert_eq!(
-            HookEvent::SessionStart == HookEvent::SessionStart && "claude-code" == "claude-code",
-            true
+        assert!(
+            HookEvent::SessionStart == HookEvent::SessionStart && "claude-code" == "claude-code"
         );
-        assert_eq!(
-            HookEvent::SessionStart == HookEvent::SessionStart && "claude_code" == "claude-code",
-            false
+        assert!(
+            !(HookEvent::SessionStart == HookEvent::SessionStart && "claude_code" == "claude-code")
         );
     }
 
