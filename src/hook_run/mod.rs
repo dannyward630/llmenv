@@ -53,7 +53,7 @@ mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
-pub(crate) mod timing;
+mod timing;
 pub(crate) use cbm_index_cmd::index_result_path;
 use cbm_index_cmd::{
     create_result_file, direct_index_stdout, index_command, index_job_command, uses_wrapper,
