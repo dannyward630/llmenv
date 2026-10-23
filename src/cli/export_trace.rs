@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Run the export pipeline: load config, detect scope, materialize adapters,
 /// and emit environment variables.
@@ -46,14 +47,19 @@ pub(crate) fn run_export_core(
     validate_name: impl Fn(&str) -> anyhow::Result<()>,
     validate_value: impl Fn(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let t0 = Instant::now();
     let config_path = crate::paths::config_path()?;
     let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = crate::paths::config_dir()?;
 
+    let t_config = Instant::now();
     let env = crate::scope::matcher::Env::detect_for_config(&config)?;
+    let t_env = Instant::now();
     let active = crate::scope::evaluate(&config, &env);
+    let t_active = Instant::now();
 
     ensure_proxy(&config, &config_dir, &active);
+    crate::trace::emit_export_trace(t0, t_config, Some(t_env), Some(t_active), None, None, None);
 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
@@ -132,6 +138,7 @@ pub(crate) fn run_export_core(
     // is adapter-independent, so re-building it per adapter is wasted work (#708).
     // Each adapter gets its own clone since materialize_from_manifest mutates it
     // (tag filtering, compression, etc.).
+    let t_manifest = Instant::now();
     let shared_manifest = build_manifest(&config, &config_dir, &use_active, &firing, false)?;
 
     warn_dead(
@@ -215,6 +222,18 @@ pub(crate) fn run_export_core(
             }
         }
     }
+
+    // Emit export trace with adapter materialization timing.
+    let t_adapters = Instant::now();
+    crate::trace::emit_export_trace(
+        t0,
+        t_config,
+        Some(t_env),
+        Some(t_active),
+        Some(t_manifest),
+        Some(t_adapters),
+        None,
+    );
 
     if !any_adapter_eligible {
         eprintln!(
@@ -329,6 +348,18 @@ pub(crate) fn run_export_core(
             println!("export {}={}", key, crate::util::single_quote(&value));
         }
     }
+
+    // Final render timing: total export duration.
+    let t_render = Instant::now();
+    crate::trace::emit_export_trace(
+        t0,
+        t_config,
+        Some(t_env),
+        Some(t_active),
+        Some(t_manifest),
+        Some(t_adapters),
+        Some(t_render),
+    );
 
     Ok(())
 }
