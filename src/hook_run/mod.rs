@@ -1387,7 +1387,7 @@ fn run_inner(
         // shared via Arc so re-initialization is also avoided.
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
         let resolved_client =
-            resolve_memory_client(&config, &config_dir, &active, event, &MCP_CLIENT_CACHE);
+            resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
         let settings = resolved_client.as_ref().map(|r| r.settings.clone());
         // Default type/importance markers (R1, R3) from the resolved entry, which
         // can be top-level or bundle-declared, when the chunk has none of its own.
@@ -1454,7 +1454,7 @@ fn run_inner(
                         maybe_start_consolidation(
                             event,
                             &config,
-                            &config_dir,
+                            config_dir,
                             &active,
                             post_session_consolidation,
                         );
@@ -1506,7 +1506,7 @@ fn run_inner(
             crate::paths::state_dir(),
         );
         let session_notice = if event == HookEvent::SessionStart {
-            session_notices::session_start_notices(rt, &config, &config_dir, &active, roots_notice)
+            session_notices::session_start_notices(rt, &config, config_dir, &active, roots_notice)
         } else {
             None
         };
@@ -1690,7 +1690,7 @@ fn run_inner(
             maybe_start_consolidation(
                 event,
                 &config,
-                &config_dir,
+                config_dir,
                 &active,
                 post_session_consolidation,
             );
