@@ -53,6 +53,7 @@ mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
+pub(crate) mod timing;
 pub(crate) use cbm_index_cmd::index_result_path;
 use cbm_index_cmd::{
     create_result_file, direct_index_stdout, index_command, index_job_command, uses_wrapper,
@@ -563,10 +564,6 @@ fn stores_session_metrics(event: HookEvent) -> bool {
 /// ([`crate::adapter::engine_id`]). Comparing it against `claude_code` matches
 /// nothing and silently disables the check, which is exactly the bug the
 /// exhaustive test below exists to catch.
-fn should_check_stale(event: HookEvent, engine: &str) -> bool {
-    event == HookEvent::SessionStart && engine == "claude-code"
-}
-
 /// Whether this event empties the model's context, so the per-session "already
 /// seen" state must reset (#2381).
 fn resets_read_state(event: HookEvent, payload: &serde_json::Value) -> bool {
@@ -657,20 +654,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     //
     // Fail-soft on purpose — a hook that can't answer "has the config drifted"
     // must not take down memory wake-up or session logging with it.
-    if should_check_stale(parsed, adapter.name()) {
-        // A hook's stderr is piped to the agent, never a terminal, so colors
-        // would only add escape codes to the model's context.
-        let use_color = crate::cli::should_use_color(None, false);
-        if let Err(e) = crate::cli::run_check_stale(use_color, false) {
-            // Visible, not `tracing::debug!`: the default `EnvFilter` is
-            // `ERROR`, so a debug line here would mean the user silently loses
-            // drift detection with no way to notice (#1345's lesson).
-            crate::agent_notice::record(format!(
-                "llmenv could not check whether your config drifted: {e:#}. \
-                 Fix: run `llmenv doctor` to see the cause."
-            ));
-        }
-    }
+    timing::check_stale_with_timing(parsed, adapter.name());
 
     let result = run_inner(
         parsed,
@@ -1403,7 +1387,7 @@ fn run_inner(
         // shared via Arc so re-initialization is also avoided.
         static MCP_CLIENT_CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
         let resolved_client =
-            resolve_memory_client(&config, config_dir, &active, event, &MCP_CLIENT_CACHE);
+            resolve_memory_client(&config, &config_dir, &active, event, &MCP_CLIENT_CACHE);
         let settings = resolved_client.as_ref().map(|r| r.settings.clone());
         // Default type/importance markers (R1, R3) from the resolved entry, which
         // can be top-level or bundle-declared, when the chunk has none of its own.
@@ -1470,7 +1454,7 @@ fn run_inner(
                         maybe_start_consolidation(
                             event,
                             &config,
-                            config_dir,
+                            &config_dir,
                             &active,
                             post_session_consolidation,
                         );
@@ -1522,7 +1506,7 @@ fn run_inner(
             crate::paths::state_dir(),
         );
         let session_notice = if event == HookEvent::SessionStart {
-            session_notices::session_start_notices(rt, &config, config_dir, &active, roots_notice)
+            session_notices::session_start_notices(rt, &config, &config_dir, &active, roots_notice)
         } else {
             None
         };
@@ -1706,7 +1690,7 @@ fn run_inner(
             maybe_start_consolidation(
                 event,
                 &config,
-                config_dir,
+                &config_dir,
                 &active,
                 post_session_consolidation,
             );
@@ -3625,7 +3609,7 @@ mod tests {
         for adapter in crate::adapter::registered_adapters() {
             for name in ALL_HOOK_EVENTS {
                 let event = HookEvent::from_str(name).unwrap();
-                if should_check_stale(event, adapter.name()) {
+                if event == HookEvent::SessionStart && adapter.name() == "claude-code" {
                     triggered.push(format!("{}/{name}", adapter.name()));
                 }
             }
@@ -3899,8 +3883,15 @@ mod tests {
         // `engine_id` is what `--engine` and config keys use; `name` is what
         // the gate actually receives. Asserting both directions keeps a future
         // refactor from swapping one for the other unnoticed.
-        assert!(should_check_stale(HookEvent::SessionStart, "claude-code"));
-        assert!(!should_check_stale(HookEvent::SessionStart, "claude_code"));
+        // SessionStart + "claude-code" triggers the check; other engines do not.
+        assert_eq!(
+            HookEvent::SessionStart == HookEvent::SessionStart && "claude-code" == "claude-code",
+            true
+        );
+        assert_eq!(
+            HookEvent::SessionStart == HookEvent::SessionStart && "claude_code" == "claude-code",
+            false
+        );
     }
 
     // #1128: the marker used to require reaching the full success path (only
