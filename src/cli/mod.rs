@@ -16,6 +16,7 @@ mod export_trace;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
 mod plugin_payloads;
+mod post_materialize;
 use plugin_payloads::sync_plugin_payloads;
 
 mod doctor;
@@ -1576,24 +1577,7 @@ fn claude_code_only_post_materialize(
     adapter_root: &Path,
     cache_path: &Path,
 ) -> anyhow::Result<crate::materialize::manifest::AuthStatus> {
-    if adapter.name() != ClaudeCodeAdapter.name() {
-        return Ok(crate::materialize::manifest::AuthStatus::default());
-    }
-
-    // Merge user-elected seeded settings after materialize succeeds (#172).
-    // Must run post-materialize so a materialize failure leaves settings.json
-    // either absent (new folder) or in its prior good state (re-render).
-    crate::adapter::claude_code::apply_seeded_settings(cache_path, &config.init.seeded_settings)?;
-    // Seed installMethod to suppress the "config install method is 'unknown'" warning (#346).
-    crate::adapter::claude_code::seed_install_method(cache_path)?;
-    // Seed the default statusLine hook so `llmenv statusline` renders out of the
-    // box; never overwrites a user's own customization (#836).
-    crate::adapter::claude_code::seed_status_line(cache_path)?;
-
-    // Auth inheritance (#172): inject cached credentials after the adapter has
-    // finished its own .claude.json writes (mcpServers upsert). Only fires
-    // when the stable cache has an entry.
-    Ok(inject_cached_auth_if_available(adapter_root, cache_path))
+    post_materialize::run_claude_code_post_materialize(adapter, config, adapter_root, cache_path)
 }
 
 /// Materialize a pre-built manifest through `adapter`, returning the cache path
@@ -1742,47 +1726,30 @@ fn materialize_from_manifest(
     // layout (CLAUDE.md/settings.json for Claude Code, crush.json for Crush, etc).
     // Returns the paths it owns; we union them with the generic bundle files to
     // form llmenv's complete owned set (#196). Idempotent.
+    let t_mat = std::time::Instant::now();
     let adapter_owned = adapter.materialize(manifest, &cache_path)?;
+    crate::trace::record_materialize(
+        adapter,
+        &cache_path,
+        manifest,
+        &adapter_owned,
+        t_mat.elapsed(),
+    );
 
-    let auth_status =
-        claude_code_only_post_materialize(adapter, config, &adapter_root, &cache_path)?;
-
-    // Write llmenv-status.json (#836 Task 11) before the manifest is written so
-    // the file exists on disk by the time write_cache_manifest's reconciliation
-    // pass runs, and so it can be added to the owned set below.
-    let throttle_configs: &[crate::config::Throttle] = manifest.throttle.as_slice();
-    let config_stale = Some(crate::materialize::ConfigStaleInputs {
-        booted_hash: booted_hash.as_deref(),
-        current_hash: &rendered.hash,
-    });
-    let status_data = crate::materialize::collect_status_data(
+    write_post_materialize(PostMaterializeParams {
+        adapter,
         config,
         active,
-        throttle_configs,
-        &manifest.capabilities.mcp,
-        config_stale,
-        &adapter_root,
-        config.cache.hashing,
-    );
-    let status_json =
-        serde_json::to_string_pretty(&status_data).context("serializing llmenv-status.json")?;
-    let status_path = cache_path.join("llmenv-status.json");
-    paths::write_owner_only_atomic(&status_path, status_json.as_bytes())
-        .with_context(|| format!("writing {}", status_path.display()))?;
-
-    let owned = adapter_owned
-        .into_iter()
-        .chain(manifest.files.keys().cloned())
-        .chain(std::iter::once(PathBuf::from("llmenv-status.json")));
-    let current = crate::materialize::manifest::CacheManifest::new(&rendered.hash, owned)
-        .with_selection(tags.clone(), bundles)
-        .with_auth_status(auth_status);
-    write_cache_manifest(
-        &cache_path,
-        &current,
-        config.cache.hashing,
+        adapter_root: &adapter_root,
+        cache_path: &cache_path,
+        rendered_hash: &rendered.hash,
+        booted_hash,
+        manifest,
+        bundles,
+        tags: tags.clone(),
         previous_manifest,
-    )?;
+        adapter_owned: &adapter_owned,
+    })?;
 
     // Compute the state dir (stable sibling of the hashed config dir) and pass
     // both to the adapter so it can set per-hash temp vars (#630) and durable
@@ -1927,50 +1894,6 @@ fn migrate_stranded_transcripts_once(adapter_root: &Path, state_dir: &Path) {
     }
 }
 
-fn inject_cached_auth_if_available(
-    adapter_root: &std::path::Path,
-    cache_path: &std::path::Path,
-) -> crate::materialize::manifest::AuthStatus {
-    use crate::materialize::manifest::{AuthSource, AuthStatus};
-    inject_cached_credentials(adapter_root, cache_path);
-    match crate::auth::choose_auth_for_inheritance(adapter_root) {
-        Err(e) => {
-            tracing::debug!("auth cache lookup failed (non-fatal): {e}");
-            AuthStatus::default()
-        }
-        Ok(None) => AuthStatus::default(),
-        Ok(Some(entry)) => match crate::auth::inject_auth_into_claude_json(cache_path, &entry) {
-            Ok(()) => {
-                eprintln!("[llmenv] auth: {} (inherited)", entry.email);
-                AuthStatus {
-                    source: AuthSource::Inherited,
-                    id: Some(entry.uuid),
-                    email: Some(entry.email),
-                }
-            }
-            Err(e) => {
-                tracing::error!("auth inject failed for {} (non-fatal): {e}", entry.email);
-                AuthStatus::default()
-            }
-        },
-    }
-}
-
-/// Seed a freshly materialized folder with the cached OAuth credential (#1057)
-/// so a hash change does not present a login prompt.
-///
-/// Non-fatal, and never overwrites a credential the folder already holds — the
-/// `AuthStatus` in the manifest tracks account identity, not the token, so this
-/// reports nothing back to the caller.
-fn inject_cached_credentials(adapter_root: &std::path::Path, cache_path: &std::path::Path) {
-    let backend = crate::auth::credentials::Backend::detect();
-    match crate::auth::credentials::inject_if_missing(backend, adapter_root, cache_path) {
-        Ok(true) => eprintln!("[llmenv] auth: OAuth credential inherited from durable state"),
-        Ok(false) => {}
-        Err(e) => tracing::error!("credential inject failed (non-fatal): {e}"),
-    }
-}
-
 /// Write the owned-set manifest dotfile `current` for a freshly materialized
 /// folder and, in loose/normal mode, reconcile ghost files left by a prior
 /// render (#246).
@@ -2021,6 +1944,88 @@ fn write_cache_manifest(
     }
 
     current.write(cache_path)
+}
+
+/// Write post-materialize artifacts: auth status, llmenv-status.json, and the
+/// cache manifest.
+///
+/// This covers the block that runs after `adapter.materialize()` returns:
+/// authentication steps, status data collection, and manifest reconciliation.
+fn write_post_materialize(params: PostMaterializeParams) -> anyhow::Result<()> {
+    let PostMaterializeParams {
+        adapter,
+        config,
+        active,
+        adapter_root,
+        cache_path,
+        rendered_hash,
+        booted_hash,
+        manifest,
+        bundles,
+        tags,
+        previous_manifest,
+        adapter_owned,
+    } = params;
+
+    let auth_status = claude_code_only_post_materialize(adapter, config, adapter_root, cache_path)?;
+
+    // Write llmenv-status.json (#836 Task 11) before the manifest is written so
+    // the file exists on disk by the time write_cache_manifest's reconciliation
+    // pass runs, and so it can be added to the owned set below.
+    let throttle_configs: &[crate::config::Throttle] = manifest.throttle.as_slice();
+    let config_stale = Some(crate::materialize::ConfigStaleInputs {
+        booted_hash: booted_hash.as_deref(),
+        current_hash: rendered_hash,
+    });
+    let status_data = crate::materialize::collect_status_data(
+        config,
+        active,
+        throttle_configs,
+        &manifest.capabilities.mcp,
+        config_stale,
+        adapter_root,
+        config.cache.hashing,
+    );
+    let status_json =
+        serde_json::to_string_pretty(&status_data).context("serializing llmenv-status.json")?;
+    let status_path = cache_path.join("llmenv-status.json");
+    paths::write_owner_only_atomic(&status_path, status_json.as_bytes())
+        .with_context(|| format!("writing {}", status_path.display()))?;
+
+    let owned: Vec<PathBuf> = adapter_owned
+        .iter()
+        .cloned()
+        .chain(manifest.files.keys().cloned())
+        .chain(std::iter::once(PathBuf::from("llmenv-status.json")))
+        .collect();
+    let current = crate::materialize::manifest::CacheManifest::new(rendered_hash, owned)
+        .with_selection(tags.clone(), bundles.clone())
+        .with_auth_status(auth_status);
+    write_cache_manifest(
+        cache_path,
+        &current,
+        config.cache.hashing,
+        previous_manifest,
+    )?;
+    Ok(())
+}
+
+/// Parameters for `write_post_materialize`.
+///
+/// This struct reduces the argument count of the function that uses it.
+struct PostMaterializeParams<'a> {
+    adapter: &'a dyn crate::adapter::AgentAdapter,
+    config: &'a Config,
+    active: &'a ActiveScopes,
+    adapter_root: &'a Path,
+    cache_path: &'a Path,
+    rendered_hash: &'a str,
+    booted_hash: Option<String>,
+    manifest: &'a MergedManifest,
+    bundles: BTreeSet<String>,
+    tags: BTreeSet<String>,
+    previous_manifest: anyhow::Result<Option<crate::materialize::manifest::CacheManifest>>,
+    adapter_owned: &'a [PathBuf],
 }
 
 /// Build the merged manifest for the firing bundles, resolving MCP servers and

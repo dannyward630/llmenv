@@ -22,7 +22,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Reference',
-      items: ['configuration', 'commands', 'engines'],
+      items: ['configuration', 'commands', 'engines', 'trace'],
     },
     {
       type: 'category',
