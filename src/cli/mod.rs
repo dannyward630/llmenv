@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 mod clean;
 mod config_guard;
-pub(crate) mod export_trace;
+mod export_trace;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
 mod plugin_payloads;

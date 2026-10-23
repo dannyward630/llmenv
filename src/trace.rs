@@ -35,7 +35,7 @@ fn open_trace_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// The JSON object carries `ts` (ISO 8601), `pid`, and `line` so a consumer
 /// can reconstruct the original text while still being able to parse the
 /// file as JSON Lines.
-pub(crate) fn emit_trace_line(line: &str) {
+fn emit_trace_line(line: &str) {
     if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
         eprintln!("{line}");
     }
@@ -57,7 +57,7 @@ pub(crate) fn emit_trace_line(line: &str) {
 
 /// Emit a JSON trace object with `op` and the supplied fields. The object
 /// also carries `ts`, `pid`, and `"v": 1`.
-pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Value) {
+fn emit_json_trace(op: &str, fields: serde_json::Value) {
     let obj = serde_json::json!({
         "v": 1,
         "op": op,
