@@ -32,6 +32,7 @@ pub(super) fn capture_stdout(
             return None;
         }
     };
+    let start = std::time::Instant::now();
     let mut cmd = std::process::Command::new(path);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
@@ -41,6 +42,7 @@ pub(super) fn capture_stdout(
         Ok(out) => out,
         Err(e) => {
             tracing::debug!("{label}: running {program} failed: {e}");
+            crate::trace::emit_spawn_trace(label, start.elapsed(), None);
             return None;
         }
     };
@@ -50,12 +52,14 @@ pub(super) fn capture_stdout(
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         );
+        crate::trace::emit_spawn_trace(label, start.elapsed(), None);
         return None;
     }
     match String::from_utf8(out.stdout) {
         Ok(text) => Some(text),
         Err(e) => {
             tracing::debug!("{label}: {program} printed non-UTF-8 output: {e}");
+            crate::trace::emit_spawn_trace(label, start.elapsed(), None);
             None
         }
     }

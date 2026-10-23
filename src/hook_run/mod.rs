@@ -85,7 +85,6 @@ use std::collections::{BTreeMap, HashMap};
 use action::Action;
 use anyhow::Context as _;
 use mcp_client::McpHttpClient;
-use serde_json::json;
 use tracing::{debug, error, warn};
 
 use crate::config::SessionLog;
@@ -1026,70 +1025,6 @@ fn resolve_pre_tool_text(
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
-/// Build the `LLMENV_TRACE_TIMING` marker payload from whichever phase
-/// boundaries `run_inner` reached before returning. `t0`/`t_config` are
-/// always available (computed before any early return); `t_scope`/`t_chunk`/
-/// `t_end` are `None` on a path that returned before reaching them. Each
-/// field is included only when its Instant is present, so an early return
-/// still reports the phases it actually ran through instead of nothing
-/// (#1128: previously only events reaching the full memory-dispatch path —
-/// 4 of 11 — emitted this marker at all).
-fn trace_timing_json(
-    t0: std::time::Instant,
-    t_config: std::time::Instant,
-    t_scope: Option<std::time::Instant>,
-    t_chunk: Option<std::time::Instant>,
-    t_end: Option<std::time::Instant>,
-) -> serde_json::Value {
-    // Cap rather than panic on the (unreachable) overflow of an in-process
-    // Instant delta past u64::MAX microseconds (~585,000 years).
-    let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
-    let mut fields = serde_json::Map::new();
-    fields.insert(
-        "config_load_us".to_string(),
-        json!(us(t_config.saturating_duration_since(t0))),
-    );
-    if let Some(t_scope) = t_scope {
-        fields.insert(
-            "scope_eval_us".to_string(),
-            json!(us(t_scope.saturating_duration_since(t_config))),
-        );
-        if let Some(t_chunk) = t_chunk {
-            fields.insert(
-                "prep_us".to_string(),
-                json!(us(t_chunk.saturating_duration_since(t_scope))),
-            );
-            if let Some(t_end) = t_end {
-                fields.insert(
-                    "mcp_us".to_string(),
-                    json!(us(t_end.saturating_duration_since(t_chunk))),
-                );
-            }
-        }
-    }
-    serde_json::Value::Object(fields)
-}
-
-/// Emit the per-phase timing marker to stderr when `LLMENV_TRACE_TIMING` is
-/// set (any value): exactly one line, `llmenv-trace <json>`. The clock always
-/// runs (`Instant::now` is ~20ns); only emission is gated, so normal runs are
-/// unaffected and stdout is never touched. See [`trace_timing_json`] for
-/// which fields appear depending on how far the caller got.
-fn emit_trace_timing(
-    t0: std::time::Instant,
-    t_config: std::time::Instant,
-    t_scope: Option<std::time::Instant>,
-    t_chunk: Option<std::time::Instant>,
-    t_end: Option<std::time::Instant>,
-) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
-        eprintln!(
-            "llmenv-trace {}",
-            trace_timing_json(t0, t_config, t_scope, t_chunk, t_end)
-        );
-    }
-}
-
 /// Hook output, split by source. Only `memory` came from ICM, so only it gets the ICM header.
 /// `notes` is llmenv text: the reads, nudges, reminders, and any deny envelope (#2754).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1221,7 +1156,7 @@ fn run_inner(
                 // `LogLevel::Debug` that would drift if `EventKind::ToolUse`'s
                 // level ever changed.
                 if can_short_circuit(event, &log_cfg) {
-                    emit_trace_timing(t0, t_config, None, None, None);
+                    crate::trace::emit_trace_timing(t0, t_config, None, None, None);
                     return Ok(HookText::from_notes(t));
                 }
                 Some(t)
@@ -1259,7 +1194,7 @@ fn run_inner(
             None
         } else {
             if can_short_circuit(event, &log_cfg) {
-                emit_trace_timing(t0, t_config, None, None, None);
+                crate::trace::emit_trace_timing(t0, t_config, None, None, None);
                 return Ok(HookText::from_notes(text));
             }
             Some(text)
@@ -1310,7 +1245,7 @@ fn run_inner(
             state_dir_or_log("stop reminder skipped").map_or_else(String::new, |state_dir| {
                 resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload)
             });
-        emit_trace_timing(t0, t_config, None, None, None);
+        crate::trace::emit_trace_timing(t0, t_config, None, None, None);
         return Ok(HookText::from_notes(reminder));
     }
 
@@ -1328,7 +1263,7 @@ fn run_inner(
             (None, _) => tracing::debug!("post_model_switch has no session id, skipped"),
             (_, Err(e)) => tracing::error!("no state dir, model switch not recorded: {e}"),
         }
-        emit_trace_timing(t0, t_config, None, None, None);
+        crate::trace::emit_trace_timing(t0, t_config, None, None, None);
         return Ok(HookText::default());
     }
 
@@ -1359,7 +1294,7 @@ fn run_inner(
                 | HookEvent::SubagentStart
         ) && !log_cfg.any_sink_enabled()
         {
-            emit_trace_timing(t0, t_config, None, None, None);
+            crate::trace::emit_trace_timing(t0, t_config, None, None, None);
             return Ok(HookText::default());
         }
 
@@ -1540,7 +1475,7 @@ fn run_inner(
                             post_session_consolidation,
                         );
                     }
-                    emit_trace_timing(t0, t_config, Some(t_scope), None, None);
+                    crate::trace::emit_trace_timing(t0, t_config, Some(t_scope), None, None);
                     return Ok(HookText::default());
                 }
             }
@@ -1778,7 +1713,7 @@ fn run_inner(
         }
         let out = out?;
         let t_end = std::time::Instant::now();
-        emit_trace_timing(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
+        crate::trace::emit_trace_timing(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
         Ok(out)
     })();
 
@@ -1791,7 +1726,7 @@ fn run_inner(
             // and t_end are lost with the closure that computed them.
             let text =
                 recover_from_pipeline_error(event, e, [pre_tool_text, turn_text, nudge_text])?;
-            emit_trace_timing(t0, t_config, None, None, None);
+            crate::trace::emit_trace_timing(t0, t_config, None, None, None);
             Ok(text)
         }
     }
@@ -3227,6 +3162,8 @@ fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use crate::trace::trace_timing_json;
+    use serde_json::json;
 
     #[test]
     fn a_notice_with_no_channel_is_logged_at_error_level() {
@@ -3983,15 +3920,19 @@ mod tests {
         let only_config = trace_timing_json(t0, t_config, None, None, None);
         assert_eq!(
             keys_of(&only_config),
-            BTreeSet::from(["config_load_us".to_string()]),
-            "an early return before scope eval must report only config_load_us"
+            BTreeSet::from(["v".to_string(), "config_load_us".to_string()]),
+            "an early return before scope eval must report v and config_load_us"
         );
 
         let t_scope = t_config + std::time::Duration::from_micros(20);
         let through_scope = trace_timing_json(t0, t_config, Some(t_scope), None, None);
         assert_eq!(
             keys_of(&through_scope),
-            BTreeSet::from(["config_load_us".to_string(), "scope_eval_us".to_string()]),
+            BTreeSet::from([
+                "v".to_string(),
+                "config_load_us".to_string(),
+                "scope_eval_us".to_string(),
+            ]),
             "an early return after scope eval must add scope_eval_us"
         );
 
@@ -4001,13 +3942,15 @@ mod tests {
         assert_eq!(
             keys_of(&full),
             BTreeSet::from([
+                "v".to_string(),
                 "config_load_us".to_string(),
                 "scope_eval_us".to_string(),
                 "prep_us".to_string(),
                 "mcp_us".to_string(),
             ]),
-            "the full success path must report all four phases"
+            "the full success path must report v and all four phases"
         );
+        assert_eq!(full["v"], 1);
         assert_eq!(full["config_load_us"], 10);
         assert_eq!(full["scope_eval_us"], 20);
         assert_eq!(full["prep_us"], 30);

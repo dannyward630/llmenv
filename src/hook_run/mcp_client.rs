@@ -97,11 +97,7 @@ fn is_stale_session_status(status: reqwest::StatusCode) -> bool {
 /// notion of what a "result" means for any given tool, and parsing ICM's
 /// recall-specific text format here would be a layering violation.
 fn emit_mcp_call_trace(tool: &str, elapsed: Duration) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
-        return;
-    }
-    let us = elapsed.as_micros();
-    eprintln!("[LLMENV_MCP_CALL] {tool} {us}us");
+    crate::trace::emit_mcp_call_trace(tool, elapsed);
 }
 
 impl McpHttpClient {
@@ -176,6 +172,8 @@ impl McpHttpClient {
             return Ok(Some(sid.clone()));
         }
 
+        // #3017: time the `initialize` request and the `notifications/initialized` ack.
+        let init_start = std::time::Instant::now();
         let init_req = json!({
             "jsonrpc": "2.0",
             "id": 0,
@@ -202,8 +200,10 @@ impl McpHttpClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = body::error_body(resp, "MCP initialize").await;
+            crate::trace::emit_mcp_handshake_trace("initialize", init_start.elapsed(), None);
             return Err(anyhow!("MCP initialize returned HTTP {status}: {body}"));
         }
+        let _init_elapsed = init_start.elapsed();
         let sid = resp
             .headers()
             .get("mcp-session-id")
@@ -220,6 +220,7 @@ impl McpHttpClient {
             // Best-effort: some servers require this ack before accepting
             // further calls, others ignore it. Its own failure isn't fatal —
             // the subsequent tools/call attempt is the real signal, and it carries the cause.
+            let ack_start = std::time::Instant::now();
             let ack = self
                 .client
                 .post(&self.url)
@@ -231,6 +232,11 @@ impl McpHttpClient {
                 .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
                 .send()
                 .await;
+            crate::trace::emit_mcp_handshake_trace(
+                "notifications/initialized",
+                ack_start.elapsed(),
+                None,
+            );
             if let Err(e) = ack {
                 tracing::debug!(
                     "MCP initialized notification to {} not sent: {e}",

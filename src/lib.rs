@@ -43,4 +43,5 @@ mod test_fixtures;
 #[cfg(test)]
 pub(crate) mod test_log_capture;
 pub(crate) mod throttle;
+pub(crate) mod trace;
 pub mod util;
