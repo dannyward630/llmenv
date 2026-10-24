@@ -10,7 +10,7 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -92,6 +92,7 @@ fn spawn_record_in(
         tracing::error!("session_log: cannot resolve current_exe for detached record");
         return None;
     };
+    let t_spawn = std::time::Instant::now();
     let payload = RecordPayload {
         session_id: session_id.to_string(),
         event: ev.clone(),
@@ -118,14 +119,13 @@ fn spawn_record_in(
         return None;
     };
     if let Some(mut stdin) = child.stdin.take()
-        // Small, already-truncated payload: this write fits the pipe buffer
-        // and completes without the child having read anything yet.
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
         tracing::error!("session_log: failed to pipe event to detached child: {e}");
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.
+    crate::trace::emit_spawn_trace("session_log_record", t_spawn.elapsed(), None);
     Some(child)
 }
 
