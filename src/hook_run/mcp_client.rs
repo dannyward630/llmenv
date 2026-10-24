@@ -97,7 +97,7 @@ fn is_stale_session_status(status: reqwest::StatusCode) -> bool {
 /// notion of what a "result" means for any given tool, and parsing ICM's
 /// recall-specific text format here would be a layering violation.
 fn emit_mcp_call_trace(tool: &str, elapsed: Duration) {
-    crate::trace::emit_mcp_call_trace(tool, elapsed);
+    crate::mcp_trace::emit_mcp_call_trace(tool, elapsed);
 }
 
 impl McpHttpClient {
@@ -200,7 +200,7 @@ impl McpHttpClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = body::error_body(resp, "MCP initialize").await;
-            crate::trace::emit_mcp_handshake_trace("initialize", init_start.elapsed(), None);
+            crate::mcp_trace::emit_mcp_handshake_trace("initialize", init_start.elapsed(), None);
             return Err(anyhow!("MCP initialize returned HTTP {status}: {body}"));
         }
         let _init_elapsed = init_start.elapsed();
@@ -232,7 +232,7 @@ impl McpHttpClient {
                 .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
                 .send()
                 .await;
-            crate::trace::emit_mcp_handshake_trace(
+            crate::mcp_trace::emit_mcp_handshake_trace(
                 "notifications/initialized",
                 ack_start.elapsed(),
                 None,

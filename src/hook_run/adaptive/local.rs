@@ -16,6 +16,7 @@ pub(in crate::hook_run) fn record_local(
     payload: &Value,
 ) {
     let now = unix_now();
+    let t0 = std::time::Instant::now();
     match event {
         HookEvent::PostToolBatch => {
             let empty = Vec::new();
@@ -59,5 +60,13 @@ pub(in crate::hook_run) fn record_local(
             );
         }
         _ => {}
+    }
+    let elapsed = t0.elapsed();
+    // Emit a trace line only when the ledger was actually touched (update was called).
+    // store.update returns None when the session_id is unsafe or the lock failed,
+    // which means no file I/O occurred and there is nothing to time.
+    let touched = matches!(event, HookEvent::PostToolBatch | HookEvent::SubagentTask);
+    if touched {
+        crate::trace::emit_ledger_trace("update", elapsed);
     }
 }

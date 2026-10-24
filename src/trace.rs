@@ -35,7 +35,7 @@ fn open_trace_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// The JSON object carries `ts` (ISO 8601), `pid`, and `line` so a consumer
 /// can reconstruct the original text while still being able to parse the
 /// file as JSON Lines.
-fn emit_trace_line(line: &str) {
+pub(crate) fn emit_trace_line(line: &str) {
     if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
         eprintln!("{line}");
     }
@@ -164,31 +164,6 @@ pub(crate) fn emit_spawn_trace(label: &str, elapsed: Duration, exit: Option<i32>
         None => "exit=spawn-error".to_string(),
     };
     emit_trace_line(&format!("[LLMENV_SPAWN] {label} {us}us {exit_str}"));
-}
-
-/// Emit a `[LLMENV_MCP_CALL] initialize <us>us` or
-/// `[LLMENV_MCP_CALL] notifications/initialized <us>us` line to the trace sink.
-/// The leading `<tool> <us>us` fields are kept because consumers already
-/// parse them.
-pub(crate) fn emit_mcp_handshake_trace(method: &str, elapsed: Duration, status: Option<u16>) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
-        return;
-    }
-    let us = elapsed.as_micros();
-    let status_str = match status {
-        Some(code) => format!(" status={code}"),
-        None => String::new(),
-    };
-    emit_trace_line(&format!("[LLMENV_MCP_CALL] {method} {us}us{status_str}"));
-}
-
-/// Emit a `[LLMENV_MCP_CALL] <tool> <duration>us` line to the trace sink.
-pub(crate) fn emit_mcp_call_trace(tool: &str, elapsed: Duration) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
-        return;
-    }
-    let us = elapsed.as_micros();
-    emit_trace_line(&format!("[LLMENV_MCP_CALL] {tool} {us}us"));
 }
 
 /// Emit a `llmenv-trace {"op":"export",...}` line with per-phase timing.
@@ -346,6 +321,17 @@ pub(crate) fn record_materialize(
         &written_names.iter().map(String::as_str).collect::<Vec<_>>(),
         elapsed,
     );
+}
+
+/// Emit a `[LLMENV_LEDGER] <op> <duration>us` line to the trace sink.
+///
+/// Tracks the time to load or update a per-session recall ledger file.
+pub(crate) fn emit_ledger_trace(op: &str, elapsed: Duration) {
+    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+        return;
+    }
+    let us = elapsed.as_micros();
+    emit_trace_line(&format!("[LLMENV_LEDGER] {op} {us}us"));
 }
 
 /// Return the current time as a Unix-epoch-seconds string.

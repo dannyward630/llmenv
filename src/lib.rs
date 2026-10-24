@@ -25,6 +25,7 @@ pub mod hook_run;
 pub mod icm;
 pub mod materialize;
 pub mod mcp;
+pub(crate) mod mcp_trace;
 pub mod memory;
 pub mod merge;
 pub(crate) mod onboarding;
