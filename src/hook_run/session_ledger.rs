@@ -703,6 +703,7 @@ mod tests {
         assert_eq!(timing.lock_attempts, Some(1));
         assert_eq!(timing.state_unsaved, Some(false));
         assert!(timing.read_us.is_some() && timing.write_us.is_some());
+        assert!(timing.lock_wait_us.is_some());
         assert_eq!(store.load("s1").unwrap().last_turn_at, 7);
     }
 

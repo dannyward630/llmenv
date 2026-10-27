@@ -355,10 +355,7 @@ pub(super) fn session_start_notice(
     }
     let t_mcp_probe = std::time::Instant::now();
     let mut down = rt.block_on(find_down(&servers, DEFAULT_PROBE_TIMEOUT));
-    let mut phases = SessionStartPhases {
-        mcp_probe: Some(t_mcp_probe.elapsed()),
-        ..SessionStartPhases::default()
-    };
+    let mut phases = SessionStartPhases::probed(t_mcp_probe.elapsed());
     if down.iter().any(|d| d.name == MEMORY_MCP_NAME) {
         let t_proxy_restart = std::time::Instant::now();
         let outcome = crate::cli::ensure_local_memory_proxy(

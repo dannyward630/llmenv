@@ -1469,10 +1469,9 @@ fn run_inner(
                             post_session_consolidation,
                         );
                     }
-                    crate::trace::emit_trace_timing(crate::trace::HookTiming {
-                        t_scope: Some(t_scope),
-                        ..crate::trace::HookTiming::new(t0, t_config)
-                    });
+                    crate::trace::emit_trace_timing(
+                        crate::trace::HookTiming::new(t0, t_config).through_scope(t_scope),
+                    );
                     return Ok(HookText::default());
                 }
             }
@@ -1719,17 +1718,12 @@ fn run_inner(
         let mut final_phases = session_phases;
         final_phases.cbm_roots = cbm_roots_took;
         let t_end = std::time::Instant::now();
-        crate::trace::emit_trace_timing(crate::trace::HookTiming {
-            t_scope: Some(t_scope),
-            t_chunk: Some(t_chunk),
-            t_end: Some(t_end),
-            phases: final_phases,
-            session_log_us,
-            checkpoint_us,
-            spawn_us,
-            spawned_jobs: Some(crate::trace::spawned_jobs()),
-            ..crate::trace::HookTiming::new(t0, t_config)
-        });
+        crate::trace::emit_trace_timing(
+            crate::trace::HookTiming::new(t0, t_config)
+                .through_scope(t_scope)
+                .through_mcp(t_chunk, t_end)
+                .with_events(final_phases, session_log_us, checkpoint_us, spawn_us),
+        );
         Ok(out)
     })();
 

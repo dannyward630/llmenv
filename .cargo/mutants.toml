@@ -56,8 +56,6 @@ exclude_re = [
   # sink are tested, and trace::docs_sync checks the formats against the docs page (#3018).
   "replace report_ledger with \\(\\)",
   "replace emit_mcp_call_trace with \\(\\)",
-  "delete field \\w+ from struct crate::trace::HookTiming expression in run_inner",
-  "delete field mcp_probe from struct SessionStartPhases expression in session_start_notice",
   "in check_stale_with_timing",
   "replace check_stale_with_timing with \\(\\)",
 ]

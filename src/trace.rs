@@ -121,6 +121,16 @@ pub struct SessionStartPhases {
     pub cbm_roots: Option<Duration>,
 }
 
+impl SessionStartPhases {
+    /// The phases of a run that probed the MCP servers and took `took` to do it.
+    pub(crate) fn probed(took: Duration) -> Self {
+        Self {
+            mcp_probe: Some(took),
+            ..Self::default()
+        }
+    }
+}
+
 /// Emit a `[LLMENV_CACHE] <name> <hit|miss> <duration>ms[ <extra>]` line to
 /// the trace sink.
 pub(crate) fn emit_cache_trace(name: &str, hit: bool, elapsed: Duration, extra: Option<&str>) {
@@ -163,6 +173,41 @@ pub(crate) struct HookTiming {
 }
 
 impl HookTiming {
+    /// Add the instant when scope evaluation ended.
+    pub(crate) fn through_scope(self, t_scope: Instant) -> Self {
+        Self {
+            t_scope: Some(t_scope),
+            ..self
+        }
+    }
+
+    /// Add the instants of the end of prep and of the end of the memory calls.
+    pub(crate) fn through_mcp(self, t_chunk: Instant, t_end: Instant) -> Self {
+        Self {
+            t_chunk: Some(t_chunk),
+            t_end: Some(t_end),
+            ..self
+        }
+    }
+
+    /// Add the per-event timings and the sub-phase durations of a finished run.
+    pub(crate) fn with_events(
+        self,
+        phases: SessionStartPhases,
+        session_log_us: Option<u64>,
+        checkpoint_us: Option<u64>,
+        spawn_us: Option<u64>,
+    ) -> Self {
+        Self {
+            phases,
+            session_log_us,
+            checkpoint_us,
+            spawn_us,
+            spawned_jobs: Some(spawned_jobs()),
+            ..self
+        }
+    }
+
     /// Timing for a run that returned right after the config load.
     pub(crate) fn new(t0: Instant, t_config: Instant) -> Self {
         Self {
@@ -475,6 +520,33 @@ mod tests {
             before,
             "the link is not followed"
         );
+    }
+
+    // Each builder step puts its values in the marker, and a step that did not run leaves its keys out.
+    #[test]
+    fn hook_timing_builders_fill_their_own_fields() {
+        let t0 = Instant::now();
+        let at = |us| t0 + Duration::from_micros(us);
+        let timing = HookTiming::new(t0, at(5))
+            .through_scope(at(9))
+            .through_mcp(at(30), at(80))
+            .with_events(
+                SessionStartPhases::probed(Duration::from_micros(7)),
+                Some(11),
+                Some(12),
+                Some(13),
+            );
+        let json = hook_marker(timing);
+        assert_eq!(json["scope_eval_us"], 4);
+        assert_eq!(json["prep_us"], 21);
+        assert_eq!(json["mcp_us"], 50);
+        assert_eq!(json["mcp_probe_us"], 7);
+        assert_eq!(json["session_log_us"], 11);
+        assert_eq!(json["checkpoint_us"], 12);
+        assert_eq!(json["spawn_us"], 13);
+        assert!(json["spawned_jobs"].is_u64());
+        let early = hook_marker(HookTiming::new(t0, at(5)).through_scope(at(9)));
+        assert!(early.get("prep_us").is_none() && early.get("mcp_us").is_none());
     }
 
     // The sink writes one JSON object per line, and appends rather than truncates.
