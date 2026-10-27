@@ -80,6 +80,11 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - A tilde-prefixed config path (`~/...`) is expanded before it's loaded, instead of only being rejected by a debug-only assertion that a release build silently skipped, leaving the path unexpanded and the load failing with a confusing "file not found" (#1577)
 - A project name (`.llmenv.yaml`'s `name:` field) containing control characters — an ANSI escape or an embedded newline — no longer reaches session-log search content unescaped, closing a gap where tags and bundles were already sanitized but the free-form project name was not (#1578)
 - A `PreToolUse` gate on opencode denies the tool call when its hook cannot run, instead of letting the call through. The session-log `PreToolUse` entry carries that fail-closed run and replaces the gate's own entry, so one hook runs per call (#1442). See [Engines](https://phaedrus1992.github.io/llmenv/docs/engines#hooks)
+- Stop showing `pr: gh failed` on a branch with no open PR. Real `gh` prints "No pull requests found" with a capital N, and that now counts as no PR. [fix:statusline] [#2975]
+- Print a hint to add the next step when `llmenv task done` closes the last open task in a session. The all-done stop reminder now says that a question blocks only its own step, and that a running CI job is not a stop point. `task session start` without tasks suggests adding the known steps. [fix:task] [#2987]
+- Stop reading the keychain on every shell prompt when the credential is expired. A dead read is held back for five minutes, and a dead folder credential is no longer written over the cache. [fix:auth] [#3008]
+- Run `lsof` in the once-a-day stale `state/tmp` check only when an entry is a candidate. When no entry is stale, the SessionStart hook no longer waits 0.4 to 2.7 s. [fix:materialize] [#3031]
+- Block an opencode `failClosed` hook that exits with any code other than 0 or 2, or dies on a signal. Such a hook used to let the call through. A block from a SessionStart or PostToolUse hook now reaches the agent, hook errors print where they occur, and a malformed hook table is named on every request. [fix:opencode] [#2979]
 
 ### Security
 
