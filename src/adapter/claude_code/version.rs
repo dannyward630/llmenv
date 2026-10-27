@@ -6,8 +6,6 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::process::run_with_timeout;
-
 /// How long `claude --version` may take. The binary prints one line and exits.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -28,7 +26,7 @@ pub(crate) fn env_vars() -> Vec<(String, String)> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    match run_with_timeout(cmd, VERSION_TIMEOUT) {
+    match crate::process::run_traced("claude-code:version", cmd, VERSION_TIMEOUT) {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             match parse_version(&text) {

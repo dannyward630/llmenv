@@ -53,6 +53,7 @@ mod shell_split;
 pub(crate) mod slippage;
 mod slippage_read;
 pub(crate) mod stop_dedupe;
+mod timing;
 pub(crate) use cbm_index_cmd::index_result_path;
 use cbm_index_cmd::{
     create_result_file, direct_index_stdout, index_command, index_job_command, uses_wrapper,
@@ -85,7 +86,6 @@ use std::collections::{BTreeMap, HashMap};
 use action::Action;
 use anyhow::Context as _;
 use mcp_client::McpHttpClient;
-use serde_json::json;
 use tracing::{debug, error, warn};
 
 use crate::config::SessionLog;
@@ -564,10 +564,6 @@ fn stores_session_metrics(event: HookEvent) -> bool {
 /// ([`crate::adapter::engine_id`]). Comparing it against `claude_code` matches
 /// nothing and silently disables the check, which is exactly the bug the
 /// exhaustive test below exists to catch.
-fn should_check_stale(event: HookEvent, engine: &str) -> bool {
-    event == HookEvent::SessionStart && engine == "claude-code"
-}
-
 /// Whether this event empties the model's context, so the per-session "already
 /// seen" state must reset (#2381).
 fn resets_read_state(event: HookEvent, payload: &serde_json::Value) -> bool {
@@ -658,20 +654,7 @@ pub(crate) fn run(event: &str, engine: &str) -> anyhow::Result<HookExit> {
     //
     // Fail-soft on purpose — a hook that can't answer "has the config drifted"
     // must not take down memory wake-up or session logging with it.
-    if should_check_stale(parsed, adapter.name()) {
-        // A hook's stderr is piped to the agent, never a terminal, so colors
-        // would only add escape codes to the model's context.
-        let use_color = crate::cli::should_use_color(None, false);
-        if let Err(e) = crate::cli::run_check_stale(use_color, false) {
-            // Visible, not `tracing::debug!`: the default `EnvFilter` is
-            // `ERROR`, so a debug line here would mean the user silently loses
-            // drift detection with no way to notice (#1345's lesson).
-            crate::agent_notice::record(format!(
-                "llmenv could not check whether your config drifted: {e:#}. \
-                 Fix: run `llmenv doctor` to see the cause."
-            ));
-        }
-    }
+    timing::check_stale_with_timing(parsed, adapter.name());
 
     let result = run_inner(
         parsed,
@@ -1026,70 +1009,6 @@ fn resolve_pre_tool_text(
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
-/// Build the `LLMENV_TRACE_TIMING` marker payload from whichever phase
-/// boundaries `run_inner` reached before returning. `t0`/`t_config` are
-/// always available (computed before any early return); `t_scope`/`t_chunk`/
-/// `t_end` are `None` on a path that returned before reaching them. Each
-/// field is included only when its Instant is present, so an early return
-/// still reports the phases it actually ran through instead of nothing
-/// (#1128: previously only events reaching the full memory-dispatch path —
-/// 4 of 11 — emitted this marker at all).
-fn trace_timing_json(
-    t0: std::time::Instant,
-    t_config: std::time::Instant,
-    t_scope: Option<std::time::Instant>,
-    t_chunk: Option<std::time::Instant>,
-    t_end: Option<std::time::Instant>,
-) -> serde_json::Value {
-    // Cap rather than panic on the (unreachable) overflow of an in-process
-    // Instant delta past u64::MAX microseconds (~585,000 years).
-    let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
-    let mut fields = serde_json::Map::new();
-    fields.insert(
-        "config_load_us".to_string(),
-        json!(us(t_config.saturating_duration_since(t0))),
-    );
-    if let Some(t_scope) = t_scope {
-        fields.insert(
-            "scope_eval_us".to_string(),
-            json!(us(t_scope.saturating_duration_since(t_config))),
-        );
-        if let Some(t_chunk) = t_chunk {
-            fields.insert(
-                "prep_us".to_string(),
-                json!(us(t_chunk.saturating_duration_since(t_scope))),
-            );
-            if let Some(t_end) = t_end {
-                fields.insert(
-                    "mcp_us".to_string(),
-                    json!(us(t_end.saturating_duration_since(t_chunk))),
-                );
-            }
-        }
-    }
-    serde_json::Value::Object(fields)
-}
-
-/// Emit the per-phase timing marker to stderr when `LLMENV_TRACE_TIMING` is
-/// set (any value): exactly one line, `llmenv-trace <json>`. The clock always
-/// runs (`Instant::now` is ~20ns); only emission is gated, so normal runs are
-/// unaffected and stdout is never touched. See [`trace_timing_json`] for
-/// which fields appear depending on how far the caller got.
-fn emit_trace_timing(
-    t0: std::time::Instant,
-    t_config: std::time::Instant,
-    t_scope: Option<std::time::Instant>,
-    t_chunk: Option<std::time::Instant>,
-    t_end: Option<std::time::Instant>,
-) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
-        eprintln!(
-            "llmenv-trace {}",
-            trace_timing_json(t0, t_config, t_scope, t_chunk, t_end)
-        );
-    }
-}
-
 /// Hook output, split by source. Only `memory` came from ICM, so only it gets the ICM header.
 /// `notes` is llmenv text: the reads, nudges, reminders, and any deny envelope (#2754).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1221,7 +1140,7 @@ fn run_inner(
                 // `LogLevel::Debug` that would drift if `EventKind::ToolUse`'s
                 // level ever changed.
                 if can_short_circuit(event, &log_cfg) {
-                    emit_trace_timing(t0, t_config, None, None, None);
+                    crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
                     return Ok(HookText::from_notes(t));
                 }
                 Some(t)
@@ -1259,7 +1178,7 @@ fn run_inner(
             None
         } else {
             if can_short_circuit(event, &log_cfg) {
-                emit_trace_timing(t0, t_config, None, None, None);
+                crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
                 return Ok(HookText::from_notes(text));
             }
             Some(text)
@@ -1310,7 +1229,7 @@ fn run_inner(
             state_dir_or_log("stop reminder skipped").map_or_else(String::new, |state_dir| {
                 resolve_stop_reminder(&state_dir, claude_session_id, &config, stdin_payload)
             });
-        emit_trace_timing(t0, t_config, None, None, None);
+        crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
         return Ok(HookText::from_notes(reminder));
     }
 
@@ -1328,7 +1247,7 @@ fn run_inner(
             (None, _) => tracing::debug!("post_model_switch has no session id, skipped"),
             (_, Err(e)) => tracing::error!("no state dir, model switch not recorded: {e}"),
         }
-        emit_trace_timing(t0, t_config, None, None, None);
+        crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
         return Ok(HookText::default());
     }
 
@@ -1359,7 +1278,7 @@ fn run_inner(
                 | HookEvent::SubagentStart
         ) && !log_cfg.any_sink_enabled()
         {
-            emit_trace_timing(t0, t_config, None, None, None);
+            crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
             return Ok(HookText::default());
         }
 
@@ -1385,7 +1304,11 @@ fn run_inner(
         // Fire-and-forget: indexing a large repo can take minutes (the Linux
         // kernel benchmarks at ~3 per upstream docs), so this must never
         // block SessionStart.
+        // Per-hook-event timings: captured in this block, read by emit_trace_timing inside the async closure.
+        let mut checkpoint_us: Option<u64> = None;
+        let mut session_log_us: Option<u64> = None;
         let mut roots_notice: Option<String> = None;
+        let mut cbm_roots_took: Option<std::time::Duration> = None;
         if event == HookEvent::SessionStart {
             let active_codebase_memory: Vec<&crate::config::CodebaseMemory> = config
                 .features
@@ -1400,17 +1323,21 @@ fn run_inner(
             // project/cwd and the same MCP server name, so ambiguity can't be
             // resolved) — fail-soft here (log + skip) rather than propagate,
             // since this is a best-effort side effect, not manifest building.
-            match active_codebase_memory.as_slice() {
-                [] => {}
+            checkpoint_us = match active_codebase_memory.as_slice() {
+                [] => None,
                 [cm] => match crate::mcp::resolve::codebase_memory_paths() {
                     Ok((project_root, state_dir)) => {
                         // Before the index run, so the server accepts the repository (#2406).
+                        let t_roots = std::time::Instant::now();
                         let roots = crate::mcp::cbm_roots::session_start_notice(cm, &project_root);
+                        cbm_roots_took = Some(t_roots.elapsed());
+                        let t_checkpoint = std::time::Instant::now();
                         let index = trigger_codebase_memory_index(&project_root, cm, &state_dir);
                         roots_notice = match (roots, index) {
                             (Some(r), Some(i)) => Some(format!("{r}{i}")),
                             (r, i) => r.or(i),
                         };
+                        Some(std::time::Duration::as_micros(&t_checkpoint.elapsed()) as u64)
                     }
                     Err(e) => {
                         tracing::error!(
@@ -1420,6 +1347,7 @@ fn run_inner(
                         roots_notice = Some(index_skipped_notice(&format!(
                             "cannot resolve the project paths: {e:#}"
                         )));
+                        None
                     }
                 },
                 _ => {
@@ -1427,8 +1355,9 @@ fn run_inner(
                         "codebase_memory: multiple entries active simultaneously, \
                          not triggering SessionStart index"
                     );
+                    None
                 }
-            }
+            };
         }
 
         // Recall query: the sorted active tags. Store content: the llmenv context
@@ -1540,7 +1469,9 @@ fn run_inner(
                             post_session_consolidation,
                         );
                     }
-                    emit_trace_timing(t0, t_config, Some(t_scope), None, None);
+                    crate::trace::emit_trace_timing(
+                        crate::trace::HookTiming::new(t0, t_config).through_scope(t_scope),
+                    );
                     return Ok(HookText::default());
                 }
             }
@@ -1586,10 +1517,10 @@ fn run_inner(
             &ctx,
             crate::paths::state_dir(),
         );
-        let session_notice = if event == HookEvent::SessionStart {
+        let (session_notice, session_phases) = if event == HookEvent::SessionStart {
             session_notices::session_start_notices(rt, &config, config_dir, &active, roots_notice)
         } else {
-            None
+            (None, crate::trace::SessionStartPhases::default())
         };
         // The project notice applies to every event, because the recall of every event runs
         // without its project scope when the lookup fails (#2688).
@@ -1597,14 +1528,18 @@ fn run_inner(
             .into_iter()
             .flatten()
             .reduce(|acc, next| format!("{acc}\n{next}"));
-        if resumes_checkpoints(
+        let spawn_us = if resumes_checkpoints(
             event,
             stdin_payload,
             std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref(),
         ) {
             // After the notice, so the proxy it may restart is up (#2396).
+            let t_start = std::time::Instant::now();
             resume_checkpoints(checkpoint::spawner_state_dir().as_deref());
-        }
+            Some(u64::try_from(t_start.elapsed().as_micros()).unwrap_or(u64::MAX))
+        } else {
+            None
+        };
         let t_chunk = std::time::Instant::now();
         let out = match rt {
             Some(rt) => rt.block_on(async {
@@ -1689,7 +1624,10 @@ fn run_inner(
                         format!("{line}\n{out}")
                     };
                 }
+                let t_session_log = std::time::Instant::now();
                 run_session_log(event, &session_log, stdin_payload).await;
+                session_log_us =
+                    Some(std::time::Duration::as_micros(&t_session_log.elapsed()) as u64);
 
                 // Update dedup snapshot *after* the store succeeds (R3). Writing before
                 // the store call means a transient MCP failure leaves the snapshot ahead
@@ -1777,8 +1715,15 @@ fn run_inner(
             );
         }
         let out = out?;
+        let mut final_phases = session_phases;
+        final_phases.cbm_roots = cbm_roots_took;
         let t_end = std::time::Instant::now();
-        emit_trace_timing(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
+        crate::trace::emit_trace_timing(
+            crate::trace::HookTiming::new(t0, t_config)
+                .through_scope(t_scope)
+                .through_mcp(t_chunk, t_end)
+                .with_events(final_phases, session_log_us, checkpoint_us, spawn_us),
+        );
         Ok(out)
     })();
 
@@ -1791,7 +1736,7 @@ fn run_inner(
             // and t_end are lost with the closure that computed them.
             let text =
                 recover_from_pipeline_error(event, e, [pre_tool_text, turn_text, nudge_text])?;
-            emit_trace_timing(t0, t_config, None, None, None);
+            crate::trace::emit_trace_timing(crate::trace::HookTiming::new(t0, t_config));
             Ok(text)
         }
     }
@@ -1872,10 +1817,8 @@ async fn run_memory_actions(
         action.run(client, query, chunk).await
     })
     .await;
-    // Same env var that gates hook-run's other stderr telemetry (#1261).
-    let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
-    if let Some(line) = budget.trace_line(tracing_enabled) {
-        eprintln!("{line}");
+    if let Some(line) = budget.trace_line(crate::trace::enabled()) {
+        crate::trace::emit_trace_line(&line);
     }
     HookText {
         memory: text,
@@ -3116,7 +3059,7 @@ fn trigger_index_with(
     // wrapper does the same for the indexer it starts. The log redirect above made the directory.
     direct_index_stdout(&mut cmd, wrapped, &result_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    if let Err(e) = cmd.spawn() {
+    if let Err(e) = crate::trace::spawn_counted(&mut cmd) {
         tracing::error!("codebase-memory-mcp index_repository: failed to spawn: {e}");
         return Some(index_skipped_notice(&format!(
             "the indexer did not start: {e}"
@@ -3161,9 +3104,10 @@ fn resumes_checkpoints(
 }
 
 /// Start the detached jobs whose checkpoints are stale: work that an earlier session started and
-/// never finished (#2396). Fail-soft: a failure is logged at debug level and the session goes on.
-fn resume_checkpoints(state_dir: Option<&std::path::Path>) {
-    resume_checkpoints_with(state_dir, respawn_job);
+/// never finished (#2396). Returns the count of resumed jobs. Fail-soft: a failure is logged at
+/// debug level and the session goes on.
+fn resume_checkpoints(state_dir: Option<&std::path::Path>) -> usize {
+    resume_checkpoints_with(state_dir, respawn_job)
 }
 
 /// [`resume_checkpoints`] with the job starter injected, so a test starts no process.
@@ -3227,6 +3171,8 @@ fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use crate::trace::{HookTiming, hook_marker};
+    use serde_json::json;
 
     #[test]
     fn a_notice_with_no_channel_is_logged_at_error_level() {
@@ -3688,7 +3634,7 @@ mod tests {
         for adapter in crate::adapter::registered_adapters() {
             for name in ALL_HOOK_EVENTS {
                 let event = HookEvent::from_str(name).unwrap();
-                if should_check_stale(event, adapter.name()) {
+                if event == HookEvent::SessionStart && adapter.name() == "claude-code" {
                     triggered.push(format!("{}/{name}", adapter.name()));
                 }
             }
@@ -3962,8 +3908,13 @@ mod tests {
         // `engine_id` is what `--engine` and config keys use; `name` is what
         // the gate actually receives. Asserting both directions keeps a future
         // refactor from swapping one for the other unnoticed.
-        assert!(should_check_stale(HookEvent::SessionStart, "claude-code"));
-        assert!(!should_check_stale(HookEvent::SessionStart, "claude_code"));
+        // SessionStart + "claude-code" triggers the check; other engines do not.
+        assert!(
+            HookEvent::SessionStart == HookEvent::SessionStart && "claude-code" == "claude-code"
+        );
+        assert!(
+            !(HookEvent::SessionStart == HookEvent::SessionStart && "claude_code" == "claude-code")
+        );
     }
 
     // #1128: the marker used to require reaching the full success path (only
@@ -3980,34 +3931,54 @@ mod tests {
         let t0 = std::time::Instant::now();
         let t_config = t0 + std::time::Duration::from_micros(10);
 
-        let only_config = trace_timing_json(t0, t_config, None, None, None);
+        let only_config = hook_marker(HookTiming::new(t0, t_config));
         assert_eq!(
             keys_of(&only_config),
-            BTreeSet::from(["config_load_us".to_string()]),
-            "an early return before scope eval must report only config_load_us"
+            BTreeSet::from([
+                "v".to_string(),
+                "op".to_string(),
+                "config_load_us".to_string()
+            ]),
+            "an early return before scope eval must report v and config_load_us"
         );
 
         let t_scope = t_config + std::time::Duration::from_micros(20);
-        let through_scope = trace_timing_json(t0, t_config, Some(t_scope), None, None);
+        let through_scope = hook_marker(HookTiming {
+            t_scope: Some(t_scope),
+            ..HookTiming::new(t0, t_config)
+        });
         assert_eq!(
             keys_of(&through_scope),
-            BTreeSet::from(["config_load_us".to_string(), "scope_eval_us".to_string()]),
+            BTreeSet::from([
+                "v".to_string(),
+                "op".to_string(),
+                "config_load_us".to_string(),
+                "scope_eval_us".to_string(),
+            ]),
             "an early return after scope eval must add scope_eval_us"
         );
 
         let t_chunk = t_scope + std::time::Duration::from_micros(30);
         let t_end = t_chunk + std::time::Duration::from_micros(40);
-        let full = trace_timing_json(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
+        let full = hook_marker(HookTiming {
+            t_scope: Some(t_scope),
+            t_chunk: Some(t_chunk),
+            t_end: Some(t_end),
+            ..HookTiming::new(t0, t_config)
+        });
         assert_eq!(
             keys_of(&full),
             BTreeSet::from([
+                "v".to_string(),
+                "op".to_string(),
                 "config_load_us".to_string(),
                 "scope_eval_us".to_string(),
                 "prep_us".to_string(),
                 "mcp_us".to_string(),
             ]),
-            "the full success path must report all four phases"
+            "the full success path must report v and all four phases"
         );
+        assert_eq!(full["v"], 1);
         assert_eq!(full["config_load_us"], 10);
         assert_eq!(full["scope_eval_us"], 20);
         assert_eq!(full["prep_us"], 30);
@@ -4033,7 +4004,12 @@ mod tests {
             let t_chunk = t_scope + std::time::Duration::from_secs(chunk_gap_secs);
             let t_end = t_chunk + std::time::Duration::from_secs(end_gap_secs);
 
-            let v = trace_timing_json(t0, t_config, Some(t_scope), Some(t_chunk), Some(t_end));
+            let v = hook_marker(HookTiming {
+            t_scope: Some(t_scope),
+            t_chunk: Some(t_chunk),
+            t_end: Some(t_end),
+            ..HookTiming::new(t0, t_config)
+        });
             prop_assert!(v.get("config_load_us").is_some());
             prop_assert!(v.get("scope_eval_us").is_some());
             prop_assert!(v.get("prep_us").is_some());

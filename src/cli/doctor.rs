@@ -359,7 +359,11 @@ fn tool_version(binary: &str) -> Option<String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let out = match crate::process::run_with_timeout(cmd, DEFAULT_TOOL_VERSION_TIMEOUT) {
+    let out = match crate::process::run_traced(
+        "doctor:tool-version",
+        cmd,
+        DEFAULT_TOOL_VERSION_TIMEOUT,
+    ) {
         Ok(out) => out,
         Err(e) => {
             tracing::error!("`{binary} --version` failed: {e}");

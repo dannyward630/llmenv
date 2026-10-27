@@ -11,7 +11,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::config::CodebaseMemory;
-use crate::process::run_with_timeout;
 
 mod declared;
 mod guard;
@@ -108,12 +107,16 @@ fn parse_roots(listing: &str) -> anyhow::Result<Vec<PathBuf>> {
 /// # Errors
 /// The command cannot run, times out, or exits non-zero.
 fn list_roots(cm: &CodebaseMemory) -> anyhow::Result<Vec<PathBuf>> {
-    let output = run_with_timeout(cbm_command(cm, &["allow-root", "--list"])?, COMMAND_TIMEOUT)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "codebase-memory-mcp allow-root --list: {e:#}. Is codebase-memory-mcp on PATH?"
-            )
-        })?;
+    let output = crate::process::run_traced(
+        "cbm:allow-root",
+        cbm_command(cm, &["allow-root", "--list"])?,
+        COMMAND_TIMEOUT,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "codebase-memory-mcp allow-root --list: {e:#}. Is codebase-memory-mcp on PATH?"
+        )
+    })?;
     anyhow::ensure!(
         output.status.success(),
         "codebase-memory-mcp allow-root --list exited with {}: {}",

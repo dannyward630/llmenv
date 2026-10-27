@@ -169,6 +169,15 @@ pub fn run_statusline(
     };
     let icons = resolve_icons(cfg.style.icon_set, &cfg.icons);
 
+    // Track per-widget timing when a trace sink is on.
+    let mut widget_times: Option<std::collections::BTreeMap<String, u64>> =
+        if crate::trace::enabled() {
+            Some(std::collections::BTreeMap::new())
+        } else {
+            None
+        };
+    let t0 = std::time::Instant::now();
+
     let mut out = String::new();
     // A status file that exists but cannot be read is not "no data". Blank widgets would
     // look the same, so the marker goes on its own line before the rows (#2722).
@@ -193,11 +202,16 @@ pub fn run_statusline(
                 // applies whenever the widget's config sets `max_len`,
                 // regardless of this flag.
                 TemplateToken::Widget { name, truncate: _ } => {
+                    let t_widget = std::time::Instant::now();
                     let widget_cfg = cfg.widgets.get(&name);
                     let resolved = render_engine_widget(&name, &engine_data, widget_cfg, use_color)
                         .or_else(|| {
                             render_llmenv_widget(&name, &status_data, widget_cfg, &icons, use_color)
                         });
+                    if let Some(times) = &mut widget_times {
+                        let us = std::time::Duration::as_micros(&t_widget.elapsed()) as u64;
+                        times.insert(name.to_string(), us);
+                    }
                     // `None` from both renderers means `name` isn't a
                     // recognized widget at all (typo, or a renamed/removed
                     // widget still referenced from an old config) — visibly
@@ -224,7 +238,26 @@ pub fn run_statusline(
         }
         out.push('\n');
     }
+    emit_statusline_trace(widget_times, t0);
     Ok(out)
+}
+
+/// Emit a `llmenv-trace {"op":"statusline", ...}` line with per-widget timing.
+///
+/// Called at the end of `run_statusline` when a trace sink is on.
+fn emit_statusline_trace(
+    widget_times: Option<std::collections::BTreeMap<String, u64>>,
+    t0: std::time::Instant,
+) {
+    if let Some(times) = widget_times {
+        let total_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let mut fields = serde_json::Map::new();
+        fields.insert("total_us".to_string(), serde_json::json!(total_us));
+        for (widget, us) in &times {
+            fields.insert(format!("{widget}_us"), serde_json::json!(us));
+        }
+        crate::trace::emit_json_trace("statusline", fields);
+    }
 }
 
 #[cfg(test)]

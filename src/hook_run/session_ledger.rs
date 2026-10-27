@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 pub(crate) use super::record_hash::{hash_prefix, record_hash};
 use super::resume_cache::ResumeCache;
@@ -204,6 +205,25 @@ fn head_bytes(text: &str, max: usize) -> String {
         .to_string()
 }
 
+/// Timing data for a call to `LedgerStore::update_reporting_save` (#3012).
+///
+/// A field is `None` when its step did not run, such as `read_us` after a busy lock.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LedgerTiming {
+    /// Polls of the lock (`1` = no contention).
+    pub lock_attempts: Option<u32>,
+    /// Time spent polling for the lock, in microseconds.
+    pub lock_wait_us: Option<u64>,
+    /// Time to read the ledger file, in microseconds.
+    pub read_us: Option<u64>,
+    /// Time to write the ledger file, in microseconds.
+    pub write_us: Option<u64>,
+    /// Size of the ledger after serialization, when a trace sink is on.
+    pub ledger_bytes: Option<usize>,
+    /// Whether the change did not reach disk: a busy lock, an unreadable file, or a failed save.
+    pub state_unsaved: Option<bool>,
+}
+
 /// The ledger files under `state_dir()/recall_session/`.
 #[derive(Debug, Clone)]
 pub(crate) struct LedgerStore {
@@ -234,22 +254,61 @@ impl LedgerStore {
         session_id: &str,
         f: impl FnOnce(&mut Ledger) -> T,
     ) -> Option<T> {
-        self.update_reporting_save(session_id, f)
-            .map(|(result, _)| result)
+        let _lock = self.lock(session_id)?;
+        let mut ledger = self.read(session_id)?;
+        let result = f(&mut ledger);
+        let _saved = self.write(session_id, &ledger);
+        Some(result)
+    }
+
+    /// [`Self::update`] with the lock and file timing, for the recall trace (#3012).
+    pub(crate) fn update_timed<T>(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut Ledger) -> T,
+    ) -> (Option<T>, LedgerTiming) {
+        let (updated, timing) = self.update_reporting_save(session_id, f);
+        (updated.map(|(result, _saved)| result), timing)
     }
 
     /// Like [`Self::update`], and also reports whether the ledger reached disk.
     /// The flag is `false` when the save failed, and the result of `f` is still returned.
+    /// The timing comes back even when the update does not run (#3012).
     pub(crate) fn update_reporting_save<T>(
         &self,
         session_id: &str,
         f: impl FnOnce(&mut Ledger) -> T,
-    ) -> Option<(T, bool)> {
-        let _lock = self.lock(session_id)?;
-        let mut ledger = self.read(session_id)?;
+    ) -> (Option<(T, bool)>, LedgerTiming) {
+        let us = |t: Instant| u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let (lock, lock_timing) =
+            super::session_state::lock_state_file_timed(&self.dir, session_id, "recall ledger");
+        let mut timing = LedgerTiming {
+            lock_attempts: Some(lock_timing.attempts),
+            lock_wait_us: Some(lock_timing.wait_us),
+            state_unsaved: Some(true),
+            ..LedgerTiming::default()
+        };
+        let _lock = match lock {
+            Ok(file) => file,
+            Err(why) => {
+                tracing::error!("recall ledger lock not taken: {why}");
+                return (None, timing);
+            }
+        };
+        let t_read = Instant::now();
+        let Some(mut ledger) = self.read(session_id) else {
+            return (None, timing);
+        };
+        timing.read_us = Some(us(t_read));
         let result = f(&mut ledger);
+        let t_write = Instant::now();
         let saved = self.write(session_id, &ledger);
-        Some((result, saved))
+        timing.write_us = Some(us(t_write));
+        timing.state_unsaved = Some(!saved);
+        if crate::trace::enabled() {
+            timing.ledger_bytes = serde_json::to_vec(&ledger).ok().map(|v| v.len());
+        }
+        (Some((result, saved)), timing)
     }
 
     fn file(&self, session_id: &str, ext: &str) -> PathBuf {
@@ -600,6 +659,52 @@ mod tests {
         assert!(store.update("s1", |l| l.last_turn_at = 1).is_none());
         drop(held);
         assert_eq!(store.load("s1").unwrap().last_turn_at, 0);
+    }
+
+    // A busy lock gives no update, but the timing still says how long it polled and that the
+    // state is unsaved (#3012).
+    #[test]
+    fn a_busy_lock_reports_its_poll_count_and_an_unsaved_state() {
+        let (_dir, store) = store();
+        let held = store.lock("s1").unwrap();
+        let (updated, timing) = store.update_reporting_save("s1", |l| l.last_turn_at = 1);
+        assert!(updated.is_none());
+        assert!(timing.lock_attempts.unwrap() > 1);
+        assert_eq!(timing.state_unsaved, Some(true));
+        assert!(timing.read_us.is_none() && timing.write_us.is_none());
+        drop(held);
+        assert_eq!(
+            store.load("s1").unwrap().last_turn_at,
+            0,
+            "a busy lock changes nothing"
+        );
+    }
+
+    // `update_timed` gives the same result as `update`, and keeps the timing when the lock is busy.
+    #[test]
+    fn update_timed_keeps_the_timing_of_a_skipped_update() {
+        let (_dir, store) = store();
+        let held = store.lock("s1").unwrap();
+        let (skipped, timing) = store.update_timed("s1", |l| l.last_turn_at = 1);
+        assert!(skipped.is_none());
+        assert!(timing.lock_attempts.unwrap() > 1);
+        drop(held);
+        let (done, timing) = store.update_timed("s1", |l| l.last_turn_at = 2);
+        assert_eq!(done, Some(()));
+        assert_eq!(timing.lock_attempts, Some(1));
+    }
+
+    // An uncontended update takes the lock on the first poll and reaches disk.
+    #[test]
+    fn a_free_lock_is_taken_on_the_first_poll() {
+        let (_dir, store) = store();
+        let (updated, timing) = store.update_reporting_save("s1", |l| l.last_turn_at = 7);
+        assert!(matches!(updated, Some(((), true))));
+        assert_eq!(timing.lock_attempts, Some(1));
+        assert_eq!(timing.state_unsaved, Some(false));
+        assert!(timing.read_us.is_some() && timing.write_us.is_some());
+        assert!(timing.lock_wait_us.is_some());
+        assert_eq!(store.load("s1").unwrap().last_turn_at, 7);
     }
 
     #[test]

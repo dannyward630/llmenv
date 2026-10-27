@@ -47,7 +47,7 @@ pub(super) fn post_session_consolidation_in(state_dir: Option<&std::path::Path>)
     let mut cmd = consolidation_run_command(exe, checkpoint.as_deref());
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    if let Err(e) = cmd.spawn() {
+    if let Err(e) = crate::trace::spawn_counted(&mut cmd) {
         tracing::error!(
             "consolidation-run: cannot spawn the detached child: {e}; consolidation skipped"
         );

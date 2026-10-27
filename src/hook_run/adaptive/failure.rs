@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{
     AdaptiveCtx, FAILURE_BUDGET_BYTES, FAILURE_LIMIT, FANOUT_LIMIT, Outcome, RECALL_STATE_UNSAVED,
-    RESOLVED_TOPIC, agent_key, note_skipped, note_unless_saved, query, report,
+    RESOLVED_TOPIC, agent_key, note_skipped, note_unless_saved, query, report, report_ledger,
 };
 use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
@@ -102,9 +102,12 @@ fn related_records(body: &str, wanted: &BTreeSet<String>) -> String {
 /// The lowercase tokens of `text` that can tie a memory to a failure: a word of four or more
 /// characters that is not a stop word, or an error code such as `E0063`.
 pub(super) fn distinctive_tokens(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map(str::to_lowercase)
+    // Lowercase first: a letter such as `İ` lowercases to a letter plus a combining mark, and the
+    // mark must split a token like any other non-word character.
+    text.to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|t| is_distinctive(t))
+        .map(str::to_string)
         .collect()
 }
 
@@ -181,11 +184,11 @@ pub(in crate::hook_run) async fn tool_failure(
     report(ctx, "post_tool_use_failure", &outcome, &budget);
     if record {
         let kept = budget.kept_hashes();
-        note_unless_saved(
-            ctx.store
-                .update(ctx.session_id, |l| l.mark_sent(&key, kept)),
-            RECALL_STATE_UNSAVED,
-        );
+        let (updated, timing) = ctx
+            .store
+            .update_timed(ctx.session_id, |l| l.mark_sent(&key, kept));
+        note_unless_saved(updated, RECALL_STATE_UNSAVED);
+        report_ledger("post_tool_use_failure", &timing);
     }
     Ok(budget.hook_text(Vec::new()))
 }
@@ -254,6 +257,17 @@ mod tests {
         );
         assert_eq!(rel("", "boom"), "");
         assert_eq!(rel("No memories found.", "boom"), "");
+    }
+
+    #[test]
+    fn a_letter_that_lowercases_to_a_mark_splits_the_token() {
+        let tokens = distinctive_tokens("İstanbul");
+        assert!(tokens.contains("stanbul"), "got {tokens:?}");
+        assert!(
+            tokens
+                .iter()
+                .all(|t| t.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        );
     }
 
     proptest! {

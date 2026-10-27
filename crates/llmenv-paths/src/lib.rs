@@ -8,8 +8,10 @@ mod bounded_read;
 mod names;
 mod owner_only;
 mod tilde;
+mod write_stats;
 pub use tilde::expand_tilde;
 use tilde::expand_tilde_with_env;
+pub use write_stats::{WriteStats, snapshot as write_stats_snapshot};
 pub mod program;
 pub use atomic_write::{resolve_user_link, write_owner_only_atomic, write_user_file_atomic};
 pub use bounded_read::{check_regular_file, read_file_bounded, read_open_file, read_text_bounded};
@@ -17,8 +19,8 @@ pub use names::{
     cwd_under_prefix, has_parent_component, is_unsafe_join_target, is_valid_short_name,
 };
 pub use owner_only::{
-    create_dir_owner_only, is_executable, write_owner_only, write_owner_only_executable,
-    write_owner_only_like,
+    create_dir_owner_only, is_executable, open_append_owner_only, write_owner_only,
+    write_owner_only_executable, write_owner_only_like,
 };
 
 /// `read_dir` that treats a missing directory as "nothing to iterate":

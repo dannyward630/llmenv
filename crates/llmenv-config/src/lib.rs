@@ -107,7 +107,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Read the config file at `path` through a bounded reader, so a FIFO or a huge file fails at
 /// once (#2942). A missing file is a `NotFound` error, as from `std::fs::read_to_string`.
-pub(crate) fn read_config_text(path: &Path) -> anyhow::Result<String> {
+fn read_config_text(path: &Path) -> anyhow::Result<String> {
     llmenv_paths::read_text_bounded(path, MAX_CONFIG_FILE_BYTES)
         .and_then(|text| {
             text.ok_or_else(|| {

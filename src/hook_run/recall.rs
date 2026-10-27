@@ -500,6 +500,18 @@ mod tests {
         );
     }
 
+    // The line must keep the shape that website/docs/trace.md shows (#3018).
+    #[test]
+    fn trace_line_matches_the_docs_page() {
+        let mut budget = RecallBudget::default();
+        budget.add_records(vec!["[t] a".to_string()]);
+        let line = budget.trace_line(true).unwrap_or_default();
+        assert!(
+            crate::trace::docs_sync::docs_show(&line),
+            "website/docs/trace.md shows no template for `{line}`"
+        );
+    }
+
     #[tokio::test]
     async fn passthrough_text_skips_empty_results_and_exact_duplicates() {
         let texts = ["", "pack", "pack", "other"];
