@@ -62,9 +62,7 @@ pub(in crate::hook_run) fn record_local(
         _ => {}
     }
     let elapsed = t0.elapsed();
-    // Emit a trace line only when the ledger was actually touched (update was called).
-    // store.update returns None when the session_id is unsafe or the lock failed,
-    // which means no file I/O occurred and there is nothing to time.
+    // Only these two events update the ledger. The time includes a busy-lock wait.
     let touched = matches!(event, HookEvent::PostToolBatch | HookEvent::SubagentTask);
     if touched {
         crate::trace::emit_ledger_trace("update", elapsed);

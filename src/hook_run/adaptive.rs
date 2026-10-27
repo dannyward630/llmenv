@@ -188,7 +188,7 @@ pub(super) async fn session_start(
     let recall_project = project.clone();
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
     let resume = super::resume_cache::ResumeCache::from_payload(ctx.payload);
-    let updated = ctx.store.update_reporting_save(ctx.session_id, |l| {
+    let (updated, ledger_timing) = ctx.store.update_reporting_save(ctx.session_id, |l| {
         l.resume_cache = Some(resume);
         if reset {
             l.reset();
@@ -198,19 +198,11 @@ pub(super) async fn session_start(
         }
         l.sent_for(MAIN_AGENT)
     });
-    let (first_sent, first_saved) = match &updated {
-        Some((s, saved, _)) => (Some(s.clone()), *saved),
-        None => (None, false),
-    };
-    let first_result = (&first_sent, first_saved);
-    if let Some(notice) = first_update_notice(FirstUpdate::of(Some(&first_result)), reset) {
+    if let Some(notice) = first_update_notice(FirstUpdate::of(updated.as_ref()), reset) {
         tracing::error!("session start ledger update failed (reset requested: {reset}): {notice}");
         agent_notice::record(notice);
     }
-    let (sent, _timing) = match &updated {
-        Some((s, _, t)) => (s.clone(), t.clone()),
-        None => (BTreeSet::new(), LedgerTiming::none()),
-    };
+    let sent = updated.map_or_else(BTreeSet::new, |(sent, _saved)| sent);
     // A resumed session already holds its pack, so it makes neither call (#2142). A failed
     // wake-up call must not discard the project memories that did load, so they are kept on the
     // error path below (#2756).
@@ -250,7 +242,7 @@ pub(super) async fn session_start(
         "session_start",
         &outcome,
         &budget,
-        updated.as_ref().map(|(_, _, t)| t),
+        Some(&ledger_timing),
     );
     let wake = match wake {
         Ok(text) => text,
