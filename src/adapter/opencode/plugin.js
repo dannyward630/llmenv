@@ -13,14 +13,48 @@ const DEFAULT_TIMEOUT_MS = 30000;
 /** Why the hook table did not load, or null. Every hook is off then, so each request says so. */
 let tableError = null;
 
+const EMPTY_TABLE = { hooks: [], tools: {}, mcpServers: {} };
+
+/** A table is usable when every hook names an event and a command, and the maps are objects. */
+function isTableShape(table) {
+  const plainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  return (
+    plainObject(table) &&
+    Array.isArray(table.hooks) &&
+    table.hooks.every((h) => plainObject(h) && typeof h.event === "string" && typeof h.command === "string") &&
+    plainObject(table.tools) &&
+    (table.mcpServers === undefined || plainObject(table.mcpServers))
+  );
+}
+
 function loadTable() {
+  let table;
   try {
-    return JSON.parse(readFileSync(TABLE_URL, "utf8"));
+    table = JSON.parse(readFileSync(TABLE_URL, "utf8"));
   } catch (e) {
     tableError = `llmenv: no llmenv hook runs in this opencode session, because ${TABLE_URL.pathname} cannot be read: ${e.message}. Fix: run \`llmenv materialize\`.`;
     console.error(tableError);
-    return { hooks: [], tools: {}, mcpServers: {} };
+    return EMPTY_TABLE;
   }
+  // A file that parses but has the wrong shape would fail later, on each tool call. Reject it here.
+  if (!isTableShape(table)) {
+    tableError = `llmenv: no llmenv hook runs in this opencode session, because ${TABLE_URL.pathname} does not have the hook table shape. Fix: run \`llmenv materialize\`.`;
+    console.error(tableError);
+    return EMPTY_TABLE;
+  }
+  return table;
+}
+
+/** Record a hook error and log it where it occurs, so a session that ends first does not lose it. */
+function reportError(out, text) {
+  console.error(text);
+  out.errors.push(text);
+}
+
+/** Queue a hook result for the next request. A block is also logged now, in case the session ends first. */
+function queueOutcome(s, out) {
+  if (out.block) console.error(out.block);
+  s.errors.push(...out.errors, ...(out.block ? [out.block] : []));
 }
 
 const TABLE = loadTable();
@@ -77,7 +111,13 @@ export async function runHooks(event, sessionID, extra, toolName) {
       try {
         if (!matches(hook.matcher, toolName)) continue;
       } catch (e) {
-        out.errors.push(`llmenv: the matcher ${JSON.stringify(hook.matcher)} of a ${event} hook is not a valid pattern: ${e.message}`);
+        const why = `llmenv: the matcher ${JSON.stringify(hook.matcher)} of a ${event} hook is not a valid pattern: ${e.message}`;
+        // A gate with a broken matcher cannot tell which calls it guards, so it blocks them all.
+        if (hook.failClosed) {
+          out.block = why;
+          return out;
+        }
+        reportError(out, why);
         continue;
       }
     }
@@ -97,11 +137,19 @@ export async function runHooks(event, sessionID, extra, toolName) {
         out.block = why;
         return out;
       }
-      out.errors.push(why);
+      reportError(out, why);
       continue;
     }
     if (hook.failClosed && result.timedOut) {
       out.block = `llmenv: the ${event} hook \`${hook.command}\` timed out, so the call is blocked. Run it again, or run \`llmenv doctor\`.`;
+      return out;
+    }
+    // A gate passes a call only on exit 0 (allow) or exit 2 (deny). Any other exit, such as 1 or
+    // 127 for a missing program, and a signal kill, must not let the call through.
+    if (hook.failClosed && result.code !== 0 && result.code !== 2) {
+      const how = result.code === null ? "was killed by a signal" : `exited with ${result.code}`;
+      const detail = result.stderr ? `: ${result.stderr}` : "";
+      out.block = `llmenv: the ${event} hook \`${hook.command}\` ${how}, so the call is blocked${detail}`;
       return out;
     }
     const before = out.updatedInput;
@@ -115,7 +163,7 @@ export async function runHooks(event, sessionID, extra, toolName) {
 
 function readResult(event, command, result, out) {
   if (result.timedOut) {
-    out.errors.push(`llmenv: the ${event} hook \`${command}\` timed out and was stopped`);
+    reportError(out, `llmenv: the ${event} hook \`${command}\` timed out and was stopped`);
     return;
   }
   if (result.code === 2) {
@@ -124,7 +172,7 @@ function readResult(event, command, result, out) {
   }
   if (result.code !== 0) {
     const detail = result.stderr ? `: ${result.stderr}` : "";
-    out.errors.push(`llmenv: the ${event} hook \`${command}\` exited with ${result.code}${detail}`);
+    reportError(out, `llmenv: the ${event} hook \`${command}\` exited with ${result.code}${detail}`);
   }
   if (!result.stdout) return;
   let parsed;
@@ -200,7 +248,7 @@ function startSession(sessionID) {
   if (!s.started) {
     s.started = runHooks("SessionStart", sessionID, { source: "startup" }).then((out) => {
       s.start = out.context;
-      s.errors.push(...out.errors);
+      queueOutcome(s, out);
     });
   }
   return s.started;
@@ -211,8 +259,9 @@ async function endSession(sessionID) {
   if (!s || s.ended) return;
   s.ended = true;
   const out = await runHooks("SessionEnd", sessionID, {});
-  // The session is over, so no request can carry these texts. Log them, so none is lost silently.
-  for (const text of [...out.errors, ...s.errors, ...s.once]) console.error(text);
+  // The session is over, so no request can carry the texts still queued. Log those now. The
+  // errors already logged where they occurred, so they are not logged again.
+  for (const text of [...(out.block ? [out.block] : []), ...s.once]) console.error(text);
   sessions.delete(sessionID);
 }
 
@@ -323,7 +372,7 @@ export default {
       if (failed) payload.error = response.error;
       const out = await runHooks(event, e.sessionID, payload, neutral.name);
       const s = state(e.sessionID);
-      s.errors.push(...out.errors);
+      queueOutcome(s, out);
       if (out.context.length) s.turn.push(...out.context);
       // The subagent's own Output is `result.output`. A background call returns "running" there at
       // launch, so its stop is not reported here (see docs/reference/opencode-v2-parity.md).
