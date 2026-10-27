@@ -3059,7 +3059,7 @@ fn trigger_index_with(
     // wrapper does the same for the indexer it starts. The log redirect above made the directory.
     direct_index_stdout(&mut cmd, wrapped, &result_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    if let Err(e) = crate::trace::spawn_counted(&mut cmd) {
+    if let Err(e) = crate::trace::spawn_counted("cbm:index", &mut cmd) {
         tracing::error!("codebase-memory-mcp index_repository: failed to spawn: {e}");
         return Some(index_skipped_notice(&format!(
             "the indexer did not start: {e}"

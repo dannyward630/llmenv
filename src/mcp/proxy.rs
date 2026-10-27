@@ -999,7 +999,7 @@ pub(crate) fn spawn_mcp_proxy(
         }
     };
     configure_detached(&mut cmd, stderr);
-    let child = cmd.spawn().with_context(|| {
+    let child = crate::trace::spawn_counted("proxy:start", &mut cmd).with_context(|| {
         format!(
             "spawning `{}` to run mcp-proxy (resolved from PATH)",
             program.display()

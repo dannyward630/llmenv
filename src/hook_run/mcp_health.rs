@@ -72,7 +72,10 @@ async fn probe_stdio(
     crate::trace::emit_spawn_trace(
         "probe:mcp-health",
         started.elapsed(),
-        crate::trace::SpawnExit::of_probe(answered.as_ref().is_ok_and(Result::is_ok)),
+        crate::trace::SpawnExit::of_probe(
+            answered.as_ref().is_ok_and(Result::is_ok),
+            answered.is_err(),
+        ),
     );
     // Reap the probe process now. `kill_on_drop` is only the backstop for an early return.
     if let Err(e) = child.kill().await {

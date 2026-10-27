@@ -58,7 +58,7 @@ config change reports `written=0` for an adapter whose files are already current
 
 ### `[LLMENV_SPAWN]`
 
-Emitted when a spawned child process ends. Scope probes, `git`, the keychain `security` call, the statusline `gh` call, the consolidation `claude` call, and the MCP stdio probes each print one line. A proxy start prints one line with `exit=detached` and a zero duration.
+Emitted when a spawned child process ends. Scope probes, `git`, the keychain `security` call, the statusline `gh` call, the consolidation `claude` call, the sync `git` calls, and the MCP stdio probes each print one line. A detached job start (session-log record, ICM store, consolidation, codebase-memory index, respawn, proxy start) prints one line with `exit=detached`, or `exit=spawn-error` when the start fails. Its duration is the start time, not the job's run time.
 
 ```text
 [LLMENV_SPAWN] <label> <duration>us exit=<code|signal|timeout|spawn-error|detached>
