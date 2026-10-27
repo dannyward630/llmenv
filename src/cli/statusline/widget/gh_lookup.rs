@@ -34,9 +34,10 @@ pub(super) const GH_NO_PR_SIGNS: [&str; 3] = [
     "not a git repository",
 ];
 
-/// The `gh` errors that mean the login is missing or expired.
+/// The `gh` errors that mean the login is missing or expired. Lowercase, like the no-PR list,
+/// because the same case rule applies to both.
 pub(super) const GH_LOGIN_SIGNS: [&str; 3] =
-    ["gh auth login", "HTTP 401", "authentication required"];
+    ["gh auth login", "http 401", "authentication required"];
 
 /// The lookup for a `gh pr view` that exited non-zero. Only a known "no PR" answer is
 /// `Ok(None)`. The "no PR" check runs first, because that message quotes the branch name, and a
@@ -49,10 +50,61 @@ pub(super) fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -
         tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
         return Ok(None);
     }
-    if GH_LOGIN_SIGNS.iter().any(|sign| stderr.contains(sign)) {
+    if GH_LOGIN_SIGNS.iter().any(|sign| lowered.contains(sign)) {
         tracing::error!("gh pr view: gh is not logged in ({status}): {first_line}");
         return Err(GhFailure::Unauthenticated);
     }
     tracing::error!("gh pr view failed ({status}): {first_line}");
     Err(GhFailure::Failed)
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    use super::*;
+
+    fn exit_one() -> std::process::ExitStatus {
+        std::process::ExitStatus::from_raw(1 << 8)
+    }
+
+    /// Upper-case the first letter of each word: "no pull requests found" becomes
+    /// "No Pull Requests Found". That is the kind of case real `gh` output can use.
+    fn capitalized(sign: &str) -> String {
+        sign.split(' ')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_no_pr_sign_in_any_case_reads_as_no_pr(
+            prefix in "[a-z ]{0,20}",
+            suffix in "[a-z ]{0,20}",
+            pick in 0..GH_NO_PR_SIGNS.len(),
+        ) {
+            let text = format!("{prefix}{}{suffix}", capitalized(GH_NO_PR_SIGNS[pick]));
+            proptest::prop_assert_eq!(classify_gh_exit(exit_one(), &text), Ok(None));
+        }
+
+        #[test]
+        fn a_login_sign_in_any_case_reads_as_unauthenticated(
+            prefix in "[a-z ]{0,20}",
+            pick in 0..GH_LOGIN_SIGNS.len(),
+        ) {
+            let text = format!("{prefix}{}", capitalized(GH_LOGIN_SIGNS[pick]));
+            proptest::prop_assert_eq!(
+                classify_gh_exit(exit_one(), &text),
+                Err(GhFailure::Unauthenticated)
+            );
+        }
+    }
 }

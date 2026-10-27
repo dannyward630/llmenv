@@ -1926,8 +1926,7 @@ mod tests {
             use std::os::unix::process::ExitStatusExt as _;
             let status = std::process::ExitStatus::from_raw(1 << 8);
             let lowered = stderr.to_ascii_lowercase();
-            let known = GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s))
-                || GH_LOGIN_SIGNS.iter().any(|s| stderr.contains(s));
+            let known = GH_NO_PR_SIGNS.iter().chain(GH_LOGIN_SIGNS.iter()).any(|s| lowered.contains(s));
             proptest::prop_assume!(!known);
             proptest::prop_assert_eq!(classify_gh_exit(status, &stderr), Err(GhFailure::Failed));
         }
