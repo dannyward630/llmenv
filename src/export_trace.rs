@@ -8,61 +8,66 @@ use std::time::{Duration, Instant};
 
 use crate::trace::emit_json_trace;
 
-/// Emit a `llmenv-trace {"op":"export",...}` line with per-phase timing.
-/// The fields are optional — a phase that did not run is left out.
-pub(crate) fn emit_export_trace(
+/// Emit one `llmenv-trace {"op":<op>,...}` marker with per-phase timing.
+///
+/// `marks` lists each phase as `(field, end)` in run order. A phase measures from the latest
+/// earlier end that ran, so a phase that did not run (`None`) is left out and does not break
+/// the chain.
+pub(crate) fn emit_phase_trace(op: &str, t0: Instant, marks: &[(&str, Option<Instant>)]) {
+    emit_json_trace(op, serde_json::Value::Object(phase_fields(t0, marks)));
+}
+
+fn phase_fields(
     t0: Instant,
-    t_config: Instant,
-    t_env: Option<Instant>,
-    t_active: Option<Instant>,
-    t_manifest: Option<Instant>,
-    t_adapters: Option<Instant>,
-    t_render: Option<Instant>,
-) {
+    marks: &[(&str, Option<Instant>)],
+) -> serde_json::Map<String, serde_json::Value> {
     let us = |d: Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
     let mut fields = serde_json::Map::new();
-    fields.insert(
-        "config_load_us".to_string(),
-        serde_json::json!(us(t_config.saturating_duration_since(t0))),
-    );
-    if let Some(t_env) = t_env {
-        fields.insert(
-            "detect_env_us".to_string(),
-            serde_json::json!(us(t_env.saturating_duration_since(t_config))),
-        );
+    let mut base = t0;
+    for (name, end) in marks {
+        if let Some(end) = end {
+            fields.insert(
+                (*name).to_string(),
+                serde_json::json!(us(end.saturating_duration_since(base))),
+            );
+            base = *end;
+        }
     }
-    if let Some(t_active) = t_active {
-        fields.insert(
-            "evaluate_active_us".to_string(),
-            serde_json::json!(us(
-                t_active.saturating_duration_since(t_env.unwrap_or(t_config))
-            )),
+    fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A skipped phase is left out, and the next phase measures from the last one that ran.
+    #[test]
+    fn a_skipped_phase_is_omitted_and_the_chain_continues() {
+        let t0 = Instant::now();
+        let t_a = t0 + Duration::from_micros(10);
+        let t_c = t0 + Duration::from_micros(35);
+        let fields = phase_fields(
+            t0,
+            &[("a_us", Some(t_a)), ("b_us", None), ("c_us", Some(t_c))],
         );
+        assert_eq!(fields["a_us"], 10);
+        assert_eq!(fields["c_us"], 25);
+        assert!(!fields.contains_key("b_us"));
     }
-    if let Some(t_manifest) = t_manifest {
-        fields.insert(
-            "build_manifest_us".to_string(),
-            serde_json::json!(us(
-                t_manifest.saturating_duration_since(t_active.unwrap_or(t_env.unwrap_or(t_config)))
-            )),
-        );
+
+    // The phases add up to the whole run when every phase ran.
+    #[test]
+    fn phases_sum_to_the_last_boundary() {
+        let t0 = Instant::now();
+        let marks = [
+            ("a_us", Some(t0 + Duration::from_micros(7))),
+            ("b_us", Some(t0 + Duration::from_micros(19))),
+            ("c_us", Some(t0 + Duration::from_micros(40))),
+        ];
+        let sum: u64 = phase_fields(t0, &marks)
+            .values()
+            .filter_map(|v| v.as_u64())
+            .sum();
+        assert_eq!(sum, 40);
     }
-    if let Some(t_adapters) = t_adapters {
-        fields.insert(
-            "materialize_adapters_us".to_string(),
-            serde_json::json!(us(t_adapters.saturating_duration_since(
-                t_manifest.unwrap_or(t_active.unwrap_or(t_env.unwrap_or(t_config)))
-            ))),
-        );
-    }
-    if let Some(t_render) = t_render {
-        fields.insert(
-            "render_vars_us".to_string(),
-            serde_json::json!(us(t_render
-                .saturating_duration_since(t_adapters.unwrap_or(
-                    t_manifest.unwrap_or(t_active.unwrap_or(t_env.unwrap_or(t_config)))
-                )))),
-        );
-    }
-    emit_json_trace("export", serde_json::Value::Object(fields));
 }

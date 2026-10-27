@@ -104,6 +104,9 @@ fn write_owner_only_unnamed(path: &Path, content: &[u8], executable: bool) -> st
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mode = if executable { 0o700 } else { 0o600 };
+        if crate::write_stats::already_current(path, content, mode) {
+            return Ok(());
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -128,6 +131,7 @@ fn write_owner_only_unnamed(path: &Path, content: &[u8], executable: bool) -> st
         let _ = executable;
         std::fs::write(path, content)?;
     }
+    crate::write_stats::note_write(content.len());
     Ok(())
 }
 

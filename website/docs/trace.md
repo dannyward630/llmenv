@@ -42,20 +42,19 @@ Fields:
 Emitted after each adapter's materialize step when `LLMENV_TRACE_TIMING` is set.
 
 ```text
-[LLMENV_MATERIALIZE] <adapter> written=<n> unchanged=<n> removed=<n> bytes=<n> <us>us
+[LLMENV_MATERIALIZE] <adapter> written=<n> skipped=<n> bytes=<n> <us>us
 ```
 
 Fields:
 
 - `<adapter>` — adapter name (e.g. `claude-code`, `crush`).
-- `written=<n>` — number of files written by this adapter.
-- `unchanged=<n>` — files that existed with the same hash.
-- `removed=<n>` — files present in the cache folder but not in the manifest.
+- `written=<n>` — files the adapter wrote during this step.
+- `skipped=<n>` — files left alone because they already held the same bytes at the same mode.
 - `bytes=<n>` — total bytes of written files.
 - `<us>us` — elapsed time in microseconds.
 
-Metadata files (`llmenv-status.json`, `.llmenv-manifest.json`) are excluded from
-all counts.
+The counts come from the shared owner-only writers, so a second `llmenv regenerate` with no
+config change reports `written=0` for an adapter whose files are already current.
 
 ### `[LLMENV_SPAWN]`
 
@@ -108,11 +107,11 @@ precedent of `emit_trace_timing` and `emit_cache_trace`. (added in v3.14.0)
 Emitted at the end of the full export pipeline.
 
 ```json
-llmenv-trace {"v": 1, "op": "hook_run", "ts": <epoch-seconds>, "pid": <pid>, "data": { ... }}
+llmenv-trace {"v": 1, "op": "hook_run", "config_load_us": <n>, ...}
 ```
 
-The `"data"` object carries per-phase timing fields. Each field is optional — a
-phase that did not run is left out.
+The object is flat: the timing fields sit beside `v` and `op`. Each timing field is
+optional — a phase that did not run is left out.
 
 Fields:
 
@@ -123,10 +122,11 @@ Fields:
 
 ### `llmenv-trace` export marker
 
-Emitted by `llmenv export` with per-phase timing.
+Emitted once at the end of `llmenv export`, and once at the end of `llmenv regenerate`
+(with `"op": "regenerate"` and no `render_vars_us`), with per-phase timing.
 
 ```json
-llmenv-trace {"v": 1, "op": "export", "ts": <epoch-seconds>, "pid": <pid>, "data": { ... }}
+llmenv-trace {"v": 1, "op": "export", "config_load_us": <n>, ...}
 ```
 
 Fields:

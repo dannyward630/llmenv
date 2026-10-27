@@ -1377,12 +1377,16 @@ fn statusline_data_path_with_env(
 }
 
 fn run_regenerate() -> anyhow::Result<()> {
+    let t0 = std::time::Instant::now();
     let config_path = paths::config_path()?;
     let config = crate::hook_run::load_cached_config(&config_path)?;
     let config_dir = paths::config_dir()?;
+    let t_config = std::time::Instant::now();
 
     let env = crate::scope::matcher::Env::detect_for_config(&config)?;
+    let t_env = std::time::Instant::now();
     let active = crate::scope::evaluate(&config, &env);
+    let t_active = std::time::Instant::now();
 
     // Collect firing bundles (same logic as run_export)
     let firing: Vec<&Bundle> = firing_bundles(&config.bundle, &active, None);
@@ -1407,6 +1411,7 @@ fn run_regenerate() -> anyhow::Result<()> {
         Ok(v) => v,
         Err(e) => return Err(e).context("failed to build merged manifest"),
     };
+    let t_manifest = std::time::Instant::now();
     warn_dead_config(
         &config,
         shared_manifest.as_ref().map(|(m, _)| m),
@@ -1460,6 +1465,18 @@ fn run_regenerate() -> anyhow::Result<()> {
             }
         }
     }
+
+    crate::export_trace::emit_phase_trace(
+        "regenerate",
+        t0,
+        &[
+            ("config_load_us", Some(t_config)),
+            ("detect_env_us", Some(t_env)),
+            ("evaluate_active_us", Some(t_active)),
+            ("build_manifest_us", Some(t_manifest)),
+            ("materialize_adapters_us", Some(std::time::Instant::now())),
+        ],
+    );
 
     // Mirror run_export's degenerate-case handling (#543): don't print the
     // same "nothing to do" message for "everything failed" as for "legitimately
@@ -1722,14 +1739,9 @@ fn materialize_from_manifest(
     // Returns the paths it owns; we union them with the generic bundle files to
     // form llmenv's complete owned set (#196). Idempotent.
     let t_mat = std::time::Instant::now();
+    let writes_before = llmenv_paths::write_stats_snapshot();
     let adapter_owned = adapter.materialize(manifest, &cache_path)?;
-    crate::materialize_trace::record_materialize(
-        adapter,
-        &cache_path,
-        manifest,
-        &adapter_owned,
-        t_mat.elapsed(),
-    );
+    crate::materialize_trace::record_materialize(adapter.name(), writes_before, t_mat.elapsed());
 
     write_post_materialize(PostMaterializeParams {
         adapter,

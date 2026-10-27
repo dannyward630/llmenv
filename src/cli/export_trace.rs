@@ -59,16 +59,6 @@ pub(crate) fn run_export_core(
     let t_active = Instant::now();
 
     ensure_proxy(&config, &config_dir, &active);
-    crate::export_trace::emit_export_trace(
-        t0,
-        t_config,
-        Some(t_env),
-        Some(t_active),
-        None,
-        None,
-        None,
-    );
-
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
     if config.cache.remote_sync {
@@ -231,17 +221,7 @@ pub(crate) fn run_export_core(
         }
     }
 
-    // Emit export trace with adapter materialization timing.
     let t_adapters = Instant::now();
-    crate::export_trace::emit_export_trace(
-        t0,
-        t_config,
-        Some(t_env),
-        Some(t_active),
-        Some(t_manifest),
-        Some(t_adapters),
-        None,
-    );
 
     if !any_adapter_eligible {
         eprintln!(
@@ -357,16 +337,17 @@ pub(crate) fn run_export_core(
         }
     }
 
-    // Final render timing: total export duration.
-    let t_render = Instant::now();
-    crate::export_trace::emit_export_trace(
+    crate::export_trace::emit_phase_trace(
+        "export",
         t0,
-        t_config,
-        Some(t_env),
-        Some(t_active),
-        Some(t_manifest),
-        Some(t_adapters),
-        Some(t_render),
+        &[
+            ("config_load_us", Some(t_config)),
+            ("detect_env_us", Some(t_env)),
+            ("evaluate_active_us", Some(t_active)),
+            ("build_manifest_us", Some(t_manifest)),
+            ("materialize_adapters_us", Some(t_adapters)),
+            ("render_vars_us", Some(Instant::now())),
+        ],
     );
 
     Ok(())

@@ -64,17 +64,26 @@ pub(crate) fn append_trace_line(path: &std::path::Path, line: &str) {
     }
 }
 
-/// Emit a JSON trace object with `op` and the supplied fields. The object
-/// also carries `ts`, `pid`, and `"v": 1`.
+/// Build the `llmenv-trace <json>` marker line. The JSON object is flat: `fields` keeps its
+/// own keys, and the line adds `"v": 1` and `"op"`. Existing consumers read the timing keys
+/// at the top level.
+pub(crate) fn json_trace_line(op: &str, fields: serde_json::Value) -> String {
+    let mut obj = match fields {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
+    };
+    obj.insert("v".to_string(), serde_json::json!(1));
+    obj.insert("op".to_string(), serde_json::json!(op));
+    format!("llmenv-trace {}", serde_json::Value::Object(obj))
+}
+
+/// Emit the `llmenv-trace <json>` marker for `op` to the trace sink.
 pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Value) {
-    let obj = serde_json::json!({
-        "v": 1,
-        "op": op,
-        "ts": current_timestamp(),
-        "pid": std::process::id(),
-        "data": fields,
-    });
-    emit_trace_line(&obj.to_string());
+    emit_trace_line(&json_trace_line(op, fields));
 }
 
 /// Sub-phase boundaries for a `SessionStart` fan-out.
@@ -434,30 +443,17 @@ mod tests {
         emit_trace_line(line);
     }
 
-    // JSON marker carries "v": 1.
+    // The marker is `llmenv-trace ` plus a flat JSON object: consumers read timing keys at the
+    // top level, and `v` and `op` sit beside them.
     #[test]
-    fn json_marker_carry_version() {
-        let obj = serde_json::json!({
-            "v": 1,
-            "op": "hook_run",
-            "data": { "config_load_us": 12 },
-        });
-        let parsed: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
-        assert_eq!(parsed["v"], 1);
-        assert_eq!(parsed["op"], "hook_run");
-    }
-
-    // JSON marker for export carries "v": 1.
-    #[test]
-    fn export_marker_carry_version() {
-        let obj = serde_json::json!({
-            "v": 1,
-            "op": "export",
-            "data": { "config_load_us": 12 },
-        });
-        let parsed: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
+    fn json_trace_line_is_prefixed_flat_and_versioned() {
+        let line = json_trace_line("export", serde_json::json!({ "config_load_us": 12 }));
+        let json = line.strip_prefix("llmenv-trace ").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(parsed["v"], 1);
         assert_eq!(parsed["op"], "export");
+        assert_eq!(parsed["config_load_us"], 12);
+        assert!(parsed.get("data").is_none());
     }
 
     // The sink writes one JSON object per line, and appends rather than truncates.
