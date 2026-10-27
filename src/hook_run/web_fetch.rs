@@ -151,7 +151,7 @@ pub(super) fn handle_web_fetch_in(
     let mut cmd = icm_store_command(exe, checkpoint.as_deref());
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    let Ok(mut child) = cmd.spawn() else {
+    let Ok(mut child) = crate::trace::spawn_counted(&mut cmd) else {
         tracing::error!("icm-store: failed to spawn detached store child");
         return None;
     };

@@ -114,7 +114,7 @@ fn spawn_record_in(
         crate::hook_run::detached_child_log_path(),
     );
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    let Ok(mut child) = cmd.spawn() else {
+    let Ok(mut child) = crate::trace::spawn_counted(&mut cmd) else {
         tracing::error!("session_log: failed to spawn detached record child");
         return None;
     };

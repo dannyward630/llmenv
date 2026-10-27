@@ -1529,18 +1529,17 @@ fn run_inner(
             .into_iter()
             .flatten()
             .reduce(|acc, next| format!("{acc}\n{next}"));
-        let (spawn_us, spawned_jobs) = if resumes_checkpoints(
+        let spawn_us = if resumes_checkpoints(
             event,
             stdin_payload,
             std::env::var_os(crate::consolidation::CHILD_GUARD_ENV).as_deref(),
         ) {
             // After the notice, so the proxy it may restart is up (#2396).
             let t_start = std::time::Instant::now();
-            let jobs = resume_checkpoints(checkpoint::spawner_state_dir().as_deref());
-            let us = std::time::Duration::as_micros(&t_start.elapsed());
-            (Some(us as u64), Some(jobs as u64))
+            resume_checkpoints(checkpoint::spawner_state_dir().as_deref());
+            Some(u64::try_from(t_start.elapsed().as_micros()).unwrap_or(u64::MAX))
         } else {
-            (None, None)
+            None
         };
         let t_chunk = std::time::Instant::now();
         let out = match rt {
@@ -1728,7 +1727,7 @@ fn run_inner(
             session_log_us,
             checkpoint_us,
             spawn_us,
-            spawned_jobs,
+            spawned_jobs: Some(crate::trace::spawned_jobs()),
             ..crate::trace::HookTiming::new(t0, t_config)
         });
         Ok(out)
@@ -3068,7 +3067,7 @@ fn trigger_index_with(
     // wrapper does the same for the indexer it starts. The log redirect above made the directory.
     direct_index_stdout(&mut cmd, wrapped, &result_path);
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    if let Err(e) = cmd.spawn() {
+    if let Err(e) = crate::trace::spawn_counted(&mut cmd) {
         tracing::error!("codebase-memory-mcp index_repository: failed to spawn: {e}");
         return Some(index_skipped_notice(&format!(
             "the indexer did not start: {e}"

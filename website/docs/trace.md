@@ -203,8 +203,8 @@ Fields:
 - `cbm_roots_us` — time for the codebase-memory allow-root check.
 - `session_log_us` — time to capture the session log.
 - `checkpoint_us` — time to begin the codebase-memory index checkpoint.
-- `spawn_us` — time to resume detached checkpoint jobs.
-- `spawned_jobs` — number of resumed detached jobs.
+- `spawn_us` — time to restart unfinished detached checkpoint jobs (`session_start` only).
+- `spawned_jobs` — number of detached jobs the hook run started: session-log records, consolidation, ICM stores, and codebase-memory indexes. It is `0` when the run started none.
 
 All sub-phase fields are in microseconds and are present only when the
 sub-phase ran. The `session_start` sub-phases run inside `prep_us`, so

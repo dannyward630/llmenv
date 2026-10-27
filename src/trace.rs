@@ -316,7 +316,9 @@ pub(crate) mod lines;
 #[cfg(test)]
 pub(crate) mod docs_sync;
 
-pub(crate) use detached::{DetachedJob, emit_detached_trace, json_str};
+pub(crate) use detached::{
+    DetachedJob, emit_detached_trace, json_str, spawn_counted, spawned_jobs,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

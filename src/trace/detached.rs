@@ -1,6 +1,25 @@
 //! Detached job trace emitter and CPU-time probe (#3014).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::trace::emit_trace_line;
+
+/// Detached jobs this process has started. The hook marker reports it as `spawned_jobs`.
+static SPAWNED_JOBS: AtomicU64 = AtomicU64::new(0);
+
+/// Start a detached job and count it when the start succeeds (#3013).
+pub(crate) fn spawn_counted(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let child = cmd.spawn()?;
+    SPAWNED_JOBS.fetch_add(1, Ordering::Relaxed);
+    Ok(child)
+}
+
+/// How many detached jobs this process has started.
+pub(crate) fn spawned_jobs() -> u64 {
+    SPAWNED_JOBS.load(Ordering::Relaxed)
+}
 
 /// One detached job that is about to exit.
 pub(crate) struct DetachedJob<'a> {
