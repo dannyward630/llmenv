@@ -2,9 +2,41 @@ use std::fs::{self, File};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use super::{StaleSummary, stale_summary_in, sweep};
+use super::{StaleSummary, stale_summary_in, stale_summary_with, sweep};
 
 pub(super) const DAY: Duration = Duration::from_secs(86_400);
+
+#[test]
+fn summary_never_asks_lsof_when_no_entry_is_a_candidate() {
+    let state = tempfile::tempdir().unwrap();
+    fs::create_dir_all(state.path().join("tmp").join("fresh")).unwrap();
+    let summary = stale_summary_with(state.path(), DAY, || {
+        anyhow::bail!("lsof must not run when nothing is stale")
+    })
+    .unwrap();
+    assert_eq!(summary.count, 0);
+}
+
+#[test]
+fn summary_asks_lsof_when_an_entry_is_stale() {
+    let state = tempfile::tempdir().unwrap();
+    let entry = state.path().join("tmp").join("old");
+    fs::create_dir_all(&entry).unwrap();
+    age_tree(&entry, SystemTime::now() - 2 * DAY);
+    let summary = stale_summary_with(state.path(), DAY, || Ok(Vec::new())).unwrap();
+    assert_eq!(summary.count, 1);
+}
+
+#[test]
+fn summary_keeps_a_stale_entry_that_lsof_reports_in_use() {
+    let state = tempfile::tempdir().unwrap();
+    let entry = state.path().join("tmp").join("busy");
+    fs::create_dir_all(&entry).unwrap();
+    age_tree(&entry, SystemTime::now() - 2 * DAY);
+    let in_use = vec![fs::canonicalize(&entry).unwrap()];
+    let summary = stale_summary_with(state.path(), DAY, || Ok(in_use)).unwrap();
+    assert_eq!(summary.count, 0);
+}
 
 /// Set the mtime of `path` and of everything under it, so the newest mtime is `when`.
 pub(super) fn age_tree(path: &Path, when: SystemTime) {

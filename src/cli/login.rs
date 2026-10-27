@@ -140,6 +140,12 @@ fn capture_login_credentials(
         tracing::debug!("login produced no OAuth credential; only the account identity was cached");
         return Ok(());
     };
+    // A dead blob would replace a good cache entry and clear the dead-read marker, so refuse it.
+    if creds.is_expired_now() {
+        anyhow::bail!(
+            "login produced an expired OAuth credential, so it was not saved. Fix: run `llmenv login` again."
+        );
+    }
     credentials::save_cached(adapter_root, &creds)?;
     eprintln!("[llmenv] login: saved OAuth credential to durable state");
     if let Some(folder) = current_folder.filter(|f| f.is_dir()) {

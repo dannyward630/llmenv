@@ -1081,6 +1081,12 @@ When every task in an open session is done, the SessionStart/Stop hook
 reminders (below) nudge the agent to run `task session finish` or add more
 work to the session instead. A session that still has an open task is never
 offered `session finish`; the reminder says to start the next task.
+The all-done reminder also says that a question to the user blocks only the step
+that needs the answer, and that a running CI job or other external wait is not a
+stop point (changed in v3.14.0).
+`task done` prints a hint to add the next step when the task it closes was the last
+one not done in its session (added in v3.14.0).
+`task session start` without `--task` prints a line to add every known step now (added in v3.14.0).
 
 The CLI subcommands always work. The injected `llmenv` skill guidance and
 the SessionStart/Stop lifecycle reminders are gated behind
