@@ -73,11 +73,12 @@ pub(crate) fn last_task_hint(state_dir: &Path, task: &Task) -> anyhow::Result<Op
     if total == 0 || done < total {
         return Ok(None);
     }
-    Ok(Some(format!(
+    Ok(Some(
         "The session has no open task left. If the work goes on (next skill phase, review, \
-         push, PR, merge, CI), add that step now with `llmenv task add <title> --session \
-         {session_id}` and continue. Finish the session only when nothing is left."
-    )))
+         push, PR, merge, CI), add that step now with `llmenv task add <title>` and continue. \
+         Finish the session only when nothing is left."
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -125,11 +126,8 @@ mod tests {
         let hint = last_task_hint(dir.path(), &done.task)
             .expect("test")
             .expect("the last task must produce a hint");
-        assert!(hint.contains("no open task left"), "{hint}");
-        assert!(
-            hint.contains(&format!("llmenv task add <title> --session {session_id}")),
-            "must name the session to add to: {hint}"
-        );
+        assert!(hint.contains("no open task left"));
+        assert!(hint.contains("llmenv task add <title>"));
     }
 
     #[test]

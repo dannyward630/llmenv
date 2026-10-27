@@ -3624,7 +3624,7 @@ fn run_task_session_command(
             if tasks.is_empty() {
                 // Known steps added now let the idle reminders catch a step that never starts (#2987).
                 println!(
-                    "Add every known step now with `llmenv task add <title> --session {session_id}`."
+                    "Add every known step now with `llmenv task add <title>`, and add `--session <id>` when more than one session is open."
                 );
             }
         }
