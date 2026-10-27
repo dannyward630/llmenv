@@ -79,7 +79,7 @@ fn spawn_detached(
     cmd.current_dir(cwd);
     redirect_stderr_to_detached_log(&mut cmd, detached_child_log_path());
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    let mut child = crate::trace::spawn_counted(&mut cmd)?;
+    let mut child = crate::trace::spawn_counted("respawn:job", &mut cmd)?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
         pipe.write_all(text.as_bytes())?;
     }

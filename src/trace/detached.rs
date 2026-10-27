@@ -7,13 +7,23 @@ use crate::trace::emit_trace_line;
 /// Detached jobs this process has started. The hook marker reports it as `spawned_jobs`.
 static SPAWNED_JOBS: AtomicU64 = AtomicU64::new(0);
 
-/// Start a detached job and count it when the start succeeds (#3013).
+/// Start a detached job, count it when the start succeeds, and print one `[LLMENV_SPAWN]` line
+/// with `exit=detached` (or `spawn-error` when the start fails). `label` is a fixed tag. The
+/// duration is the time the start took, not the job's own run time (#3013).
 pub(crate) fn spawn_counted(
+    label: &str,
     cmd: &mut std::process::Command,
 ) -> std::io::Result<std::process::Child> {
-    let child = cmd.spawn()?;
-    SPAWNED_JOBS.fetch_add(1, Ordering::Relaxed);
-    Ok(child)
+    let started = std::time::Instant::now();
+    let result = cmd.spawn();
+    let exit = if result.is_ok() {
+        SPAWNED_JOBS.fetch_add(1, Ordering::Relaxed);
+        crate::trace::SpawnExit::Detached
+    } else {
+        crate::trace::SpawnExit::Error
+    };
+    crate::trace::emit_spawn_trace(label, started.elapsed(), exit);
+    result
 }
 
 /// How many detached jobs this process has started.

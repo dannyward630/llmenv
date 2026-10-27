@@ -329,9 +329,13 @@ pub(crate) enum SpawnExit {
 }
 
 impl SpawnExit {
-    /// The outcome of a probe that talks to a child over a pipe: `0` for an answer, else an error.
-    pub(crate) fn of_probe(answered: bool) -> Self {
-        if answered { Self::Code(0) } else { Self::Error }
+    /// The outcome of a probe of a child over a pipe: it answered, it timed out, or it failed.
+    pub(crate) fn of_probe(answered: bool, timed_out: bool) -> Self {
+        match (answered, timed_out) {
+            (true, _) => Self::Code(0),
+            (false, true) => Self::Timeout,
+            (false, false) => Self::Error,
+        }
     }
 
     /// Classify the result of a waited child.
@@ -547,6 +551,29 @@ mod tests {
         assert!(json["spawned_jobs"].is_u64());
         let early = hook_marker(HookTiming::new(t0, at(5)).through_scope(at(9)));
         assert!(early.get("prep_us").is_none() && early.get("mcp_us").is_none());
+    }
+
+    // A probe that answered is exit 0, a probe that ran out of time is a timeout, and any other
+    // failure is an error.
+    #[test]
+    fn of_probe_tells_an_answer_a_timeout_and_an_error_apart() {
+        assert_eq!(SpawnExit::of_probe(true, false), SpawnExit::Code(0));
+        assert_eq!(SpawnExit::of_probe(false, true), SpawnExit::Timeout);
+        assert_eq!(SpawnExit::of_probe(false, false), SpawnExit::Error);
+    }
+
+    // A detached spawn is counted and traced once, and a failed start is not counted.
+    #[test]
+    fn spawn_counted_counts_only_a_start_that_worked() {
+        let before = spawned_jobs();
+        let mut ok = std::process::Command::new("true");
+        let mut child = spawn_counted("test:true", &mut ok).unwrap();
+        child.wait().unwrap();
+        assert!(spawned_jobs() > before);
+        let after_ok = spawned_jobs();
+        let mut missing = std::process::Command::new("llmenv-no-such-program");
+        assert!(spawn_counted("test:missing", &mut missing).is_err());
+        assert_eq!(spawned_jobs(), after_ok);
     }
 
     // The sink writes one JSON object per line, and appends rather than truncates.
