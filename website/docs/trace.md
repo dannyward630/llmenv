@@ -66,7 +66,7 @@ Emitted when a spawned child process ends. Scope probes, `git`, the keychain `se
 
 Fields:
 
-- `<label>` — fixed string such as `probe:ssid` or `check-stale`. Never prints
+- `<label>` — fixed string such as `probe:ssid` or `git:local-query`. Never prints
   arguments, because they can carry secrets such as keychain item names.
 - `<duration>us` — elapsed time in microseconds.
 - `exit=<...>` — the exit code, `signal` (ended by a signal), `timeout` (killed at the deadline), `spawn-error` (did not start), or `detached` (started and not waited for).
@@ -198,16 +198,16 @@ Fields:
 - `proxy_restart_us` — time for the proxy restart attempt.
 - `drift_check_us` — time for the drift re-probe.
 - `stale_hint_us` — time for the stale state/tmp hint check.
-- `agent_doc_us` — time for the agent document (cache roots) notice.
-- `wake_up_us` — time for the wake-up (ICM memory store).
-- `resume_ctx_us` — time for the resume-context handling.
+- `cbm_roots_us` — time for the codebase-memory allow-root check.
 - `session_log_us` — time to capture the session log.
 - `checkpoint_us` — time to begin the codebase-memory index checkpoint.
 - `spawn_us` — time to resume detached checkpoint jobs.
 - `spawned_jobs` — number of resumed detached jobs.
 
 All sub-phase fields are in microseconds and are present only when the
-sub-phase ran. (added in v3.14.0)
+sub-phase ran. The `session_start` sub-phases run inside `prep_us`, so
+`prep_us` minus their sum is the time spent on other work. The memory calls
+inside `mcp_us` each print their own `[LLMENV_MCP_CALL]` line. (added in v3.14.0)
 
 ### Guard command trace markers
 

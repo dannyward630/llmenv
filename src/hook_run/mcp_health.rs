@@ -341,7 +341,7 @@ pub(super) fn session_start_notice(
         Ok(servers) => servers,
         Err(e) => {
             tracing::warn!(error = %e, "MCP health check could not run");
-            return Some((unresolved_notice(&e), SessionStartPhases::none()));
+            return Some((unresolved_notice(&e), SessionStartPhases::default()));
         }
     };
     if servers.is_empty() {
@@ -350,18 +350,18 @@ pub(super) fn session_start_notice(
     let t_mcp_probe = std::time::Instant::now();
     let mut down = rt.block_on(find_down(&servers, DEFAULT_PROBE_TIMEOUT));
     let mut phases = SessionStartPhases {
-        mcp_probe: Some(t_mcp_probe),
-        ..SessionStartPhases::none()
+        mcp_probe: Some(t_mcp_probe.elapsed()),
+        ..SessionStartPhases::default()
     };
     if down.iter().any(|d| d.name == MEMORY_MCP_NAME) {
         let t_proxy_restart = std::time::Instant::now();
-        phases.proxy_restart = Some(t_proxy_restart);
         let outcome = crate::cli::ensure_local_memory_proxy(
             config,
             config_dir,
             active,
             crate::mcp::proxy_ops::SpawnSource::SessionStart,
         );
+        phases.proxy_restart = Some(t_proxy_restart.elapsed());
         if outcome == ProxyStart::Started {
             // This call started the proxy that was down, so ask it again before reporting.
             let memory: Vec<ResolvedMcp> = servers
@@ -370,8 +370,8 @@ pub(super) fn session_start_notice(
                 .cloned()
                 .collect();
             let t_drift_check = std::time::Instant::now();
-            phases.drift_check = Some(t_drift_check);
             let after = rt.block_on(find_down(&memory, DEFAULT_PROBE_TIMEOUT));
+            phases.drift_check = Some(t_drift_check.elapsed());
             down = merge_in_order(&servers, down, after);
         } else if let Some(note) = restart_note(&outcome) {
             for d in down.iter_mut().filter(|d| d.name == MEMORY_MCP_NAME) {

@@ -1308,6 +1308,7 @@ fn run_inner(
         let mut checkpoint_us: Option<u64> = None;
         let mut session_log_us: Option<u64> = None;
         let mut roots_notice: Option<String> = None;
+        let mut cbm_roots_took: Option<std::time::Duration> = None;
         if event == HookEvent::SessionStart {
             let active_codebase_memory: Vec<&crate::config::CodebaseMemory> = config
                 .features
@@ -1327,7 +1328,9 @@ fn run_inner(
                 [cm] => match crate::mcp::resolve::codebase_memory_paths() {
                     Ok((project_root, state_dir)) => {
                         // Before the index run, so the server accepts the repository (#2406).
+                        let t_roots = std::time::Instant::now();
                         let roots = crate::mcp::cbm_roots::session_start_notice(cm, &project_root);
+                        cbm_roots_took = Some(t_roots.elapsed());
                         let t_checkpoint = std::time::Instant::now();
                         let index = trigger_codebase_memory_index(&project_root, cm, &state_dir);
                         roots_notice = match (roots, index) {
@@ -1518,7 +1521,7 @@ fn run_inner(
         let (session_notice, session_phases) = if event == HookEvent::SessionStart {
             session_notices::session_start_notices(rt, &config, config_dir, &active, roots_notice)
         } else {
-            (None, crate::trace::SessionStartPhases::none())
+            (None, crate::trace::SessionStartPhases::default())
         };
         // The project notice applies to every event, because the recall of every event runs
         // without its project scope when the lookup fails (#2688).
@@ -1714,22 +1717,8 @@ fn run_inner(
             );
         }
         let out = out?;
-        // Capture the remaining session-start sub-phases: agent_doc (cache roots),
-        // wake_up (memory store), and resume_ctx (whether a second wake-up was skipped).
-        let t_agent_doc = std::time::Instant::now();
-        let t_wake_up = std::time::Instant::now();
-        let t_resume_ctx = std::time::Instant::now();
         let mut final_phases = session_phases;
-        // Merge captured sub-phases from run_inner with those from session_notices.
-        if final_phases.agent_doc.is_none() {
-            final_phases.agent_doc = Some(t_agent_doc);
-        }
-        if final_phases.wake_up.is_none() {
-            final_phases.wake_up = Some(t_wake_up);
-        }
-        if final_phases.resume_ctx.is_none() {
-            final_phases.resume_ctx = Some(t_resume_ctx);
-        }
+        final_phases.cbm_roots = cbm_roots_took;
         let t_end = std::time::Instant::now();
         crate::trace::emit_trace_timing(crate::trace::HookTiming {
             t_scope: Some(t_scope),

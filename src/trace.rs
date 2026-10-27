@@ -94,41 +94,21 @@ pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Value) {
     emit_trace_line(&json_trace_line(op, fields));
 }
 
-/// Sub-phase boundaries for a `SessionStart` fan-out.
+/// Measured durations of the `SessionStart` sub-phases that run inside `prep_us` (#3011).
 ///
-/// Each field is `None` when the sub-phase did not run. Pass these to
-/// `emit_trace_timing` so the JSON marker carries per-sub-phase timings
-/// (#3011).
+/// Each field is `None` when the sub-phase did not run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionStartPhases {
-    /// Start of the MCP health probe.
-    pub mcp_probe: Option<Instant>,
-    /// Start of the proxy restart attempt.
-    pub proxy_restart: Option<Instant>,
-    /// Start of the drift re-probe (after proxy restart).
-    pub drift_check: Option<Instant>,
-    /// Start of the stale state/tmp hint check.
-    pub stale_hint: Option<Instant>,
-    /// Start of the agent document (cache roots) notice.
-    pub agent_doc: Option<Instant>,
-    /// Start of the wake-up (ICM memory store).
-    pub wake_up: Option<Instant>,
-    /// Start of the resume-context handling.
-    pub resume_ctx: Option<Instant>,
-}
-
-impl SessionStartPhases {
-    /// Return a new struct with all fields set to `None`.
-    pub fn none() -> Self {
-        Self {
-            mcp_probe: None,
-            proxy_restart: None,
-            drift_check: None,
-            stale_hint: None,
-            agent_doc: None,
-            wake_up: None,
-            resume_ctx: None,
-        }
-    }
+    /// The MCP health probe.
+    pub mcp_probe: Option<Duration>,
+    /// The restart of the memory proxy, when it was down.
+    pub proxy_restart: Option<Duration>,
+    /// The second probe of the memory server after a restart.
+    pub drift_check: Option<Duration>,
+    /// The check for stale state/tmp entries.
+    pub stale_hint: Option<Duration>,
+    /// The codebase-memory allow-root check.
+    pub cbm_roots: Option<Duration>,
 }
 
 /// Emit a `[LLMENV_CACHE] <name> <hit|miss> <duration>ms[ <extra>]` line to
@@ -194,7 +174,7 @@ impl HookTiming {
             t_scope: None,
             t_chunk: None,
             t_end: None,
-            phases: SessionStartPhases::none(),
+            phases: SessionStartPhases::default(),
             session_log_us: None,
             checkpoint_us: None,
             spawn_us: None,
@@ -232,25 +212,16 @@ pub(crate) fn trace_timing_json(timing: HookTiming) -> serde_json::Value {
                 "prep_us".to_string(),
                 serde_json::json!(us(t_chunk.saturating_duration_since(t_scope))),
             );
-            // Each sub-phase (#3011) is measured from the latest earlier
-            // boundary that ran, so a skipped sub-phase does not break the chain.
-            let ordered = [
+            let sub_phases = [
                 ("mcp_probe_us", phases.mcp_probe),
                 ("proxy_restart_us", phases.proxy_restart),
                 ("drift_check_us", phases.drift_check),
                 ("stale_hint_us", phases.stale_hint),
-                ("agent_doc_us", phases.agent_doc),
-                ("wake_up_us", phases.wake_up),
-                ("resume_ctx_us", phases.resume_ctx),
+                ("cbm_roots_us", phases.cbm_roots),
             ];
-            let mut base = t_chunk;
-            for (name, start) in ordered {
-                if let Some(t) = start {
-                    fields.insert(
-                        name.to_string(),
-                        serde_json::json!(us(t.saturating_duration_since(base))),
-                    );
-                    base = t;
+            for (name, took) in sub_phases {
+                if let Some(took) = took {
+                    fields.insert(name.to_string(), serde_json::json!(us(took)));
                 }
             }
             if let Some(t_end) = t_end {
@@ -463,6 +434,35 @@ mod tests {
         assert_eq!(parsed["op"], "export");
         assert_eq!(parsed["config_load_us"], 12);
         assert!(parsed.get("data").is_none());
+    }
+
+    // Each session-start sub-phase shows as a `_us` field only when it ran, and holds its own
+    // measured duration.
+    #[test]
+    fn session_start_sub_phases_report_their_own_durations() {
+        let t0 = std::time::Instant::now();
+        let t_config = t0 + Duration::from_micros(5);
+        let t_scope = t0 + Duration::from_micros(9);
+        let t_chunk = t0 + Duration::from_micros(500);
+        let json = trace_timing_json(HookTiming {
+            t_scope: Some(t_scope),
+            t_chunk: Some(t_chunk),
+            phases: SessionStartPhases {
+                mcp_probe: Some(Duration::from_micros(120)),
+                stale_hint: Some(Duration::from_micros(30)),
+                ..SessionStartPhases::default()
+            },
+            ..HookTiming::new(t0, t_config)
+        });
+        assert_eq!(json["mcp_probe_us"], 120);
+        assert_eq!(json["stale_hint_us"], 30);
+        assert!(json.get("proxy_restart_us").is_none());
+        assert!(json.get("cbm_roots_us").is_none());
+        let sum: u64 = ["mcp_probe_us", "stale_hint_us"]
+            .iter()
+            .filter_map(|k| json[*k].as_u64())
+            .sum();
+        assert!(sum <= json["prep_us"].as_u64().unwrap());
     }
 
     // The sink writes one JSON object per line, and appends rather than truncates.

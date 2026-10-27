@@ -37,12 +37,13 @@ pub(super) fn session_start_notices(
     let (health, mut phases) =
         match rt.and_then(|rt| mcp_health::session_start_notice(rt, config, config_dir, active)) {
             Some((notice, phases)) => (Some(notice), phases),
-            None => (None, SessionStartPhases::none()),
+            None => (None, SessionStartPhases::default()),
         };
     let base = match (health, roots_notice) {
         (Some(h), Some(r)) => Some(format!("{h}{r}")),
         (h, r) => h.or(r),
     };
+    let t_stale = std::time::Instant::now();
     let hint = match (
         config.cache.cache_retention_hours,
         crate::paths::state_dir(),
@@ -55,9 +56,8 @@ pub(super) fn session_start_notices(
             "run `llmenv doctor` to check the state directory",
         )),
     };
-    // Capture the stale_hint sub-phase at the point where the hint runs.
-    if hint.is_some() {
-        phases.stale_hint = Some(std::time::Instant::now());
+    if config.cache.cache_retention_hours.is_some() {
+        phases.stale_hint = Some(t_stale.elapsed());
     }
     let result = match (base, hint) {
         (Some(b), Some(h)) => Some(format!("{b}\n{h}")),
