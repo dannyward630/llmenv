@@ -415,6 +415,8 @@ The plugin gives every hook the payload that Claude Code sends: a Claude Code to
 An MCP tool arrives as `mcp__<server>__<tool>`.
 A hook runs only for the tools that its `matcher` names.
 A hook blocks a tool call by exit code 2, with stderr as the reason, or by `permissionDecision: "deny"` on stdout.
+A `failClosed` hook also blocks the call when it exits with any other code, or when a signal stops it, and the block names the exit code (changed in v3.14.0).
+A `failClosed` hook with a matcher that is not a valid pattern blocks every call it guards (changed in v3.14.0).
 The `additionalContext` of a hook reaches the model as system text, and so does the error of a hook that cannot run.
 A hook that rewrites the input with `updatedInput` passes the new input to the hooks after it.
 A hook that runs past its timeout is stopped with its child processes.
