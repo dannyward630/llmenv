@@ -32,7 +32,7 @@ fn open_trace_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// Emit `line` to stderr and, when `LLMENV_TRACE_FILE` is set, also append
 /// it as a JSON object to the trace file.
 ///
-/// The JSON object carries `ts` (ISO 8601), `pid`, and `line` so a consumer
+/// The JSON object carries `ts` (Unix seconds), `pid`, and `line` so a consumer
 /// can reconstruct the original text while still being able to parse the
 /// file as JSON Lines.
 pub(crate) fn emit_trace_line(line: &str) {
@@ -40,27 +40,27 @@ pub(crate) fn emit_trace_line(line: &str) {
         eprintln!("{line}");
     }
     if let Some(path) = std::env::var_os("LLMENV_TRACE_FILE") {
-        let path = std::path::PathBuf::from(path);
-        match open_trace_file(&path) {
-            Ok(mut f) => {
-                let ts = current_timestamp();
-                let pid = std::process::id();
-                let obj = serde_json::json!({
-                    "ts": ts,
-                    "pid": pid,
-                    "line": line,
-                });
-                if let Err(e) = writeln!(f, "{}", obj) {
-                    tracing::warn!("trace file write failed to {}: {e}", path.display());
-                }
-                if let Err(e) = f.flush() {
-                    tracing::warn!("trace file flush failed to {}: {e}", path.display());
-                }
-            }
-            Err(e) => {
-                tracing::warn!("cannot open trace file {}: {e}", path.display());
-            }
+        append_trace_line(std::path::Path::new(&path), line);
+    }
+}
+
+/// Append `line` to `path` as one JSON object with a single `O_APPEND` write.
+pub(crate) fn append_trace_line(path: &std::path::Path, line: &str) {
+    let mut f = match open_trace_file(path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("cannot open trace file {}: {e}", path.display());
+            return;
         }
+    };
+    let obj = serde_json::json!({
+        "ts": current_timestamp(),
+        "pid": std::process::id(),
+        "line": line,
+    });
+    // One write call keeps concurrent writers from interleaving inside a line.
+    if let Err(e) = f.write_all(format!("{obj}\n").as_bytes()) {
+        tracing::warn!("trace file write failed to {}: {e}", path.display());
     }
 }
 
@@ -347,7 +347,7 @@ fn current_timestamp() -> String {
 /// FFI bindings for `getrusage` on macOS.
 mod detached;
 
-pub(crate) use detached::{cpu_time_us, emit_detached_trace};
+pub(crate) use detached::{DetachedJob, emit_detached_trace, json_str};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -458,6 +458,35 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
         assert_eq!(parsed["v"], 1);
         assert_eq!(parsed["op"], "export");
+    }
+
+    // The sink writes one JSON object per line, and appends rather than truncates.
+    #[test]
+    fn append_trace_line_writes_json_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.log");
+        append_trace_line(&path, "[LLMENV_SPAWN] probe:ssid 5us exit=0");
+        append_trace_line(&path, "second \"quoted\" line");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["line"], "[LLMENV_SPAWN] probe:ssid 5us exit=0");
+        assert_eq!(lines[1]["line"], "second \"quoted\" line");
+        assert_eq!(lines[0]["pid"], std::process::id());
+    }
+
+    // The request id of a detached job comes from its payload, and a missing one is None.
+    #[test]
+    fn json_str_reads_a_string_field_or_none() {
+        assert_eq!(
+            json_str(r#"{"request_id":"abc"}"#, "request_id").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(json_str(r#"{"request_id":3}"#, "request_id"), None);
+        assert_eq!(json_str("not json", "request_id"), None);
     }
 
     // [LLMENV_DETACHED] line parses correctly.

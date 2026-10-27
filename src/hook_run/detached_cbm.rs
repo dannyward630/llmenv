@@ -37,16 +37,12 @@ pub fn run_cbm_index(checkpoint_path: &Path) -> anyhow::Result<()> {
             crate::hook_run::index_command(&program, root, index_path, budget)
         })
     });
-    let exit = result.as_ref().map(|()| 0).unwrap_or(1);
-    let cpu_us = crate::trace::cpu_time_us();
-    // The indexer is a separate process, not an MCP call.
-    crate::trace::emit_detached_trace(
-        "cbm-index",
-        t0.elapsed().as_micros() as u64,
-        cpu_us,
-        0,
-        Some(exit),
-    );
+    crate::trace::emit_detached_trace(&crate::trace::DetachedJob {
+        kind: "cbm-index",
+        request_id: None,
+        started: t0,
+        exit: i32::from(result.is_err()),
+    });
     result.inspect_err(|e| {
         tracing::error!("cbm-index-run: indexing failed: {e:#}");
     })

@@ -33,16 +33,12 @@ pub fn run_consolidation(
 ) -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let result = run_consolidation_at(config_path, checkpoint);
-    let exit = result.as_ref().map(|()| 0).unwrap_or(1);
-    let cpu_us = crate::trace::cpu_time_us();
-    // Consolidation makes multiple MCP calls; count is unknown at this level.
-    crate::trace::emit_detached_trace(
-        "consolidation",
-        t0.elapsed().as_micros() as u64,
-        cpu_us,
-        0,
-        Some(exit),
-    );
+    crate::trace::emit_detached_trace(&crate::trace::DetachedJob {
+        kind: "consolidation",
+        request_id: None,
+        started: t0,
+        exit: i32::from(result.is_err()),
+    });
     result.inspect_err(|e| {
         tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
     })

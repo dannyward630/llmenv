@@ -350,6 +350,7 @@ impl McpHttpClient {
     /// response missing `result.content[].text`.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> anyhow::Result<String> {
         let start = std::time::Instant::now();
+        crate::mcp_trace::count_mcp_call();
         let result = match self.try_call_tool(name, &arguments).await {
             Ok(text) => Ok(text),
             Err(CallToolError::StaleSession(first_err)) => {
@@ -387,11 +388,9 @@ impl McpHttpClient {
     /// (worth clearing the cache and retrying once) from every other failure.
     async fn try_call_tool(&self, name: &str, arguments: &Value) -> Result<String, CallToolError> {
         let params = json!({ "name": name, "arguments": arguments });
-        let req_bytes = params.to_string().len() as u64;
         let body = self
             .post_rpc("tools/call", &params, &format!("tool {name}"))
             .await?;
-        let resp_bytes = body.to_string().len() as u64;
         let text = extract_text(&body).ok_or_else(|| {
             CallToolError::Fatal(anyhow!(
                 "tool {name} response missing result.content[].text"
@@ -404,8 +403,6 @@ impl McpHttpClient {
                 "tool {name} reported an error: {text}"
             )));
         }
-        // Emit trace with byte sizes for the tool call.
-        crate::mcp_trace::emit_mcp_call_trace(name, Duration::ZERO, req_bytes, resp_bytes);
         Ok(text)
     }
 

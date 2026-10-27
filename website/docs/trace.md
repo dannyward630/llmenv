@@ -59,10 +59,10 @@ all counts.
 
 ### `[LLMENV_SPAWN]`
 
-Emitted when a spawned tool (MCP probe, drift check) completes.
+Emitted when a spawned child process ends. Scope probes, `git`, the keychain `security` call, and the statusline `gh` call each print one line.
 
 ```text
-[LLMENV_SPAWN] <label> <duration>us exit=<code|timeout|spawn-error>
+[LLMENV_SPAWN] <label> <duration>us exit=<code|signal|timeout|spawn-error|detached>
 ```
 
 Fields:
@@ -70,7 +70,7 @@ Fields:
 - `<label>` — fixed string such as `probe:ssid` or `check-stale`. Never prints
   arguments, because they can carry secrets such as keychain item names.
 - `<duration>us` — elapsed time in microseconds.
-- `exit=<code|timeout|spawn-error>` — exit code, `timeout`, or `spawn-error`.
+- `exit=<...>` — the exit code, `signal` (ended by a signal), `timeout` (killed at the deadline), `spawn-error` (did not start), or `detached` (started and not waited for).
 
 ### `[LLMENV_MCP_CALL]`
 
@@ -229,7 +229,7 @@ Emitted when a detached job (post-session memory consolidation, ICM transcript
 record, ICM memory store, or codebase-memory index) exits.
 
 ```text
-[LLMENV_DETACHED] <kind> <wall_us>us cpu_us=<n> mcp_calls=<n> exit=<code|error>
+[LLMENV_DETACHED] <kind> <wall_us>us cpu_us=<n> mcp_calls=<n> exit=<code>[ request_id=<id>]
 ```
 
 Fields:
@@ -237,14 +237,16 @@ Fields:
 - `<kind>` — job kind: `consolidation`, `icm-store`, `session-log-record`, or
   `cbm-index`.
 - `<wall_us>` — total wall time in microseconds.
-- `cpu_us=<n>` — user plus system CPU time in microseconds (macOS only; zero
-  on other platforms).
-- `mcp_calls=<n>` — number of MCP tool calls the job made (zero when unknown).
-- `exit=<code|error>` — exit code on success, or `error` when the job did not
-  complete.
+- `cpu_us=<n>` — user plus system CPU time of the job process in microseconds.
+- `mcp_calls=<n>` — number of MCP tool calls the job process made.
+- `exit=<code>` — `0` when the job succeeded, `1` when it failed.
+- `request_id=<id>` — the request id the parent logged for the job. Present for
+  `icm-store` and `session-log-record` only.
 
 Emitted from the child entrypoints of all detached job types when
-`LLMENV_TRACE_TIMING` is set. (added in v3.14.0)
+`LLMENV_TRACE_TIMING` is set. A detached job has no visible stderr, so the line
+also goes to `LLMENV_TRACE_FILE`, or to `detached-trace.log` in the state
+directory when that variable is unset. (added in v3.14.0)
 
 ## JSON trace file format
 

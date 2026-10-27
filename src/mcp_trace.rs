@@ -6,7 +6,22 @@
 
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::trace::emit_trace_line;
+
+/// Tool calls this process has made. A detached job reports it on exit (#3014).
+static MCP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Count one MCP tool call made by this process.
+pub(crate) fn count_mcp_call() {
+    MCP_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Return how many MCP tool calls this process has made.
+pub(crate) fn mcp_call_count() -> u64 {
+    MCP_CALLS.load(Ordering::Relaxed)
+}
 
 /// Emit a `[LLMENV_MCP_CALL] initialize <us>us` or
 /// `[LLMENV_MCP_CALL] notifications/initialized <us>us` line to the trace
