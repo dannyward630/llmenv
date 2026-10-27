@@ -1,0 +1,116 @@
+//! The walk of `state/tmp`: it sorts every entry into stale, kept, or failed, and changes
+//! nothing. The sweep and the summary both build on it.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use anyhow::Context;
+
+use super::claude_root::{is_claude_root, scan_claude_root};
+use crate::materialize::cache::{is_expired, newest_mtime};
+
+/// One entry that the scan found old enough to remove, and not in use.
+pub(super) struct Stale {
+    pub(super) path: PathBuf,
+    pub(super) is_dir: bool,
+}
+
+/// What a scan of `state/tmp` found. Nothing is removed by a scan.
+#[derive(Default)]
+pub(super) struct Scan {
+    pub(super) stale: Vec<Stale>,
+    pub(super) kept: usize,
+    pub(super) failed: Vec<PathBuf>,
+}
+
+/// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
+pub(super) fn scan(
+    tmp_root: &Path,
+    older_than: Duration,
+    in_use: &[PathBuf],
+) -> anyhow::Result<Scan> {
+    let mut scan = Scan::default();
+    let Some(entries) = crate::paths::read_dir_optional(tmp_root)? else {
+        return Ok(scan);
+    };
+    let root = std::fs::canonicalize(tmp_root)
+        .with_context(|| format!("resolving {}", tmp_root.display()))?;
+    let now = SystemTime::now();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                record_failure(&root, &e, &mut scan);
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let path = root.join(&name);
+        if in_use.iter().any(|used| used.starts_with(&path)) {
+            scan.kept += 1;
+            continue;
+        }
+        let is_dir = match entry.file_type() {
+            Ok(file_type) => file_type.is_dir(),
+            Err(e) => {
+                record_failure(&path, &e, &mut scan);
+                continue;
+            }
+        };
+        // The per-user TMPDIR root is not judged by its own mtime, because that does not show use
+        // (#1379). Its entries are judged one by one instead.
+        if is_dir && is_claude_root(&name) {
+            scan_claude_root(&path, older_than, in_use, now, &mut scan);
+            continue;
+        }
+        judge_entry(&path, is_dir, older_than, now, &mut scan);
+    }
+    Ok(scan)
+}
+
+/// Mark one entry stale when its newest mtime is older than `older_than`. Keep it otherwise.
+pub(super) fn judge_entry(
+    path: &Path,
+    is_dir: bool,
+    older_than: Duration,
+    now: SystemTime,
+    scan: &mut Scan,
+) {
+    let modified = match entry_mtime(path, is_dir) {
+        Ok(modified) => modified,
+        Err(e) => {
+            record_failure(path, &e, scan);
+            return;
+        }
+    };
+    // A future mtime means the clock moved. Keep the entry, because a removal on a bad
+    // clock is not reversible.
+    if modified > now || !is_expired(now, modified, older_than) {
+        scan.kept += 1;
+    } else {
+        scan.stale.push(Stale {
+            path: path.to_path_buf(),
+            is_dir,
+        });
+    }
+}
+
+/// The newest mtime of an entry. A symlink is judged by its own mtime and never followed.
+fn entry_mtime(path: &Path, is_dir: bool) -> anyhow::Result<SystemTime> {
+    if is_dir {
+        return newest_mtime(path);
+    }
+    std::fs::symlink_metadata(path)
+        .and_then(|meta| meta.modified())
+        .with_context(|| format!("stat {}", path.display()))
+}
+
+/// Record an entry the sweep could not read or judge. The entry stays, and the next run retries.
+pub(super) fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
+    tracing::error!(
+        path = %path.display(),
+        error = %error,
+        "state/tmp sweep: cannot read entry; skipping"
+    );
+    scan.failed.push(path.to_path_buf());
+}

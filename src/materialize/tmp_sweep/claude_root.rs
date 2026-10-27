@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use super::{Scan, judge_entry, record_failure};
+use super::walk::{Scan, judge_entry, record_failure};
 
 /// Judge the entries one level down inside Claude Code's `claude-<uid>` root. The root itself is
 /// never a candidate.
