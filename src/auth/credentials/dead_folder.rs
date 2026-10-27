@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// How long a dead folder read suppresses the next read, in milliseconds. Claude Code access
 /// tokens last for hours, so a refreshed folder credential reaches the cache within this bound.
-pub(super) const DEAD_FOLDER_TTL_MS: i64 = 5 * 60 * 1000;
+const DEAD_FOLDER_TTL_MS: i64 = 5 * 60 * 1000;
 
 const MARKER_FILE: &str = "credentials-dead-folder.marker";
 
