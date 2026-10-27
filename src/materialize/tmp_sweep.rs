@@ -79,8 +79,26 @@ pub fn sweep(
 /// # Errors
 /// Fails when the in-use list cannot be read. See [`open_paths`].
 pub fn stale_summary(state_dir: &Path, older_than: Duration) -> anyhow::Result<StaleSummary> {
-    let in_use = open_paths()?;
-    stale_summary_in(&state_dir.join("tmp"), older_than, &in_use)
+    stale_summary_with(state_dir, older_than, open_paths)
+}
+
+/// [`stale_summary`] with the in-use list supplied on demand.
+///
+/// The in-use list only removes entries from the stale count, so a scan with no in-use list
+/// gives the upper bound. When that bound holds no stale and no unreadable entry, the answer
+/// is final and `lsof` never runs. A `SessionStart` hook needs this: `lsof` lists every open
+/// file on the host, and it can take seconds (#3031).
+fn stale_summary_with(
+    state_dir: &Path,
+    older_than: Duration,
+    in_use: impl FnOnce() -> anyhow::Result<Vec<PathBuf>>,
+) -> anyhow::Result<StaleSummary> {
+    let tmp_root = state_dir.join("tmp");
+    let bound = stale_summary_in(&tmp_root, older_than, &[])?;
+    if bound.count == 0 && bound.unreadable == 0 {
+        return Ok(bound);
+    }
+    stale_summary_in(&tmp_root, older_than, &in_use()?)
 }
 
 /// The summary for `tmp_root`, with the in-use list given by the caller.
