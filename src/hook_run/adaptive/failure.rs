@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{
     AdaptiveCtx, FAILURE_BUDGET_BYTES, FAILURE_LIMIT, FANOUT_LIMIT, Outcome, RECALL_STATE_UNSAVED,
-    RESOLVED_TOPIC, agent_key, note_skipped, note_unless_saved, query, report,
+    RESOLVED_TOPIC, agent_key, note_skipped, note_unless_saved, query, report, report_ledger,
 };
 use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
@@ -178,14 +178,14 @@ pub(in crate::hook_run) async fn tool_failure(
     outcome.push(fixes);
     let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
     outcome.texts.iter().for_each(|t| budget.add_text(t));
-    report(ctx, "post_tool_use_failure", &outcome, &budget, None);
+    report(ctx, "post_tool_use_failure", &outcome, &budget);
     if record {
         let kept = budget.kept_hashes();
-        note_unless_saved(
-            ctx.store
-                .update(ctx.session_id, |l| l.mark_sent(&key, kept)),
-            RECALL_STATE_UNSAVED,
-        );
+        let (updated, timing) = ctx
+            .store
+            .update_timed(ctx.session_id, |l| l.mark_sent(&key, kept));
+        note_unless_saved(updated, RECALL_STATE_UNSAVED);
+        report_ledger("post_tool_use_failure", &timing);
     }
     Ok(budget.hook_text(Vec::new()))
 }

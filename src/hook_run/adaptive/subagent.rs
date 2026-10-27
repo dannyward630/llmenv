@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::{
     AdaptiveCtx, Outcome, RECALL_STATE_UNSAVED, SUBAGENT_BUDGET_BYTES, ledger_or_skip,
-    note_skipped, note_unless_saved, report, waves,
+    note_skipped, note_unless_saved, report, report_ledger, waves,
 };
 use crate::agent_notice;
 use crate::hook_run::HookText;
@@ -78,12 +78,12 @@ pub(in crate::hook_run) async fn subagent_start(ctx: &AdaptiveCtx<'_>) -> anyhow
         )
         .await;
     }
-    report(ctx, "subagent_start", &outcome, &budget, None);
+    report(ctx, "subagent_start", &outcome, &budget);
     let kept = budget.kept_hashes();
-    note_unless_saved(
-        ctx.store
-            .update(ctx.session_id, |l| l.mark_sent(&key, kept)),
-        RECALL_STATE_UNSAVED,
-    );
+    let (updated, timing) = ctx
+        .store
+        .update_timed(ctx.session_id, |l| l.mark_sent(&key, kept));
+    note_unless_saved(updated, RECALL_STATE_UNSAVED);
+    report_ledger("subagent_start", &timing);
     Ok(budget.hook_text(Vec::new()))
 }

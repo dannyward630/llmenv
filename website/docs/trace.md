@@ -151,7 +151,7 @@ Emitted when adaptive recall ledger timing is enabled.
 
 Fields:
 
-- `<flow>` — flow name. Only `session_start` prints this form today.
+- `<flow>` — flow name: `session_start`, `turn_start`, `subagent_start`, or `post_tool_use_failure`.
 - `lock_attempts=<n>` — number of lock polling attempts (always present).
 - `lock_wait_us=<n>` — time spent waiting for the lock in microseconds.
 - `read_us=<n>` — time to read the ledger file in microseconds.

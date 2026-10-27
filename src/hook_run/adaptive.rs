@@ -96,16 +96,7 @@ fn outage_notice(flow: &str, outcome: &Outcome) -> Option<String> {
 }
 
 /// Print the outage line and the `[LLMENV_CONTEXT]` trace line for one flow.
-///
-/// `ledger` carries optional adaptive recall ledger timing (#3012). Pass `None`
-/// when the flow has no ledger write.
-fn report(
-    ctx: &AdaptiveCtx<'_>,
-    flow: &str,
-    outcome: &Outcome,
-    budget: &RecallBudget,
-    ledger: Option<&LedgerTiming>,
-) {
+fn report(ctx: &AdaptiveCtx<'_>, flow: &str, outcome: &Outcome, budget: &RecallBudget) {
     let ok = outcome.calls.saturating_sub(outcome.failed);
     crate::hook_run::recall_health::record(ctx.state_dir, ok, outcome.failed, unix_now());
     // The engine drops a hook's stderr, so the outage goes to the agent as a notice.
@@ -115,17 +106,20 @@ fn report(
     if let Some(line) = budget.trace_line(crate::trace::enabled()) {
         crate::trace::emit_trace_line(&line);
     }
-    // Emit ledger timing when the adaptive recall trace is enabled (#3012).
-    if let (true, Some(l)) = (crate::trace::enabled(), ledger) {
+}
+
+/// Print the `[LLMENV_LEDGER]` trace line for the ledger update of one flow (#3012).
+fn report_ledger(flow: &str, timing: &LedgerTiming) {
+    if crate::trace::enabled() {
         crate::trace::emit_trace_line(&crate::trace::lines::ledger_flow_line(
             flow,
             crate::trace::lines::LedgerFields {
-                lock_attempts: l.lock_attempts,
-                lock_wait_us: l.lock_wait_us,
-                read_us: l.read_us,
-                write_us: l.write_us,
-                bytes: l.ledger_bytes,
-                state_unsaved: l.state_unsaved,
+                lock_attempts: timing.lock_attempts,
+                lock_wait_us: timing.lock_wait_us,
+                read_us: timing.read_us,
+                write_us: timing.write_us,
+                bytes: timing.ledger_bytes,
+                state_unsaved: timing.state_unsaved,
             },
         ));
     }
@@ -235,13 +229,8 @@ pub(super) async fn session_start(
     if let Some(notice) = unrun {
         agent_notice::record(notice);
     }
-    report(
-        ctx,
-        "session_start",
-        &outcome,
-        &budget,
-        Some(&ledger_timing),
-    );
+    report(ctx, "session_start", &outcome, &budget);
+    report_ledger("session_start", &ledger_timing);
     let wake = match wake {
         Ok(text) => text,
         Err(e) if (outcome.all_failed() || scope_len == 0) && own.is_empty() => return Err(e),
@@ -362,25 +351,24 @@ pub(super) async fn turn_start(
         main_ok = ok;
         outcome.merge(wave);
     }
-    report(ctx, "turn_start", &outcome, &budget, None);
+    report(ctx, "turn_start", &outcome, &budget);
     let kept = budget.kept_hashes();
     let now = unix_now();
-    note_unless_saved(
-        ctx.store.update(ctx.session_id, |l| {
-            l.mark_sent(MAIN_AGENT, kept);
-            l.last_turn_at = now;
-            // A failed recall is not a finished query; the skip rule must not reuse it.
-            if main_ok {
-                l.last_query_hash = Some(query_hash);
-            }
-            // The fallback is tried once per session epoch. A failed try is not repeated on
-            // every turn: the outage would repeat it, and the SessionStart pack is the main path.
-            if fallback {
-                l.set_scope_sent(MAIN_AGENT);
-            }
-        }),
-        RECALL_STATE_UNSAVED,
-    );
+    let (updated, timing) = ctx.store.update_timed(ctx.session_id, |l| {
+        l.mark_sent(MAIN_AGENT, kept);
+        l.last_turn_at = now;
+        // A failed recall is not a finished query; the skip rule must not reuse it.
+        if main_ok {
+            l.last_query_hash = Some(query_hash);
+        }
+        // The fallback is tried once per session epoch. A failed try is not repeated on
+        // every turn: the outage would repeat it, and the SessionStart pack is the main path.
+        if fallback {
+            l.set_scope_sent(MAIN_AGENT);
+        }
+    });
+    note_unless_saved(updated, RECALL_STATE_UNSAVED);
+    report_ledger("turn_start", &timing);
     Ok(budget.hook_text(Vec::new()))
 }
 

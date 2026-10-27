@@ -261,6 +261,16 @@ impl LedgerStore {
         Some(result)
     }
 
+    /// [`Self::update`] with the lock and file timing, for the recall trace (#3012).
+    pub(crate) fn update_timed<T>(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut Ledger) -> T,
+    ) -> (Option<T>, LedgerTiming) {
+        let (updated, timing) = self.update_reporting_save(session_id, f);
+        (updated.map(|(result, _saved)| result), timing)
+    }
+
     /// Like [`Self::update`], and also reports whether the ledger reached disk.
     /// The flag is `false` when the save failed, and the result of `f` is still returned.
     /// The timing comes back even when the update does not run (#3012).
@@ -668,6 +678,20 @@ mod tests {
             0,
             "a busy lock changes nothing"
         );
+    }
+
+    // `update_timed` gives the same result as `update`, and keeps the timing when the lock is busy.
+    #[test]
+    fn update_timed_keeps_the_timing_of_a_skipped_update() {
+        let (_dir, store) = store();
+        let held = store.lock("s1").unwrap();
+        let (skipped, timing) = store.update_timed("s1", |l| l.last_turn_at = 1);
+        assert!(skipped.is_none());
+        assert!(timing.lock_attempts.unwrap() > 1);
+        drop(held);
+        let (done, timing) = store.update_timed("s1", |l| l.last_turn_at = 2);
+        assert_eq!(done, Some(()));
+        assert_eq!(timing.lock_attempts, Some(1));
     }
 
     // An uncontended update takes the lock on the first poll and reaches disk.
