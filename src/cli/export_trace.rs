@@ -4,15 +4,14 @@
 //! adapters, and emit environment variables. The `run_export` entry point in
 //! `src/cli/mod.rs` handles CLI setup and delegates here.
 
-use crate::adapter::AgentAdapter;
-use crate::config::Bundle;
-use crate::config::Config;
-use crate::merge::MergedManifest;
+use super::{
+    build_manifest, ensure_local_memory_proxy, firing_bundles, installed_adapters,
+    validate_var_name, validate_var_value, warn_dead_config,
+};
 use crate::scope::ActiveScopes;
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -21,31 +20,11 @@ use std::time::Instant;
 ///
 /// `scope` and `tag` gate which bundles fire. `explain` adds comments.
 /// `compress` controls bundle compression.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "eight closures for the full export pipeline"
-)]
 pub(crate) fn run_export_core(
     scope: Option<String>,
     tag: Option<String>,
     explain: bool,
     compress: bool,
-    // CLI-specific helpers — passed as closures so this module stays
-    // free of cli/mod.rs dependencies.
-    ensure_proxy: impl FnOnce(&Config, &Path, &ActiveScopes),
-    fire_bundles: impl for<'a> FnOnce(&'a [Bundle], &ActiveScopes, Option<&str>) -> Vec<&'a Bundle>,
-    build_manifest: impl FnOnce(
-        &Config,
-        &Path,
-        &ActiveScopes,
-        &[&Bundle],
-        bool,
-    ) -> anyhow::Result<Option<(MergedManifest, PathBuf)>>,
-    warn_dead: impl FnOnce(&Config, Option<&MergedManifest>, &str),
-    list_adapters: impl FnOnce(&Config) -> Vec<Box<dyn AgentAdapter>>,
-    registered: impl FnOnce() -> Vec<Box<dyn AgentAdapter>>,
-    validate_name: impl Fn(&str) -> anyhow::Result<()>,
-    validate_value: impl Fn(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let t0 = Instant::now();
     let config_path = crate::paths::config_path()?;
@@ -58,7 +37,12 @@ pub(crate) fn run_export_core(
     let active = crate::scope::evaluate(&config, &env);
     let t_active = Instant::now();
 
-    ensure_proxy(&config, &config_dir, &active);
+    ensure_local_memory_proxy(
+        &config,
+        &config_dir,
+        &active,
+        crate::mcp::proxy_ops::SpawnSource::Export,
+    );
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
     if config.cache.remote_sync {
@@ -101,7 +85,7 @@ pub(crate) fn run_export_core(
                     "warning: scope '{scope_id}' not active in current environment \
                      — no bundles will fire for this scope"
                 );
-                let firing = fire_bundles(&config.bundle, &active, tag.as_deref());
+                let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
                 (firing, active.clone())
             } else {
                 let mut filtered_tags: BTreeSet<String> = filtered_scopes
@@ -118,11 +102,11 @@ pub(crate) fn run_export_core(
                     tags: filtered_tags,
                     extra_tags: active.extra_tags.clone(),
                 };
-                let firing = fire_bundles(&config.bundle, &filtered, tag.as_deref());
+                let firing = firing_bundles(&config.bundle, &filtered, tag.as_deref());
                 (firing, filtered)
             }
         } else {
-            let firing = fire_bundles(&config.bundle, &active, tag.as_deref());
+            let firing = firing_bundles(&config.bundle, &active, tag.as_deref());
             (firing, active.clone())
         }
     };
@@ -139,7 +123,7 @@ pub(crate) fn run_export_core(
     let t_manifest = Instant::now();
     let shared_manifest = build_manifest(&config, &config_dir, &use_active, &firing, false)?;
 
-    warn_dead(
+    warn_dead_config(
         &config,
         shared_manifest.as_ref().map(|(m, _)| m),
         "warning:",
@@ -147,7 +131,7 @@ pub(crate) fn run_export_core(
 
     let mut failed_adapters: Vec<&str> = Vec::new();
     let mut any_adapter_eligible = false;
-    for adapter in list_adapters(&config) {
+    for adapter in installed_adapters(&config) {
         any_adapter_eligible = true;
 
         let result = match &shared_manifest {
@@ -226,7 +210,7 @@ pub(crate) fn run_export_core(
     if !any_adapter_eligible {
         eprintln!(
             "warning: no registered adapter binary found on PATH (expected: {})",
-            registered()
+            crate::adapter::registered_adapters()
                 .iter()
                 .map(|a| a.binary_name())
                 .collect::<Vec<_>>()
@@ -320,8 +304,9 @@ pub(crate) fn run_export_core(
             .collect::<Vec<_>>()
             .join(", ");
         for (key, value) in vars {
-            validate_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_value(&value).with_context(|| format!("variable '{key}': invalid value"))?;
+            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
+            validate_var_value(&value)
+                .with_context(|| format!("variable '{key}': invalid value"))?;
             if key.starts_with("LLMENV_") {
                 println!("# source: llmenv introspection");
             } else {
@@ -331,8 +316,9 @@ pub(crate) fn run_export_core(
         }
     } else {
         for (key, value) in vars {
-            validate_name(&key).with_context(|| format!("variable '{key}'"))?;
-            validate_value(&value).with_context(|| format!("variable '{key}': invalid value"))?;
+            validate_var_name(&key).with_context(|| format!("variable '{key}'"))?;
+            validate_var_value(&value)
+                .with_context(|| format!("variable '{key}': invalid value"))?;
             println!("export {}={}", key, crate::util::single_quote(&value));
         }
     }

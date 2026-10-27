@@ -1298,27 +1298,7 @@ fn run_export(
     explain: bool,
     compress: bool,
 ) -> anyhow::Result<()> {
-    export_trace::run_export_core(
-        scope,
-        tag,
-        explain,
-        compress,
-        |config, config_dir, active| {
-            ensure_local_memory_proxy(
-                config,
-                config_dir,
-                active,
-                crate::mcp::proxy_ops::SpawnSource::Export,
-            );
-        },
-        firing_bundles,
-        build_manifest,
-        warn_dead_config,
-        installed_adapters,
-        crate::adapter::registered_adapters,
-        validate_var_name,
-        validate_var_value,
-    )
+    export_trace::run_export_core(scope, tag, explain, compress)
 }
 
 /// `llmenv statusline`: read the engine's session JSON from stdin, load the
