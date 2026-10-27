@@ -8,8 +8,9 @@ use super::{Task, for_current_project, session, store_for_reminder, store_warnin
 /// For every session open for the current project (resolved from the
 /// process's actual cwd — hooks run with cwd set to the project directory)
 /// whose tasks are all done, build a reminder nudging the agent to close it
-/// out. Empty string if none qualify, or on any internal error (degrades
-/// silently — hooks must never block the agent).
+/// out. Empty string if none qualify. A session whose task file cannot be read
+/// adds a warning line, and the other sessions still get their reminders, so a
+/// hook never blocks the agent.
 ///
 /// Like [`wip_reminder`], this can't tell whether a fully-done session
 /// belongs to the current conversation or a different, concurrently running
@@ -33,7 +34,10 @@ fn finish_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) 
         // A task file that cannot be read must not make a session look finished.
         let (done, total) = match session::try_session_progress(state_dir, &session.id) {
             Ok(progress) => progress,
-            Err(e) => return store_warning_text(&e),
+            Err(e) => {
+                lines.push(store_warning_text(&e));
+                continue;
+            }
         };
         if total == 0 || done < total {
             continue;
