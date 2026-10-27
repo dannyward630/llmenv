@@ -49,6 +49,20 @@ pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<
     })
 }
 
+/// Run `cmd` like [`run_with_timeout`] and emit one `[LLMENV_SPAWN]` trace line for it.
+///
+/// `label` is a fixed tag such as `probe:ssid`. The line never carries arguments, because they
+/// can hold keychain item names (#3010).
+///
+/// # Errors
+/// Same as [`run_with_timeout`].
+pub fn run_traced(label: &str, cmd: Command, timeout: Duration) -> std::io::Result<Output> {
+    let start = Instant::now();
+    let result = run_with_timeout(cmd, timeout);
+    crate::trace::emit_spawn_trace(label, start.elapsed(), crate::trace::SpawnExit::of(&result));
+    result
+}
+
 fn timed_out(timeout: Duration) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::TimedOut,
@@ -154,5 +168,23 @@ mod tests {
         let out = run_with_timeout(cmd, Duration::from_secs(10)).unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout.len(), 1_048_576);
+    }
+
+    #[test]
+    fn spawn_exit_names_the_code_the_timeout_and_the_failure() {
+        use crate::trace::SpawnExit;
+        let mut fail = Command::new("sh");
+        fail.args(["-c", "exit 3"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let result = run_with_timeout(fail, Duration::from_secs(5));
+        assert_eq!(SpawnExit::of(&result), SpawnExit::Code(3));
+        let mut slow = Command::new("sleep");
+        slow.arg("30").stdout(Stdio::piped()).stderr(Stdio::piped());
+        let result = run_with_timeout(slow, Duration::from_millis(100));
+        assert_eq!(SpawnExit::of(&result), SpawnExit::Timeout);
+        let missing = Command::new("llmenv-no-such-program");
+        let result = run_with_timeout(missing, Duration::from_secs(1));
+        assert_eq!(SpawnExit::of(&result), SpawnExit::Error);
     }
 }

@@ -16,6 +16,7 @@ pub(in crate::hook_run) fn record_local(
     payload: &Value,
 ) {
     let now = unix_now();
+    let t0 = std::time::Instant::now();
     match event {
         HookEvent::PostToolBatch => {
             let empty = Vec::new();
@@ -59,5 +60,11 @@ pub(in crate::hook_run) fn record_local(
             );
         }
         _ => {}
+    }
+    let elapsed = t0.elapsed();
+    // Only these two events update the ledger. The time includes a busy-lock wait.
+    let touched = matches!(event, HookEvent::PostToolBatch | HookEvent::SubagentTask);
+    if touched {
+        crate::trace::emit_ledger_trace("update", elapsed);
     }
 }
