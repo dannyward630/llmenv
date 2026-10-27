@@ -55,7 +55,7 @@ fn run_security(
     operation: &str,
     service: &str,
 ) -> anyhow::Result<std::process::Output> {
-    crate::process::run_with_timeout(cmd, timeout).map_err(|e| {
+    crate::process::run_traced("keychain:security", cmd, timeout).map_err(|e| {
         if e.kind() == std::io::ErrorKind::TimedOut {
             timeout_error(operation, service, timeout)
         } else {

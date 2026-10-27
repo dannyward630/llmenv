@@ -89,7 +89,7 @@ fn verify_installed(current_exe: &Path, backup: &Path, timeout: Duration) -> Res
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let failure = match crate::process::run_with_timeout(version, timeout) {
+    let failure = match crate::process::run_traced("upgrade:version", version, timeout) {
         Ok(output) if output.status.success() => {
             remove_leftover(backup, "backup");
             return Ok(());

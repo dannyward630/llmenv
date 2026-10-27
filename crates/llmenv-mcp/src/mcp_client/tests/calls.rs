@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn emit_mcp_call_trace_never_panics_without_env_var() {
-    emit_mcp_call_trace("icm_memory_recall", Duration::from_micros(2340));
+    emit_mcp_call_trace("icm_memory_recall", Duration::from_micros(2340), 0, 0);
 }
 
 #[tokio::test]

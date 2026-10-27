@@ -132,7 +132,7 @@ fn command_of(pid: u32) -> anyhow::Result<Option<String>> {
     cmd.args(["-ww", "-o", "command=", "-p", &pid.to_string()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let out = crate::process::run_with_timeout(cmd, PS_TIMEOUT)
+    let out = crate::process::run_traced("proxy:ps", cmd, PS_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("cannot run /bin/ps to read the command of pid {pid}: {e}"))?;
     ps_command(pid, &out)
 }

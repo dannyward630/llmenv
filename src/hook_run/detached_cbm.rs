@@ -25,18 +25,27 @@ pub(crate) struct IndexInputs {
 /// Child entrypoint: read the inputs from `checkpoint_path`, run the indexer, wait for it, and
 /// delete the checkpoint when it exits 0. A failure leaves the file and logs at error level.
 ///
+/// Emits a `[LLMENV_DETACHED] cbm-index` trace line with wall time, CPU time,
+/// and exit status when `LLMENV_TRACE_TIMING` is set (#3014).
+///
 /// # Errors
 /// The checkpoint cannot be read, the indexer cannot start, or it exits non-zero.
 pub fn run_cbm_index(checkpoint_path: &Path) -> anyhow::Result<()> {
-    crate::path_lookup::resolve_program("codebase-memory-mcp")
-        .and_then(|program| {
-            run_cbm_index_with(checkpoint_path, |root, index_path, budget| {
-                crate::hook_run::index_command(&program, root, index_path, budget)
-            })
+    let t0 = std::time::Instant::now();
+    let result = crate::path_lookup::resolve_program("codebase-memory-mcp").and_then(|program| {
+        run_cbm_index_with(checkpoint_path, |root, index_path, budget| {
+            crate::hook_run::index_command(&program, root, index_path, budget)
         })
-        .inspect_err(|e| {
-            tracing::error!("cbm-index-run: indexing failed: {e:#}");
-        })
+    });
+    crate::trace::emit_detached_trace(&crate::trace::DetachedJob {
+        kind: "cbm-index",
+        request_id: None,
+        started: t0,
+        exit: i32::from(result.is_err()),
+    });
+    result.inspect_err(|e| {
+        tracing::error!("cbm-index-run: indexing failed: {e:#}");
+    })
 }
 
 /// [`run_cbm_index`] with the command builder injected, so a test can run a stub indexer.

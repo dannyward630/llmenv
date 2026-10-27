@@ -113,13 +113,11 @@ fn spawn_record_in(
         crate::session_log::detached_child_log_path,
     );
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    let Ok(mut child) = cmd.spawn() else {
+    let Ok(mut child) = crate::trace::spawn_counted("session_log_record", &mut cmd) else {
         tracing::error!("session_log: failed to spawn detached record child");
         return None;
     };
     if let Some(mut stdin) = child.stdin.take()
-        // Small, already-truncated payload: this write fits the pipe buffer
-        // and completes without the child having read anything yet.
         && let Err(e) = stdin.write_all(payload_json.as_bytes())
     {
         tracing::error!("session_log: failed to pipe event to detached child: {e}");
@@ -154,6 +152,9 @@ pub(crate) fn record_command(
 /// also reaches the operator through the internal-ops `FileLogLayer` wired in
 /// `main.rs`.
 ///
+/// Emits a `[LLMENV_DETACHED] session-log-record` trace line with wall time,
+/// CPU time, and exit status when `LLMENV_TRACE_TIMING` is set (#3014).
+///
 /// # Errors
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
@@ -161,9 +162,17 @@ pub(crate) fn run_record(
     payload_json: &str,
     checkpoint: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    let t0 = std::time::Instant::now();
     // The error is logged here and not in `run_record_with`: a test of that function would
     // otherwise reach this callsite outside a subscriber and break the capture test below.
-    run_record_with(payload_json, checkpoint, run_record_inner).inspect_err(|e| {
+    let result = run_record_with(payload_json, checkpoint, run_record_inner);
+    crate::trace::emit_detached_trace(&crate::trace::DetachedJob {
+        kind: "session-log-record",
+        request_id: crate::trace::json_str(payload_json, "request_id").as_deref(),
+        started: t0,
+        exit: i32::from(result.is_err()),
+    });
+    result.inspect_err(|e| {
         tracing::error!("session_log: detached record failed: {e}");
     })
 }

@@ -1,8 +1,10 @@
 //! Small shared helpers with no better home.
 
 pub mod agent_notice;
+pub mod mcp_trace;
 pub mod process;
 pub mod shell;
+pub mod trace;
 
 use anstyle::{AnsiColor, Color, Style};
 use sha2::{Digest, Sha256};

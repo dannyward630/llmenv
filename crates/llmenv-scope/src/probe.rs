@@ -37,7 +37,7 @@ pub(crate) fn capture_stdout(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let out = match llmenv_util::process::run_with_timeout(cmd, timeout) {
+    let out = match llmenv_util::process::run_traced(label, cmd, timeout) {
         Ok(out) => out,
         Err(e) => {
             tracing::debug!("{label}: running {program} failed: {e}");

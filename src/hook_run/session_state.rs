@@ -26,35 +26,70 @@ pub(crate) fn lock_state_file(dir: &Path, key: &str, label: &str) -> Option<File
 /// The `key` is not a plain name, the folder or the lock file cannot be made, or the lock stays
 /// busy past about 200 ms.
 pub(crate) fn lock_state_file_why(dir: &Path, key: &str, label: &str) -> Result<File, String> {
+    lock_state_file_timed(dir, key, label).0
+}
+
+/// How long taking a state lock took (#3012).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LockTiming {
+    /// Polls of the lock, so `1` means no contention. Zero when the lock file was never reached.
+    pub attempts: u32,
+    /// Time spent polling, in microseconds.
+    pub wait_us: u64,
+}
+
+/// [`lock_state_file_why`] with the poll count and wait time, whether or not the lock was taken.
+///
+/// # Errors
+/// As [`lock_state_file_why`].
+pub(crate) fn lock_state_file_timed(
+    dir: &Path,
+    key: &str,
+    label: &str,
+) -> (Result<File, String>, LockTiming) {
+    let mut timing = LockTiming::default();
     // The key can come from hook stdin; an unsafe value must never reach a path join.
     if !crate::paths::is_valid_short_name(key) {
-        return Err(format!("the key for {label} is not a plain name"));
+        return (
+            Err(format!("the key for {label} is not a plain name")),
+            timing,
+        );
     }
-    crate::paths::create_dir_owner_only(dir)
-        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    if let Err(e) = crate::paths::create_dir_owner_only(dir) {
+        return (Err(format!("cannot create {}: {e}", dir.display())), timing);
+    }
     let mut opts = OpenOptions::new();
     opts.create(true).truncate(false).write(true).mode(0o600);
     let path = dir.join(format!("{key}.lock"));
-    let file = crate::paths::refuse_symlink(&mut opts)
-        .open(&path)
-        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let file = match crate::paths::refuse_symlink(&mut opts).open(&path) {
+        Ok(file) => file,
+        Err(e) => return (Err(format!("cannot open {}: {e}", path.display())), timing),
+    };
+    let start = std::time::Instant::now();
     for _ in 0..LOCK_ATTEMPTS {
+        timing.attempts += 1;
         match file.try_lock() {
             Ok(()) => {
+                timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 // The orphan prune goes by age, so a held lock must look new.
                 if let Err(e) = file.set_modified(std::time::SystemTime::now()) {
                     tracing::error!("cannot refresh {label} lock age: {e}");
                 }
-                return Ok(file);
+                return (Ok(file), timing);
             }
             Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_POLL),
-            Err(e) => return Err(format!("cannot lock {}: {e}", path.display())),
+            Err(e) => {
+                timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                return (Err(format!("cannot lock {}: {e}", path.display())), timing);
+            }
         }
     }
-    Err(format!(
+    timing.wait_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let why = format!(
         "{} stays locked by another hook of this session",
         path.display()
-    ))
+    );
+    (Err(why), timing)
 }
 
 /// Scan `dir` and delete `.json` files older than `max_age_days`. Fail-soft:
