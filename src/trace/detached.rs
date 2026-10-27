@@ -76,3 +76,48 @@ pub(crate) fn json_str(payload_json: &str, key: &str) -> Option<String> {
     };
     value.get(key)?.as_str().map(str::to_string)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    // The state log appends below the cap, and moves to `.1` above it, so it stays bounded.
+    #[test]
+    fn the_state_log_rotates_once_it_passes_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_LOG);
+        append_to_state_log(&path, "first");
+        append_to_state_log(&path, "second");
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        let big = vec![b'x'; usize::try_from(STATE_LOG_MAX_BYTES).unwrap() + 1];
+        std::fs::write(&path, big).unwrap();
+        append_to_state_log(&path, "after rotation");
+        let older = dir.path().join(format!("{STATE_LOG}.1"));
+        assert!(older.exists(), "the full log moves to .1");
+        let fresh = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(fresh.lines().count(), 1);
+        assert!(fresh.contains("after rotation"));
+    }
+
+    // CPU time of this process is a number that never goes backwards.
+    #[test]
+    fn cpu_time_does_not_go_backwards() {
+        let a = cpu_time_us();
+        let mut x = 0u64;
+        for i in 0..200_000u64 {
+            x = x.wrapping_add(i.wrapping_mul(31));
+        }
+        assert!(x != 1);
+        assert!(cpu_time_us() >= a);
+    }
+
+    // A missing field, a non-string field, and a bad payload each give `None`.
+    #[test]
+    fn json_str_gives_none_for_a_missing_or_bad_field() {
+        assert_eq!(json_str(r#"{"a":"b"}"#, "a").as_deref(), Some("b"));
+        assert_eq!(json_str(r#"{"a":"b"}"#, "c"), None);
+        assert_eq!(json_str(r#"{"a":1}"#, "a"), None);
+        assert_eq!(json_str("{oops", "a"), None);
+    }
+}
