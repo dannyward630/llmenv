@@ -30,18 +30,7 @@ use std::time::Duration;
 /// escape (`\n` -> `\\n`, etc.) here in the sink, so no current or future
 /// call site needs to pre-sanitize its own `extra` value.
 pub(crate) fn emit_cache_trace(name: &str, hit: bool, elapsed: Duration, extra: Option<&str>) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
-        return;
-    }
-    let status = if hit { "hit" } else { "miss" };
-    let ms = elapsed.as_secs_f64() * 1000.0;
-    match extra {
-        Some(extra) => {
-            let escaped = crate::util::escape_control(extra);
-            eprintln!("[LLMENV_CACHE] {name} {status} {ms:.3}ms {escaped}");
-        }
-        None => eprintln!("[LLMENV_CACHE] {name} {status} {ms:.3}ms"),
-    }
+    crate::trace::emit_cache_trace(name, hit, elapsed, extra);
 }
 
 #[cfg(test)]

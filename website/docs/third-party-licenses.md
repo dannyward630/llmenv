@@ -3334,7 +3334,7 @@ THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [ctutils 0.4.2](https://github.com/RustCrypto/utils)
+- [ctutils 0.4.6](https://github.com/RustCrypto/utils)
 
 ```
 Copyright (c) 2025-2026 The RustCrypto Project Developers
@@ -3875,7 +3875,17 @@ Used by:
 - [winapi-i686-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
 - [winapi-x86_64-pc-windows-gnu 0.4.0](https://github.com/retep998/winapi-rs)
 - [windows-link 0.2.1](https://github.com/microsoft/windows-rs)
+- [windows-sys 0.52.0](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.61.2](https://github.com/microsoft/windows-rs)
+- [windows-targets 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_aarch64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_aarch64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_i686_gnu 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_i686_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_i686_msvc 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_gnu 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_gnullvm 0.52.6](https://github.com/microsoft/windows-rs)
+- [windows_x86_64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
 
 ```
 MIT License
@@ -3903,7 +3913,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [tokio-util 0.7.19](https://github.com/tokio-rs/tokio)
-- [tokio 1.53.1](https://github.com/tokio-rs/tokio)
+- [tokio 1.53.3](https://github.com/tokio-rs/tokio)
 
 ```
 MIT License

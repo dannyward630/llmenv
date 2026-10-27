@@ -39,7 +39,7 @@ pub(super) fn engine_start(pid: u32) -> Option<SystemTime> {
     cmd.args(["-o", "etime=", "-p", &pid.to_string()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let out = match llmenv_util::process::run_with_timeout(cmd, PS_TIMEOUT) {
+    let out = match llmenv_util::process::run_traced("task:ps", cmd, PS_TIMEOUT) {
         Ok(out) if out.status.success() => out,
         // `ps -p` exits 1 with no output for a pid that does not exist (#2923).
         Ok(out)

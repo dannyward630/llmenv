@@ -24,10 +24,15 @@ pub enum SyncOutcome {
 /// Returns an error if git cannot be spawned or exits non-zero (stderr included).
 fn run_git_checked(repo: &Path, args: &[&str], what: &str) -> Result<()> {
     let mut cmd = git::secure_git();
-    let output = git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS)
+    git::apply_git_timeout(&mut cmd, git::DEFAULT_GIT_TIMEOUT_SECS)
         .args(args)
         .current_dir(repo)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // git's own timeout fires first, so the outer deadline only catches a hung git.
+    let outer = std::time::Duration::from_secs(git::DEFAULT_GIT_TIMEOUT_SECS + 5);
+    let output = crate::process::run_traced("git:sync", cmd, outer)
         .with_context(|| format!("failed to spawn git to {what}"))?;
     if !output.status.success() {
         anyhow::bail!(

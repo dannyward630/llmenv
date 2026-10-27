@@ -4,10 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::Read as _;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod usage_state;
 use usage_state::*;
@@ -747,89 +747,53 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
     let Ok(program) = crate::path_lookup::resolve_program(gh.bin) else {
         return Err(GhFailure::Missing);
     };
-    let mut cmd = Command::new(program);
     // `--` terminates option parsing so `branch` (derived from git state) is
-    // always read as the positional argument, never as a `gh` flag — a
-    // branch named e.g. `--json` (or starting with `-`) can't be
-    // misinterpreted. The flags stay before `--`; only the positional goes
-    // after it.
-    cmd.args([
-        "pr",
-        "view",
-        "--json",
-        "number,url,reviewDecision",
-        "--",
-        branch,
-    ])
-    .current_dir(repo_dir)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    // One retry after a brief backoff (#1062): a `spawn` failure under heavy
-    // concurrent process load (fork/exec resource exhaustion) is transient,
-    // not "gh isn't installed" — the two look identical from `Command::spawn`'s
-    // `Err`, but only one is worth a second attempt. A permanently-missing
-    // binary fails the retry too and still degrades to `None`, just one
-    // attempt later.
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(first_err) => {
-            std::thread::sleep(Duration::from_millis(20));
-            match cmd.spawn() {
-                Ok(child) => child,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::debug!("gh pr view: gh is not installed: {e}");
-                    return Err(GhFailure::Missing);
-                }
-                Err(e) => {
-                    tracing::error!("gh pr view: spawn failed twice: {first_err}, then {e}");
-                    return Err(GhFailure::Failed);
-                }
-            }
-        }
+    // always read as the positional argument, never as a `gh` flag. The flags
+    // stay before `--`; only the positional goes after it.
+    let build = || {
+        let mut cmd = Command::new(&program);
+        cmd.args([
+            "pr",
+            "view",
+            "--json",
+            "number,url,reviewDecision",
+            "--",
+            branch,
+        ])
+        .current_dir(repo_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        cmd
     };
-    let deadline = Instant::now() + gh.timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // A failed or short read must not reach the parser as a full answer.
-                let mut stdout = Vec::new();
-                if let Some(mut out) = child.stdout.take()
-                    && let Err(e) = out.read_to_end(&mut stdout)
-                {
-                    tracing::error!("gh pr view: reading stdout failed: {e}");
-                    return Err(GhFailure::Failed);
-                }
-                let mut stderr = Vec::new();
-                if let Some(mut err) = child.stderr.take()
-                    && let Err(e) = err.read_to_end(&mut stderr)
-                {
-                    tracing::error!("gh pr view: reading stderr failed: {e}");
-                    return Err(GhFailure::Failed);
-                }
-                if !status.success() {
-                    return classify_gh_exit(status, &String::from_utf8_lossy(&stderr));
-                }
-                return Ok(parse_gh_pr_view(&stdout));
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let secs = gh.timeout.as_secs_f32();
-                    tracing::error!("gh pr view timed out after {secs}s");
-                    return Err(GhFailure::Failed);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(e) => {
-                // Same cleanup as the timeout arm: the child's state is
-                // unknown, so don't abandon it still running.
-                let _ = child.kill();
-                let _ = child.wait();
-                tracing::error!("gh pr view: wait failed: {e}");
-                return Err(GhFailure::Failed);
-            }
+    let run = || crate::process::run_traced("statusline:gh-pr-view", build(), gh.timeout);
+    // One retry after a brief backoff (#1062): a failure to start under heavy
+    // concurrent process load is transient, not "gh isn't installed".
+    // A timeout is final, and a missing binary fails the retry too.
+    let out = match run() {
+        Err(e) if !matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::NotFound) => {
+            std::thread::sleep(Duration::from_millis(20));
+            run().inspect_err(|second| {
+                tracing::error!("gh pr view: failed twice: {e}, then {second}");
+            })
+        }
+        other => other,
+    };
+    match out {
+        Ok(out) if out.status.success() => Ok(parse_gh_pr_view(&out.stdout)),
+        Ok(out) => classify_gh_exit(out.status, &String::from_utf8_lossy(&out.stderr)),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            tracing::debug!("gh pr view: gh is not installed: {e}");
+            Err(GhFailure::Missing)
+        }
+        Err(e) if e.kind() == ErrorKind::TimedOut => {
+            let secs = gh.timeout.as_secs_f32();
+            tracing::error!("gh pr view timed out after {secs}s");
+            Err(GhFailure::Failed)
+        }
+        Err(e) => {
+            tracing::error!("gh pr view: {e}");
+            Err(GhFailure::Failed)
         }
     }
 }
@@ -1946,7 +1910,7 @@ mod tests {
             bin: &gh_bin,
             timeout: Duration::from_millis(50),
         };
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         assert_eq!(
             gh_pr_view(cmd, repo_dir.path(), "feat/x"),
             Err(GhFailure::Failed)

@@ -130,6 +130,35 @@ fn build_prompt(max_rules: u32, summaries: &[String]) -> String {
 /// Returns `anyhow::Error` if the process fails to start, times out, or exits
 /// with a non-zero status.
 async fn call_claude(prompt: &str) -> anyhow::Result<String> {
+    let started = std::time::Instant::now();
+    let waited = run_claude(prompt).await;
+    crate::trace::emit_spawn_trace(
+        "consolidation:claude",
+        started.elapsed(),
+        match &waited {
+            Ok(output) => output.status.code().map_or(
+                crate::trace::SpawnExit::Signal,
+                crate::trace::SpawnExit::Code,
+            ),
+            Err(e) if e.downcast_ref::<WaitTimedOut>().is_some() => {
+                crate::trace::SpawnExit::Timeout
+            }
+            Err(_) => crate::trace::SpawnExit::Error,
+        },
+    );
+    let output = waited?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("claude -p exited with {}: {stderr}", output.status);
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout.trim().to_string())
+}
+
+/// Start `claude -p`, send it `prompt`, and wait for its output.
+async fn run_claude(prompt: &str) -> anyhow::Result<std::process::Output> {
     let program = crate::path_lookup::resolve_program("claude")?;
     let mut child = spawn_with_kill_on_drop(claude_command(&program))?;
 
@@ -141,16 +170,7 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
         drop(stdin);
     }
 
-    // Wait for output with timeout
-    let output = wait_with_timeout_or_kill_group(child, LLM_TIMEOUT).await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("claude -p exited with {}: {stderr}", output.status);
-    }
-
-    let stdout = String::from_utf8(output.stdout)?;
-    Ok(stdout.trim().to_string())
+    wait_with_timeout_or_kill_group(child, LLM_TIMEOUT).await
 }
 
 /// Env var set on the `claude -p` child. `hook-run` exits at once when it
@@ -211,6 +231,25 @@ fn spawn_with_kill_on_drop(
 /// # Errors
 /// Returns an error if `child` doesn't exit within `timeout` or if waiting on
 /// it fails.
+/// The child did not exit within the timeout, and its process group was killed.
+#[derive(Debug)]
+struct WaitTimedOut {
+    pid: Option<u32>,
+    timeout: Duration,
+}
+
+impl std::fmt::Display for WaitTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "process (pid {:?}) timed out after {:?}",
+            self.pid, self.timeout
+        )
+    }
+}
+
+impl std::error::Error for WaitTimedOut {}
+
 async fn wait_with_timeout_or_kill_group(
     child: tokio::process::Child,
     timeout: Duration,
@@ -222,7 +261,7 @@ async fn wait_with_timeout_or_kill_group(
             if let Some(pid) = pid {
                 kill_process_group(pid);
             }
-            anyhow::bail!("process (pid {pid:?}) timed out after {timeout:?}");
+            Err(WaitTimedOut { pid, timeout }.into())
         }
     }
 }
@@ -1443,7 +1482,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let result = wait_with_timeout_or_kill_group(child, Duration::from_millis(50)).await;
-        assert!(result.is_err(), "sh should not exit within 50ms");
+        let err = result.expect_err("sh should not exit within 50ms");
+        assert!(
+            err.downcast_ref::<WaitTimedOut>().is_some(),
+            "a timeout must be the typed error, got {err:#}"
+        );
 
         // No process anywhere should still carry this pgid — proves the
         // whole group (the direct `sh` child and its `sleep 30` grandchild)

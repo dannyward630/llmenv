@@ -49,7 +49,7 @@ fn lsof_paths(program: &std::path::Path, timeout: Duration) -> anyhow::Result<Ve
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = match crate::process::run_with_timeout(cmd, timeout) {
+    let output = match crate::process::run_traced("materialize:lsof", cmd, timeout) {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => anyhow::bail!(
             "`{}` gave no answer within {} s, so it was stopped; the sweep stopped. A hung network or SMB mount can block lsof. Fix: run `mount` to find the \
