@@ -840,10 +840,8 @@ fn open_log_file(path: &Path, max_bytes: u64, harden_dir: bool) -> anyhow::Resul
             return Err(anyhow::Error::new(e).context(format!("inspecting log {}", path.display())));
         }
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    // The child's stderr can hold paths and tokens, so the log is owner-only.
+    llmenv_paths::open_append_owner_only(path)
         .with_context(|| format!("opening log {}", path.display()))
 }
 

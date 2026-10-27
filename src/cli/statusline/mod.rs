@@ -256,7 +256,7 @@ fn emit_statusline_trace(
         for (widget, us) in &times {
             fields.insert(format!("{widget}_us"), serde_json::json!(us));
         }
-        crate::trace::emit_json_trace("statusline", serde_json::Value::Object(fields));
+        crate::trace::emit_json_trace("statusline", fields);
     }
 }
 

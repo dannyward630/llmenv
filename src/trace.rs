@@ -20,15 +20,6 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-/// Open or append `path` with `O_APPEND` so concurrent writers never
-/// interleave lines. The kernel guarantees atomic writes of a single line
-/// because each line is shorter than `PIPE_BUF` (4 KiB on Linux, 512 B on
-/// macOS).
-fn open_trace_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::fs::OpenOptions;
-    OpenOptions::new().create(true).append(true).open(path)
-}
-
 /// Whether any trace sink is on: `LLMENV_TRACE_TIMING` (stderr) or `LLMENV_TRACE_FILE` (file).
 ///
 /// An emitter returns early when this is `false`, so an untraced run pays for no formatting.
@@ -37,60 +28,82 @@ pub(crate) fn enabled() -> bool {
         || std::env::var_os("LLMENV_TRACE_FILE").is_some()
 }
 
-/// Emit `line` to stderr and, when `LLMENV_TRACE_FILE` is set, also append
-/// it as a JSON object to the trace file.
+/// The file named by `LLMENV_TRACE_FILE`, or `None` when it is unset or empty.
+pub(crate) fn file_sink_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("LLMENV_TRACE_FILE")
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Emit `line` to stderr when `LLMENV_TRACE_TIMING` is set, and append it to the file named by
+/// `LLMENV_TRACE_FILE` when that is set.
 ///
-/// The JSON object carries `ts` (Unix seconds), `pid`, and `line` so a consumer
-/// can reconstruct the original text while still being able to parse the
-/// file as JSON Lines.
+/// The file gets one JSON object per line with `ts` (Unix seconds), `pid`, and `line`, so a
+/// consumer can parse it as JSON Lines.
 pub(crate) fn emit_trace_line(line: &str) {
     if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
-        eprintln!("{line}");
+        // A closed stderr must not abort the hook that is being traced.
+        let _ = writeln!(std::io::stderr(), "{line}");
     }
-    if let Some(path) = std::env::var_os("LLMENV_TRACE_FILE") {
-        append_trace_line(std::path::Path::new(&path), line);
+    if let Some(path) = file_sink_path() {
+        append_trace_line(&path, line);
     }
 }
 
-/// Append `line` to `path` as one JSON object with a single `O_APPEND` write.
+/// Say once per process that the trace file cannot be written. A hook or a detached job has no
+/// visible log, so a bad path would otherwise give an empty trace with no explanation.
+fn report_sink_error(path: &std::path::Path, error: &std::io::Error) {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "llmenv: cannot write the trace file {}: {error}. \
+             Fix: set LLMENV_TRACE_FILE to a path in a writable directory that is not a symlink.",
+            path.display()
+        );
+    }
+}
+
+/// Append `line` to `path` as one JSON object, in a single write.
+///
+/// The file is created owner-only, an existing looser file is tightened, and a symlink at `path`
+/// is refused, because a planted link would redirect the appends.
 pub(crate) fn append_trace_line(path: &std::path::Path, line: &str) {
-    let mut f = match open_trace_file(path) {
-        Ok(f) => f,
+    let mut file = match llmenv_paths::open_append_owner_only(path) {
+        Ok(file) => file,
         Err(e) => {
-            tracing::warn!("cannot open trace file {}: {e}", path.display());
+            report_sink_error(path, &e);
             return;
         }
     };
-    let obj = serde_json::json!({
-        "ts": current_timestamp(),
-        "pid": std::process::id(),
-        "line": line,
-    });
-    // One write call keeps concurrent writers from interleaving inside a line.
-    if let Err(e) = f.write_all(format!("{obj}\n").as_bytes()) {
-        tracing::warn!("trace file write failed to {}: {e}", path.display());
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let obj = serde_json::json!({ "ts": ts, "pid": std::process::id(), "line": line });
+    // One write call keeps concurrent `O_APPEND` writers from interleaving inside a line.
+    if let Err(e) = file.write_all(format!("{obj}\n").as_bytes()) {
+        report_sink_error(path, &e);
     }
 }
 
 /// Build the `llmenv-trace <json>` marker line. The JSON object is flat: `fields` keeps its
 /// own keys, and the line adds `"v": 1` and `"op"`. Existing consumers read the timing keys
 /// at the top level.
-pub(crate) fn json_trace_line(op: &str, fields: serde_json::Value) -> String {
-    let mut obj = match fields {
-        serde_json::Value::Object(map) => map,
-        other => {
-            let mut map = serde_json::Map::new();
-            map.insert("value".to_string(), other);
-            map
-        }
-    };
-    obj.insert("v".to_string(), serde_json::json!(1));
-    obj.insert("op".to_string(), serde_json::json!(op));
-    format!("llmenv-trace {}", serde_json::Value::Object(obj))
+pub(crate) fn json_trace_line(
+    op: &str,
+    mut fields: serde_json::Map<String, serde_json::Value>,
+) -> String {
+    debug_assert!(
+        !fields.contains_key("v") && !fields.contains_key("op"),
+        "a trace field named v or op would be overwritten"
+    );
+    fields.insert("v".to_string(), serde_json::json!(1));
+    fields.insert("op".to_string(), serde_json::json!(op));
+    format!("llmenv-trace {}", serde_json::Value::Object(fields))
 }
 
 /// Emit the `llmenv-trace <json>` marker for `op` to the trace sink.
-pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Value) {
+pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Map<String, serde_json::Value>) {
     emit_trace_line(&json_trace_line(op, fields));
 }
 
@@ -170,7 +183,7 @@ impl HookTiming {
     }
 }
 
-pub(crate) fn trace_timing_json(timing: HookTiming) -> serde_json::Value {
+pub(crate) fn trace_timing_json(timing: HookTiming) -> serde_json::Map<String, serde_json::Value> {
     // Cap rather than panic on the (unreachable) overflow of an in-process
     // Instant delta past u64::MAX microseconds (~585,000 years).
     let us = |d: Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
@@ -184,7 +197,6 @@ pub(crate) fn trace_timing_json(timing: HookTiming) -> serde_json::Value {
         ..
     } = timing;
     let mut fields = serde_json::Map::new();
-    fields.insert("v".to_string(), serde_json::json!(1));
     fields.insert(
         "config_load_us".to_string(),
         serde_json::json!(us(t_config.saturating_duration_since(t0))),
@@ -231,7 +243,14 @@ pub(crate) fn trace_timing_json(timing: HookTiming) -> serde_json::Value {
             fields.insert(name.to_string(), serde_json::json!(v));
         }
     }
-    serde_json::Value::Object(fields)
+    fields
+}
+
+/// The hook marker as parsed JSON, as a consumer reads it. For tests.
+#[cfg(test)]
+pub(crate) fn hook_marker(timing: HookTiming) -> serde_json::Value {
+    let line = json_trace_line("hook_run", trace_timing_json(timing));
+    serde_json::from_str(line.strip_prefix("llmenv-trace ").unwrap_or_default()).unwrap_or_default()
 }
 
 /// Emit the per-phase timing marker to the trace sink.
@@ -246,10 +265,10 @@ pub(crate) fn emit_guard_trace(command: &str, total: Duration) {
         return;
     }
     let total_us = u64::try_from(total.as_micros()).unwrap_or(u64::MAX);
-    emit_json_trace(
-        "guard",
-        serde_json::json!({ "command": command, "total_us": total_us }),
-    );
+    let mut fields = serde_json::Map::new();
+    fields.insert("command".to_string(), serde_json::json!(command));
+    fields.insert("total_us".to_string(), serde_json::json!(total_us));
+    emit_json_trace("guard", fields);
 }
 
 /// How a traced child process ended.
@@ -268,6 +287,11 @@ pub(crate) enum SpawnExit {
 }
 
 impl SpawnExit {
+    /// The outcome of a probe that talks to a child over a pipe: `0` for an answer, else an error.
+    pub(crate) fn of_probe(answered: bool) -> Self {
+        if answered { Self::Code(0) } else { Self::Error }
+    }
+
     /// Classify the result of a waited child.
     pub(crate) fn of(result: &std::io::Result<std::process::Output>) -> Self {
         match result {
@@ -296,20 +320,6 @@ pub(crate) fn emit_ledger_trace(op: &str, elapsed: Duration) {
     }
 }
 
-/// Return the current time as a Unix-epoch-seconds string.
-///
-/// This binary crate has no `chrono`/`time` dependency (`rg -n "^chrono|^time"
-/// Cargo.toml` finds none). `ts` is informational only — a consumer parses
-/// the JSON Lines file, not a human, so a bare Unix-epoch-seconds string is
-/// sufficient rather than pulling in a date/time crate for one field.
-fn current_timestamp() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default()
-}
-
-/// FFI bindings for `getrusage` on macOS.
 mod detached;
 pub(crate) mod lines;
 
@@ -335,7 +345,7 @@ mod tests {
     // emit_json_trace never panics when neither env var is set.
     #[test]
     fn emit_json_trace_never_panics_without_env_var() {
-        emit_json_trace("export", serde_json::json!({ "config_load_us": 12 }));
+        emit_json_trace("export", serde_json::Map::new());
     }
 
     // Every documented trace line example parses with the same code path
@@ -409,7 +419,9 @@ mod tests {
     // top level, and `v` and `op` sit beside them.
     #[test]
     fn json_trace_line_is_prefixed_flat_and_versioned() {
-        let line = json_trace_line("export", serde_json::json!({ "config_load_us": 12 }));
+        let mut fields = serde_json::Map::new();
+        fields.insert("config_load_us".to_string(), serde_json::json!(12));
+        let line = json_trace_line("export", fields);
         let json = line.strip_prefix("llmenv-trace ").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(parsed["v"], 1);
@@ -445,6 +457,27 @@ mod tests {
             .filter_map(|k| json[*k].as_u64())
             .sum();
         assert!(sum <= json["prep_us"].as_u64().unwrap());
+    }
+
+    // The trace file is owner-only, and a symlink at its path is not followed.
+    #[cfg(unix)]
+    #[test]
+    fn the_trace_file_is_owner_only_and_refuses_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.log");
+        append_trace_line(&path, "[LLMENV_SPAWN] x 1us exit=0");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let link = dir.path().join("link.log");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        append_trace_line(&link, "[LLMENV_SPAWN] y 1us exit=0");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "the link is not followed"
+        );
     }
 
     // The sink writes one JSON object per line, and appends rather than truncates.
@@ -505,13 +538,12 @@ mod tests {
             let t_scope = t0 + std::time::Duration::from_micros(scope_us);
             let t_chunk = t0 + std::time::Duration::from_micros(chunk_us);
             let t_end = t0 + std::time::Duration::from_micros(end_us);
-            let obj = trace_timing_json(HookTiming {
+            let json = hook_marker(HookTiming {
                 t_scope: Some(t_scope),
                 t_chunk: Some(t_chunk),
                 t_end: Some(t_end),
                 ..HookTiming::new(t0, t_config)
             });
-            let json: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
             proptest::prop_assert_eq!(&json["v"], &serde_json::json!(1));
             proptest::prop_assert!(json.get("config_load_us").is_some());
             proptest::prop_assert!(json["config_load_us"].is_u64());
@@ -533,10 +565,47 @@ mod tests {
         ) {
             let t0 = std::time::Instant::now();
             let t_config = t0 + std::time::Duration::from_micros(config_us);
-            let obj = trace_timing_json(HookTiming::new(t0, t_config));
-            let json: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
+            let json = hook_marker(HookTiming::new(t0, t_config));
             proptest::prop_assert_eq!(&json["v"], &serde_json::json!(1));
             proptest::prop_assert!(json.get("config_load_us").is_some());
+        }
+    }
+
+    proptest::proptest! {
+        // For any op and any fields that do not use the reserved keys, the marker is the prefix
+        // plus one JSON object that keeps every field and adds `v` and `op`.
+        #[test]
+        fn json_trace_line_keeps_every_field_and_adds_v_and_op(
+            op in "\\PC{0,20}",
+            fields in proptest::collection::btree_map("[a-z_]{1,12}", 0u64..1_000_000, 0..8),
+        ) {
+            let mut map = serde_json::Map::new();
+            for (key, value) in &fields {
+                if key != "v" && key != "op" {
+                    map.insert(key.clone(), serde_json::json!(value));
+                }
+            }
+            let line = json_trace_line(&op, map.clone());
+            let json = line.strip_prefix("llmenv-trace ").unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+            proptest::prop_assert_eq!(&parsed["v"], &serde_json::json!(1));
+            proptest::prop_assert_eq!(&parsed["op"], &serde_json::json!(op));
+            for (key, value) in &map {
+                proptest::prop_assert_eq!(&parsed[key.as_str()], value);
+            }
+            proptest::prop_assert!(!line.contains('\n'), "a marker is one line");
+        }
+
+        // `json_str` never panics, and it reads back any string field of a JSON object.
+        #[test]
+        fn json_str_never_panics_and_reads_back_a_string_field(
+            text in "\\PC{0,60}",
+            key in "[a-z_]{1,10}",
+            value in "\\PC{0,30}",
+        ) {
+            let _ = json_str(&text, &key);
+            let payload = serde_json::json!({ key.clone(): value.clone() }).to_string();
+            proptest::prop_assert_eq!(json_str(&payload, &key), Some(value));
         }
     }
 }

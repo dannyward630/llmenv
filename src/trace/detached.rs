@@ -49,12 +49,31 @@ pub(crate) fn emit_detached_trace(job: &DetachedJob<'_>) {
     };
     let line = crate::trace::lines::detached_line(job.kind, stats, job.request_id);
     emit_trace_line(&line);
-    if std::env::var_os("LLMENV_TRACE_FILE").is_none() {
+    if crate::trace::file_sink_path().is_none() {
         match llmenv_paths::state_dir() {
-            Ok(dir) => crate::trace::append_trace_line(&dir.join("detached-trace.log"), &line),
+            Ok(dir) => append_to_state_log(&dir.join(STATE_LOG), &line),
             Err(e) => tracing::warn!("detached trace: no state dir, line dropped: {e:#}"),
         }
     }
+}
+
+/// The detached job log in the state dir, used when `LLMENV_TRACE_FILE` is unset.
+const STATE_LOG: &str = "detached-trace.log";
+
+/// The size at which the state log moves to `<name>.1`. One older copy is kept, so the pair stays
+/// near twice this size. A detached job runs after every session, so the log cannot grow without a
+/// bound.
+const STATE_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+fn append_to_state_log(path: &std::path::Path, line: &str) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > STATE_LOG_MAX_BYTES) {
+        let mut older = path.as_os_str().to_owned();
+        older.push(".1");
+        if let Err(e) = std::fs::rename(path, &older) {
+            tracing::warn!("detached trace: cannot rotate {}: {e}", path.display());
+        }
+    }
+    crate::trace::append_trace_line(path, line);
 }
 
 /// Return user+sys CPU time of this process as microseconds.
@@ -67,6 +86,12 @@ pub(crate) fn cpu_time_us() -> u64 {
 
 /// Read the string field `key` from a JSON payload, or `None` when the payload or field is absent.
 pub(crate) fn json_str(payload_json: &str, key: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let value: serde_json::Value = match serde_json::from_str(payload_json) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::debug!("detached trace: payload is not JSON, so it has no {key}: {e}");
+            return None;
+        }
+    };
     value.get(key)?.as_str().map(str::to_string)
 }

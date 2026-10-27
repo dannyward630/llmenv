@@ -182,3 +182,57 @@ fn a_changed_line_shape_is_not_shown_by_the_docs() {
         "an added key must not match"
     );
 }
+
+proptest::proptest! {
+    // `shape` never panics, keeps the first token as the tag, and ignores the value of a key.
+    #[test]
+    fn shape_keeps_the_tag_and_ignores_values(
+        text in "\\PC{0,80}",
+        first in "[A-Z_\\[\\]]{1,12}",
+        key in "[a-z_]{1,8}",
+        a in "[0-9a-z]{0,6}",
+        b in "[0-9a-z]{0,6}",
+    ) {
+        let _ = shape(&text);
+        let one = shape(&format!("{first} {key}={a}"));
+        let two = shape(&format!("{first} {key}={b}"));
+        proptest::prop_assert_eq!(&one, &two);
+        proptest::prop_assert_eq!(one.first().map(String::as_str), Some(first.as_str()));
+    }
+
+    // A number followed by `us` or `ms` is always a duration.
+    #[test]
+    fn a_number_with_a_unit_is_a_duration(n in 0u64..u64::MAX, ms in proptest::bool::ANY) {
+        let unit = if ms { "ms" } else { "us" };
+        let got = shape(&format!("[LLMENV_X] {n}{unit}"));
+        proptest::prop_assert_eq!(got.get(1).cloned(), Some(format!("#{unit}")));
+    }
+
+    // Each line builder gives one line with its tag, in a shape that the docs page shows.
+    #[test]
+    fn built_lines_are_single_lines_in_a_documented_shape(
+        name in "[a-z_:.-]{1,20}",
+        micros in 0u64..u64::MAX / 2000,
+        req in 0u64..u64::MAX,
+        status in proptest::option::of(100u16..600),
+        hit in proptest::bool::ANY,
+    ) {
+        let took = Duration::from_micros(micros);
+        let built = [
+            lines::cache_line(&name, hit, took, None),
+            lines::spawn_line(&name, took, SpawnExit::Code(1)),
+            lines::ledger_update_line(&name, took),
+            lines::mcp_call_line(&name, took, req, req, status),
+            lines::detached_line(
+                &name,
+                DetachedStats { wall_us: micros, cpu_us: req, mcp_calls: req, exit: 0 },
+                None,
+            ),
+        ];
+        for line in built {
+            proptest::prop_assert!(line.starts_with("[LLMENV_"));
+            proptest::prop_assert!(!line.contains('\n'));
+            proptest::prop_assert!(docs_show(&line), "no docs entry for {}", line);
+        }
+    }
+}

@@ -98,6 +98,38 @@ pub fn is_executable(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// Open `path` for appending as an owner-only log, and create it when it is missing.
+///
+/// A new file gets mode 0o600, and an existing looser file is tightened to 0o600. A symlink at
+/// `path` is an error on Unix (`O_NOFOLLOW`), so a planted link cannot redirect the appends. Use
+/// this for a log that can hold paths, request ids, or child output.
+///
+/// # Errors
+/// The file cannot be opened or created, `path` is a symlink, or the mode cannot be set.
+pub fn open_append_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+            .open(path)?;
+        if file.metadata()?.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    }
+}
+
 fn write_owner_only_unnamed(path: &Path, content: &[u8], executable: bool) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -162,6 +194,39 @@ mod tests {
         assert!(
             delta.skipped >= 1,
             "the second write of the same bytes is skipped"
+        );
+    }
+
+    // The log is born owner-only, a looser existing log is tightened, and a symlink is refused.
+    #[cfg(unix)]
+    #[test]
+    fn open_append_owner_only_makes_tightens_and_refuses_a_link() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode_of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let fresh = dir.path().join("fresh.log");
+        writeln!(open_append_owner_only(&fresh).unwrap(), "one").unwrap();
+        writeln!(open_append_owner_only(&fresh).unwrap(), "two").unwrap();
+        assert_eq!(mode_of(&fresh), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&fresh).unwrap(),
+            "one\ntwo\n",
+            "it appends"
+        );
+
+        let loose = dir.path().join("loose.log");
+        std::fs::write(&loose, b"x").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        open_append_owner_only(&loose).unwrap();
+        assert_eq!(mode_of(&loose), 0o600);
+
+        let link = dir.path().join("link.log");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        assert!(
+            open_append_owner_only(&link).is_err(),
+            "a symlink must be refused"
         );
     }
 

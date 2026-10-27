@@ -203,6 +203,24 @@ mod tests {
                 "auth/credentials/keychain.rs",
                 include_str!("auth/credentials/keychain.rs"),
             ),
+            (
+                "materialize/open_files.rs",
+                include_str!("materialize/open_files.rs"),
+            ),
+            (
+                "task/session/checkpoint.rs",
+                include_str!("task/session/checkpoint.rs"),
+            ),
+            (
+                "adapter/claude_code/version.rs",
+                include_str!("adapter/claude_code/version.rs"),
+            ),
+            ("mcp/cbm_roots.rs", include_str!("mcp/cbm_roots.rs")),
+            ("cli/doctor.rs", include_str!("cli/doctor.rs")),
+            (
+                "cli/upgrade/install.rs",
+                include_str!("cli/upgrade/install.rs"),
+            ),
         ];
         for (name, text) in files {
             let code = text.split("#[cfg(test)]").next().unwrap_or(text);

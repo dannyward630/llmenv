@@ -36,7 +36,7 @@ pub(crate) fn ledger_update_line(op: &str, elapsed: Duration) -> String {
     format!("[LLMENV_LEDGER] {op} {}us", elapsed.as_micros())
 }
 
-/// The fields of the keyed `[LLMENV_LEDGER]` line. A `None` prints as empty or zero.
+/// The fields of the keyed `[LLMENV_LEDGER]` line. A `None` means the step did not run.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct LedgerFields {
     pub lock_attempts: Option<u32>,
@@ -48,16 +48,28 @@ pub(crate) struct LedgerFields {
 }
 
 /// `[LLMENV_LEDGER] <flow> lock_attempts=<n> lock_wait_us=<n> read_us=<n> write_us=<n> bytes=<n>
-/// state_unsaved=<bool>`
+/// state_unsaved=<bool>`. A field for a step that did not run prints `na`, never a made-up zero.
 pub(crate) fn ledger_flow_line(flow: &str, f: LedgerFields) -> String {
-    let zero = |v: Option<u64>| v.unwrap_or(0);
-    let attempts = f.lock_attempts.unwrap_or(0);
-    let (wait, read, write) = (zero(f.lock_wait_us), zero(f.read_us), zero(f.write_us));
-    let bytes = f.bytes.map(|v| v.to_string()).unwrap_or_default();
-    let unsaved = f.state_unsaved.map(|v| v.to_string()).unwrap_or_default();
+    fn show<T: std::fmt::Display>(v: Option<T>) -> String {
+        v.map_or_else(|| "na".to_string(), |v| v.to_string())
+    }
+    let LedgerFields {
+        lock_attempts,
+        lock_wait_us,
+        read_us,
+        write_us,
+        bytes,
+        state_unsaved,
+    } = f;
     format!(
-        "[LLMENV_LEDGER] {flow} lock_attempts={attempts} lock_wait_us={wait} read_us={read} \
-         write_us={write} bytes={bytes} state_unsaved={unsaved}"
+        "[LLMENV_LEDGER] {flow} lock_attempts={} lock_wait_us={} read_us={} write_us={} \
+         bytes={} state_unsaved={}",
+        show(lock_attempts),
+        show(lock_wait_us),
+        show(read_us),
+        show(write_us),
+        show(bytes),
+        show(state_unsaved),
     )
 }
 
@@ -99,6 +111,9 @@ pub(crate) struct DetachedStats {
     pub exit: i32,
 }
 
+/// The longest request id a detached line prints.
+const MAX_REQUEST_ID_CHARS: usize = 128;
+
 /// `[LLMENV_DETACHED] <kind> <us>us cpu_us=<n> mcp_calls=<n> exit=<code>[ request_id=<id>]`
 pub(crate) fn detached_line(kind: &str, s: DetachedStats, request_id: Option<&str>) -> String {
     let DetachedStats {
@@ -111,7 +126,12 @@ pub(crate) fn detached_line(kind: &str, s: DetachedStats, request_id: Option<&st
         "[LLMENV_DETACHED] {kind} {wall_us}us cpu_us={cpu_us} mcp_calls={mcp_calls} exit={exit}"
     );
     if let Some(id) = request_id.filter(|id| !id.is_empty()) {
-        line.push_str(&format!(" request_id={}", crate::util::escape_control(id)));
+        // A request id is a short hash. The cap keeps one line short if a payload carries more.
+        let id: String = crate::util::escape_control(id)
+            .chars()
+            .take(MAX_REQUEST_ID_CHARS)
+            .collect();
+        line.push_str(&format!(" request_id={id}"));
     }
     line
 }

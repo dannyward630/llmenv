@@ -152,12 +152,14 @@ Emitted when adaptive recall ledger timing is enabled.
 Fields:
 
 - `<flow>` — flow name: `session_start`, `turn_start`, `subagent_start`, or `post_tool_use_failure`.
-- `lock_attempts=<n>` — number of lock polling attempts (always present).
+- `lock_attempts=<n>` — number of lock polling attempts.
 - `lock_wait_us=<n>` — time spent waiting for the lock in microseconds.
 - `read_us=<n>` — time to read the ledger file in microseconds.
 - `write_us=<n>` — time to write the ledger file in microseconds.
 - `bytes=<n>` — number of bytes in the ledger file (empty when unavailable).
 - `state_unsaved=<true|false>` — whether the change did not reach disk: a busy lock, an unreadable ledger, or a failed save.
+
+A field for a step that did not run prints `na`. A busy lock prints `na` for `read_us`, `write_us`, and `bytes`.
 
 A ledger update from `post_tool_batch` or `subagent_task` prints a shorter line with its total time:
 
@@ -260,19 +262,20 @@ Fields:
   `icm-store` and `session-log-record` only.
 
 Emitted from the child entrypoints of all detached job types when
-`LLMENV_TRACE_TIMING` is set. A detached job has no visible stderr, so the line
+a trace sink is on. A detached job has no visible stderr, so the line
 also goes to `LLMENV_TRACE_FILE`, or to `detached-trace.log` in the state
-directory when that variable is unset. (added in v3.14.0)
+directory when that variable is unset. That log moves to `detached-trace.log.1` at 1 MiB, so it stays bounded.
+(added in v3.14.0)
 
 ## JSON trace file format
 
 When `LLMENV_TRACE_FILE` is set, every trace line is appended as one JSON object
-to the named file. The object carries `"ts"` (Unix-epoch-seconds), `"pid"`, and
+to the named file. The object carries `"ts"` (Unix epoch seconds, a number), `"pid"`, and
 `"line"` (the original text). A consumer can reconstruct the original text while
 still being able to parse the file as JSON Lines.
 
 ```json
-{"ts": "1729700000", "pid": 12345, "line": "[LLMENV_CACHE] content_hash hit 1.234ms"}
+{"ts": 1729700000, "pid": 12345, "line": "[LLMENV_CACHE] content_hash hit 1.234ms"}
 ```
 
 ## Versioning

@@ -1823,10 +1823,8 @@ async fn run_memory_actions(
         action.run(client, query, chunk).await
     })
     .await;
-    // Same env var that gates hook-run's other stderr telemetry (#1261).
-    let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
-    if let Some(line) = budget.trace_line(tracing_enabled) {
-        eprintln!("{line}");
+    if let Some(line) = budget.trace_line(crate::trace::enabled()) {
+        crate::trace::emit_trace_line(&line);
     }
     HookText {
         memory: text,
@@ -3179,7 +3177,7 @@ fn is_consolidation_child(guard: Option<&std::ffi::OsStr>) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use crate::trace::{HookTiming, trace_timing_json};
+    use crate::trace::{HookTiming, hook_marker};
     use serde_json::json;
 
     #[test]
@@ -3939,15 +3937,19 @@ mod tests {
         let t0 = std::time::Instant::now();
         let t_config = t0 + std::time::Duration::from_micros(10);
 
-        let only_config = trace_timing_json(HookTiming::new(t0, t_config));
+        let only_config = hook_marker(HookTiming::new(t0, t_config));
         assert_eq!(
             keys_of(&only_config),
-            BTreeSet::from(["v".to_string(), "config_load_us".to_string()]),
+            BTreeSet::from([
+                "v".to_string(),
+                "op".to_string(),
+                "config_load_us".to_string()
+            ]),
             "an early return before scope eval must report v and config_load_us"
         );
 
         let t_scope = t_config + std::time::Duration::from_micros(20);
-        let through_scope = trace_timing_json(HookTiming {
+        let through_scope = hook_marker(HookTiming {
             t_scope: Some(t_scope),
             ..HookTiming::new(t0, t_config)
         });
@@ -3955,6 +3957,7 @@ mod tests {
             keys_of(&through_scope),
             BTreeSet::from([
                 "v".to_string(),
+                "op".to_string(),
                 "config_load_us".to_string(),
                 "scope_eval_us".to_string(),
             ]),
@@ -3963,7 +3966,7 @@ mod tests {
 
         let t_chunk = t_scope + std::time::Duration::from_micros(30);
         let t_end = t_chunk + std::time::Duration::from_micros(40);
-        let full = trace_timing_json(HookTiming {
+        let full = hook_marker(HookTiming {
             t_scope: Some(t_scope),
             t_chunk: Some(t_chunk),
             t_end: Some(t_end),
@@ -3973,6 +3976,7 @@ mod tests {
             keys_of(&full),
             BTreeSet::from([
                 "v".to_string(),
+                "op".to_string(),
                 "config_load_us".to_string(),
                 "scope_eval_us".to_string(),
                 "prep_us".to_string(),
@@ -4006,7 +4010,7 @@ mod tests {
             let t_chunk = t_scope + std::time::Duration::from_secs(chunk_gap_secs);
             let t_end = t_chunk + std::time::Duration::from_secs(end_gap_secs);
 
-            let v = trace_timing_json(HookTiming {
+            let v = hook_marker(HookTiming {
             t_scope: Some(t_scope),
             t_chunk: Some(t_chunk),
             t_end: Some(t_end),

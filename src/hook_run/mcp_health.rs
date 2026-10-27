@@ -67,7 +67,13 @@ async fn probe_stdio(
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("cannot start `{command}`"))?;
+    let started = std::time::Instant::now();
     let answered = tokio::time::timeout(timeout, handshake(&mut child, command)).await;
+    crate::trace::emit_spawn_trace(
+        "probe:mcp-health",
+        started.elapsed(),
+        crate::trace::SpawnExit::of_probe(answered.as_ref().is_ok_and(Result::is_ok)),
+    );
     // Reap the probe process now. `kill_on_drop` is only the backstop for an early return.
     if let Err(e) = child.kill().await {
         tracing::warn!(command, error = %e, "cannot stop the MCP health probe process");

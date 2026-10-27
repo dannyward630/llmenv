@@ -19,8 +19,8 @@ pub use names::{
     cwd_under_prefix, has_parent_component, is_unsafe_join_target, is_valid_short_name,
 };
 pub use owner_only::{
-    create_dir_owner_only, is_executable, write_owner_only, write_owner_only_executable,
-    write_owner_only_like,
+    create_dir_owner_only, is_executable, open_append_owner_only, write_owner_only,
+    write_owner_only_executable, write_owner_only_like,
 };
 
 /// `read_dir` that treats a missing directory as "nothing to iterate":

@@ -14,7 +14,7 @@ use crate::trace::emit_json_trace;
 /// earlier end that ran, so a phase that did not run (`None`) is left out and does not break
 /// the chain.
 pub(crate) fn emit_phase_trace(op: &str, t0: Instant, marks: &[(&str, Option<Instant>)]) {
-    emit_json_trace(op, serde_json::Value::Object(phase_fields(t0, marks)));
+    emit_json_trace(op, phase_fields(t0, marks));
 }
 
 fn phase_fields(
@@ -69,5 +69,32 @@ mod tests {
             .filter_map(|v| v.as_u64())
             .sum();
         assert_eq!(sum, 40);
+    }
+
+    proptest::proptest! {
+        // For marks in time order, the emitted values add up to the offset of the last mark that
+        // ran, and the keys are exactly the names of the marks that ran.
+        #[test]
+        fn phases_add_up_to_the_last_mark_that_ran(
+            steps in proptest::collection::vec((0u64..10_000, proptest::bool::ANY), 0..8),
+        ) {
+            let t0 = Instant::now();
+            let mut at = 0u64;
+            let mut last_ran = 0u64;
+            let names: Vec<String> = (0..steps.len()).map(|i| format!("p{i}_us")).collect();
+            let mut marks = Vec::new();
+            for ((step, ran), name) in steps.iter().zip(&names) {
+                at += step;
+                if *ran {
+                    last_ran = at;
+                }
+                marks.push((name.as_str(), ran.then(|| t0 + Duration::from_micros(at))));
+            }
+            let fields = phase_fields(t0, &marks);
+            let sum: u64 = fields.values().filter_map(|v| v.as_u64()).sum();
+            proptest::prop_assert_eq!(sum, last_ran);
+            let ran_names = steps.iter().zip(&names).filter(|((_, ran), _)| *ran).count();
+            proptest::prop_assert_eq!(fields.len(), ran_names);
+        }
     }
 }
