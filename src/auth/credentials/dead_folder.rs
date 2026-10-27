@@ -19,8 +19,12 @@ fn marker_path(adapter_root: &Path) -> PathBuf {
 /// Returns an error when the marker cannot be written.
 pub(super) fn mark(adapter_root: &Path, now_ms: i64) -> anyhow::Result<()> {
     let path = marker_path(adapter_root);
-    crate::paths::write_owner_only_atomic(&path, now_ms.to_string().as_bytes())
-        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))
+    crate::paths::write_owner_only_atomic(&path, now_ms.to_string().as_bytes()).map_err(|e| {
+        anyhow::anyhow!(
+            "writing {}: {e}. Fix: make sure the adapter state directory is writable.",
+            path.display()
+        )
+    })
 }
 
 /// True when the last dead folder read is younger than [`DEAD_FOLDER_TTL_MS`].
@@ -31,15 +35,24 @@ pub(super) fn mark(adapter_root: &Path, now_ms: i64) -> anyhow::Result<()> {
 /// Returns an error when the marker exists but cannot be read.
 pub(super) fn is_recent(adapter_root: &Path, now_ms: i64) -> anyhow::Result<bool> {
     let path = marker_path(adapter_root);
-    let text = match std::fs::read_to_string(&path) {
+    let text = match crate::paths::bounded::state_text_io(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "reading {}: {e}. Fix: delete the file; the next export then reads the keychain once.",
+                path.display()
+            ));
+        }
     };
     match text.trim().parse::<i64>() {
         Ok(at) => Ok((0..DEAD_FOLDER_TTL_MS).contains(&now_ms.saturating_sub(at))),
         Err(_) => {
-            tracing::debug!("{} does not hold a timestamp; ignoring it", path.display());
+            // The keychain is read on every export until the next dead read rewrites the file.
+            tracing::warn!(
+                "{} does not hold a timestamp, so the keychain is read on each export. Fix: delete the file.",
+                path.display()
+            );
             Ok(false)
         }
     }
@@ -54,7 +67,10 @@ pub(super) fn clear(adapter_root: &Path) -> anyhow::Result<()> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("removing {}: {e}", path.display())),
+        Err(e) => Err(anyhow::anyhow!(
+            "removing {}: {e}. Fix: delete the file by hand, then run the export again.",
+            path.display()
+        )),
     }
 }
 
@@ -148,5 +164,24 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         clear(root.path()).unwrap();
         assert!(!is_recent(root.path(), 0).unwrap());
+    }
+
+    #[test]
+    fn the_window_holds_at_the_extremes_of_the_clock() {
+        let root = tempfile::tempdir().unwrap();
+        mark(root.path(), i64::MIN).unwrap();
+        assert!(!is_recent(root.path(), i64::MAX).unwrap());
+        mark(root.path(), i64::MAX).unwrap();
+        assert!(!is_recent(root.path(), i64::MIN).unwrap());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn recency_is_the_window_for_any_marker_and_clock(at in proptest::prelude::any::<i64>(), now in proptest::prelude::any::<i64>()) {
+            let root = tempfile::tempdir().unwrap();
+            mark(root.path(), at).unwrap();
+            let expected = (0..DEAD_FOLDER_TTL_MS).contains(&now.saturating_sub(at));
+            proptest::prop_assert_eq!(is_recent(root.path(), now).unwrap(), expected);
+        }
     }
 }

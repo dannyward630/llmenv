@@ -26,10 +26,21 @@ pub(crate) fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credenti
         Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
     };
     match serde_json::from_slice::<serde_json::Value>(&bytes) {
-        Ok(value) => Ok(Credentials::from_json(value)),
+        Ok(value) => {
+            let creds = Credentials::from_json(value);
+            if creds.is_none() {
+                tracing::warn!(
+                    "cached credential at {} holds no OAuth credential, so it is ignored and then \
+                     replaced. Fix: run `llmenv login`.",
+                    path.display()
+                );
+            }
+            Ok(creds)
+        }
         Err(e) => {
-            tracing::debug!(
-                "cached credential blob at {} is not usable (line {}, column {})",
+            tracing::warn!(
+                "cached credential at {} is not valid JSON (line {}, column {}), so it is ignored \
+                 and then replaced. Fix: run `llmenv login`.",
                 path.display(),
                 e.line(),
                 e.column()
@@ -106,7 +117,9 @@ pub(crate) fn inject_if_missing(
         return Ok(false);
     };
     if cached.is_expired(now_ms()) {
-        tracing::debug!("cached credential has expired; not injecting (re-run `llmenv login`)");
+        tracing::warn!(
+            "cached credential has expired, so it is not injected. Fix: run `llmenv login`."
+        );
         return Ok(false);
     }
     if read_backend(backend, config_dir)?.is_some() {
