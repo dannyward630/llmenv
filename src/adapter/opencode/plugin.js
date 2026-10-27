@@ -246,10 +246,17 @@ function state(sessionID) {
 function startSession(sessionID) {
   const s = state(sessionID);
   if (!s.started) {
-    s.started = runHooks("SessionStart", sessionID, { source: "startup" }).then((out) => {
-      s.start = out.context;
-      queueOutcome(s, out);
-    });
+    s.started = runHooks("SessionStart", sessionID, { source: "startup" })
+      .then((out) => {
+        s.start = out.context;
+        queueOutcome(s, out);
+      })
+      .catch((e) => {
+        // The chain must not reject, or each later tool call would throw a raw error with no fix.
+        const text = `llmenv: the SessionStart hooks could not run: ${e?.message ?? e}. Fix: run \`llmenv doctor\`.`;
+        console.error(text);
+        s.errors.push(text);
+      });
   }
   return s.started;
 }
@@ -347,6 +354,9 @@ export default {
   setup: async (ctx) => {
     if (ctx.location?.directory) workDir = ctx.location.directory;
     await ctx.tool.hook("execute.before", async (e) => {
+      // Without a usable hook table no gate runs, so a tool call is refused with the reason
+      // rather than run unguarded.
+      if (tableError) throw new Error(tableError);
       await startSession(e.sessionID);
       const neutral = toNeutral(e.tool, e.input ?? {});
       const out = await runHooks("PreToolUse", e.sessionID, { tool_name: neutral.name, tool_input: neutral.input }, neutral.name);

@@ -109,3 +109,34 @@ console.log(JSON.stringify({ parts: m.systemParts("s1") }));
         "{out}"
     );
 }
+
+/// With a table that cannot load, no gate runs, so a tool call is refused with the reason.
+/// Otherwise a malformed table would turn every gate off without a block.
+#[test]
+fn a_broken_table_refuses_every_tool_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = write_plugin(dir.path(), &serde_json::json!({ "hooks": [] }));
+    let driver = r#"
+const m = await import(process.argv[1]);
+const hooks = {};
+const ctx = {
+  location: { directory: process.argv[2] },
+  tool: { hook: async (name, cb) => { hooks[name] = cb; } },
+  session: { hook: async () => {} },
+  event: { subscribe: () => (async function* () {})() },
+};
+await m.default.setup(ctx);
+let message = null;
+try {
+  await hooks["execute.before"]({ sessionID: "s1", tool: "bash", input: {} });
+} catch (e) {
+  message = e.message;
+}
+console.log(JSON.stringify({ message }));
+"#;
+    let out = run_node(driver, &[&plugin, dir.path()]);
+    let message = out["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the call ran: {out}"));
+    assert!(message.contains("hook table shape"), "{out}");
+}
