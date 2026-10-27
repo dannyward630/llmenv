@@ -22,16 +22,13 @@ pub(crate) fn emit_detached_trace(job: &DetachedJob<'_>) {
     if !crate::trace::enabled() {
         return;
     }
-    let wall_us = u64::try_from(job.started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let cpu_us = cpu_time_us();
-    let mcp_calls = crate::mcp_trace::mcp_call_count();
-    let (kind, exit) = (job.kind, job.exit);
-    let mut line = format!(
-        "[LLMENV_DETACHED] {kind} {wall_us}us cpu_us={cpu_us} mcp_calls={mcp_calls} exit={exit}"
-    );
-    if let Some(id) = job.request_id.filter(|id| !id.is_empty()) {
-        line.push_str(&format!(" request_id={}", crate::util::escape_control(id)));
-    }
+    let stats = crate::trace::lines::DetachedStats {
+        wall_us: u64::try_from(job.started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        cpu_us: cpu_time_us(),
+        mcp_calls: crate::mcp_trace::mcp_call_count(),
+        exit: job.exit,
+    };
+    let line = crate::trace::lines::detached_line(job.kind, stats, job.request_id);
     emit_trace_line(&line);
     if std::env::var_os("LLMENV_TRACE_FILE").is_none() {
         match llmenv_paths::state_dir() {

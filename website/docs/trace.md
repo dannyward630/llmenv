@@ -78,14 +78,13 @@ Emitted for MCP handshake and tool calls.
 Handshake:
 
 ```text
-[LLMENV_MCP_CALL] <method> <duration>us req=<bytes> resp=<bytes> \
-[status=<code>]
+[LLMENV_MCP_CALL] <method> <duration>us req=<bytes> resp=<bytes>[ status=<code>]
 ```
 
 - `<method>` — `initialize` or `notifications/initialized`.
 - `<duration>us` — elapsed time in microseconds.
 - `req=<bytes>` — request payload size in bytes.
-- `resp=<bytes>` — response payload size in bytes.
+- `resp=<bytes>` — response body size in bytes. It is `0` when the call does not read the reply body.
 - `status=<code>` — present only on failure, the HTTP status code.
 
 Tool calls:
@@ -147,19 +146,24 @@ Fields:
 Emitted when adaptive recall ledger timing is enabled.
 
 ```text
-[LLMENV_LEDGER] <op> lock_attempts=<n> lock_wait_us=<n> read_us=<n> \
-write_us=<n> bytes=<n> state_unsaved=<true|false>
+[LLMENV_LEDGER] <flow> lock_attempts=<n> lock_wait_us=<n> read_us=<n> write_us=<n> bytes=<n> state_unsaved=<true|false>
 ```
 
 Fields:
 
-- `<op>` — flow name (e.g. `session_start`, `turn_start`, `subagent_start`).
+- `<flow>` — flow name. Only `session_start` prints this form today.
 - `lock_attempts=<n>` — number of lock polling attempts (always present).
 - `lock_wait_us=<n>` — time spent waiting for the lock in microseconds.
 - `read_us=<n>` — time to read the ledger file in microseconds.
 - `write_us=<n>` — time to write the ledger file in microseconds.
 - `bytes=<n>` — number of bytes in the ledger file (empty when unavailable).
-- `state_unsaved=<true|false>` — whether a state update was skipped.
+- `state_unsaved=<true|false>` — whether the change did not reach disk: a busy lock, an unreadable ledger, or a failed save.
+
+A ledger update from `post_tool_batch` or `subagent_task` prints a shorter line with its total time:
+
+```text
+[LLMENV_LEDGER] <op> <duration>us
+```
 
 Emitted from `src/hook_run/adaptive.rs` when `LLMENV_TRACE_TIMING` is set.
 (added in v3.14.0)
@@ -169,9 +173,7 @@ Emitted from `src/hook_run/adaptive.rs` when `LLMENV_TRACE_TIMING` is set.
 Emitted after each recall wave when the recall budget is non-empty.
 
 ```text
-[LLMENV_CONTEXT] recall_entries=<n> recall_bytes=<n> injected_entries=<n> \
-injected_bytes=<n> duplicate_records=<n> already_sent=<n> omitted=<n> \
-skipped_actions=<n>
+[LLMENV_CONTEXT] recall_entries=<n> recall_bytes=<n> injected_entries=<n> injected_bytes=<n> duplicate_records=<n> already_sent=<n> omitted=<n> skipped_actions=<n>
 ```
 
 Fields:
@@ -208,6 +210,19 @@ All sub-phase fields are in microseconds and are present only when the
 sub-phase ran. The `session_start` sub-phases run inside `prep_us`, so
 `prep_us` minus their sum is the time spent on other work. The memory calls
 inside `mcp_us` each print their own `[LLMENV_MCP_CALL]` line. (added in v3.14.0)
+
+### `llmenv-trace` statusline marker
+
+Emitted once per `llmenv statusline` render. (added in v3.14.0)
+
+```json
+llmenv-trace {"v": 1, "op": "statusline", "total_us": <n>, "<widget>_us": <n>, ...}
+```
+
+- `total_us` — wall time of the whole render in microseconds.
+- `<widget>_us` — time to render each widget that ran, such as `branch_us` or `pr_us`.
+
+The marker goes to stderr or to `LLMENV_TRACE_FILE`. Stdout is the same with tracing on or off.
 
 ### Guard command trace markers
 

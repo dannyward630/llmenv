@@ -211,7 +211,6 @@ impl McpHttpClient {
             );
             return Err(anyhow!("MCP initialize returned HTTP {status}: {body}"));
         }
-        let _init_elapsed = init_start.elapsed();
         let sid = resp
             .headers()
             .get("mcp-session-id")

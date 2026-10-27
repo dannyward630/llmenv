@@ -16,9 +16,9 @@ pub(crate) fn record_materialize(
         return;
     }
     let wrote = llmenv_paths::write_stats_snapshot().since(before);
-    let (written, skipped, bytes) = (wrote.files, wrote.skipped, wrote.bytes);
-    let us = elapsed.as_micros();
-    emit_trace_line(&format!(
-        "[LLMENV_MATERIALIZE] {adapter_name} written={written} skipped={skipped} bytes={bytes} {us}us"
+    emit_trace_line(&crate::trace::lines::materialize_line(
+        adapter_name,
+        wrote,
+        elapsed,
     ));
 }

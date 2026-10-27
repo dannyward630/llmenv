@@ -37,13 +37,8 @@ pub(crate) fn emit_mcp_handshake_trace(
     if !crate::trace::enabled() {
         return;
     }
-    let us = elapsed.as_micros();
-    let status_str = match status {
-        Some(code) => format!(" status={code}"),
-        None => String::new(),
-    };
-    emit_trace_line(&format!(
-        "[LLMENV_MCP_CALL] {method} {us}us req={req_bytes} resp={resp_bytes}{status_str}"
+    emit_trace_line(&crate::trace::lines::mcp_call_line(
+        method, elapsed, req_bytes, resp_bytes, status,
     ));
 }
 
@@ -53,8 +48,7 @@ pub(crate) fn emit_mcp_call_trace(tool: &str, elapsed: Duration, req_bytes: u64,
     if !crate::trace::enabled() {
         return;
     }
-    let us = elapsed.as_micros();
-    emit_trace_line(&format!(
-        "[LLMENV_MCP_CALL] {tool} {us}us req={req_bytes} resp={resp_bytes}"
+    emit_trace_line(&crate::trace::lines::mcp_call_line(
+        tool, elapsed, req_bytes, resp_bytes, None,
     ));
 }

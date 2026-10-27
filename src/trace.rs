@@ -114,21 +114,8 @@ pub struct SessionStartPhases {
 /// Emit a `[LLMENV_CACHE] <name> <hit|miss> <duration>ms[ <extra>]` line to
 /// the trace sink.
 pub(crate) fn emit_cache_trace(name: &str, hit: bool, elapsed: Duration, extra: Option<&str>) {
-    if !crate::trace::enabled() {
-        return;
-    }
-    let status = if hit { "hit" } else { "miss" };
-    let ms = elapsed.as_secs_f64() * 1000.0;
-    match extra {
-        Some(extra) => {
-            let escaped = crate::util::escape_control(extra);
-            emit_trace_line(&format!(
-                "[LLMENV_CACHE] {name} {status} {ms:.3}ms {escaped}"
-            ));
-        }
-        None => {
-            emit_trace_line(&format!("[LLMENV_CACHE] {name} {status} {ms:.3}ms"));
-        }
+    if enabled() {
+        emit_trace_line(&lines::cache_line(name, hit, elapsed, extra));
     }
 }
 
@@ -295,29 +282,18 @@ impl SpawnExit {
 /// line to the trace sink. The label is a fixed string such as `probe:ssid` — never print
 /// arguments, because they can carry secrets such as keychain item names.
 pub(crate) fn emit_spawn_trace(label: &str, elapsed: Duration, exit: SpawnExit) {
-    if !crate::trace::enabled() {
-        return;
+    if enabled() {
+        emit_trace_line(&lines::spawn_line(label, elapsed, exit));
     }
-    let us = elapsed.as_micros();
-    let exit_str = match exit {
-        SpawnExit::Code(code) => code.to_string(),
-        SpawnExit::Signal => "signal".to_string(),
-        SpawnExit::Timeout => "timeout".to_string(),
-        SpawnExit::Error => "spawn-error".to_string(),
-        SpawnExit::Detached => "detached".to_string(),
-    };
-    emit_trace_line(&format!("[LLMENV_SPAWN] {label} {us}us exit={exit_str}"));
 }
 
 /// Emit a `[LLMENV_LEDGER] <op> <duration>us` line to the trace sink.
 ///
 /// Tracks the time to load or update a per-session recall ledger file.
 pub(crate) fn emit_ledger_trace(op: &str, elapsed: Duration) {
-    if !crate::trace::enabled() {
-        return;
+    if enabled() {
+        emit_trace_line(&lines::ledger_update_line(op, elapsed));
     }
-    let us = elapsed.as_micros();
-    emit_trace_line(&format!("[LLMENV_LEDGER] {op} {us}us"));
 }
 
 /// Return the current time as a Unix-epoch-seconds string.
@@ -335,6 +311,10 @@ fn current_timestamp() -> String {
 
 /// FFI bindings for `getrusage` on macOS.
 mod detached;
+pub(crate) mod lines;
+
+#[cfg(test)]
+pub(crate) mod docs_sync;
 
 pub(crate) use detached::{DetachedJob, emit_detached_trace, json_str};
 

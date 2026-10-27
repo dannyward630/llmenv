@@ -112,23 +112,21 @@ fn report(
     if let Some(line) = outage_notice(flow, outcome) {
         agent_notice::record_logged(line);
     }
-    // Same env var that gates hook-run's other stderr telemetry (#1261).
-    let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
-    if let Some(line) = budget.trace_line(tracing_enabled) {
-        eprintln!("{line}");
+    if let Some(line) = budget.trace_line(crate::trace::enabled()) {
+        crate::trace::emit_trace_line(&line);
     }
     // Emit ledger timing when the adaptive recall trace is enabled (#3012).
     if let (true, Some(l)) = (crate::trace::enabled(), ledger) {
-        let us = |v: Option<u64>| v.unwrap_or(0);
-        let la = l.lock_attempts.unwrap_or(0);
-        let lw = us(l.lock_wait_us);
-        let ru = us(l.read_us);
-        let wu = us(l.write_us);
-        let lb = l.ledger_bytes.map(|v| v.to_string()).unwrap_or_default();
-        let su = l.state_unsaved.map(|v| v.to_string()).unwrap_or_default();
-        crate::trace::emit_trace_line(&format!(
-            "[LLMENV_LEDGER] {flow} lock_attempts={la} lock_wait_us={lw} \
-             read_us={ru} write_us={wu} bytes={lb} state_unsaved={su}"
+        crate::trace::emit_trace_line(&crate::trace::lines::ledger_flow_line(
+            flow,
+            crate::trace::lines::LedgerFields {
+                lock_attempts: l.lock_attempts,
+                lock_wait_us: l.lock_wait_us,
+                read_us: l.read_us,
+                write_us: l.write_us,
+                bytes: l.ledger_bytes,
+                state_unsaved: l.state_unsaved,
+            },
         ));
     }
 }
