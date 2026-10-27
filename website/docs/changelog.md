@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Skip a write when an owner-only file already holds the same bytes at the same mode, so a repeat `llmenv regenerate` leaves current files untouched. [#3020]
+- Skip a write when an owner-only file already holds the same bytes at the same mode, so a repeat `llmenv regenerate` leaves current files untouched. An existing file with a looser mode, such as 0644, is now tightened to 0600 on its next write. [#3020, #3024]
 - Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]

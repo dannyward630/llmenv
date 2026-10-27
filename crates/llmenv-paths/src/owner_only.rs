@@ -120,8 +120,9 @@ fn write_owner_only_unnamed(path: &Path, content: &[u8], executable: bool) -> st
             .open(path)?;
         // A FIFO with no reader fails the open with ENXIO; one with a reader fails here (#2942).
         crate::check_regular_file(&file)?;
-        if executable {
-            // The open mode applies only to a new file; an existing one keeps its old mode.
+        // The open mode applies only to a new file; an existing one keeps its old mode. Enforce
+        // the owner-only mode, so a looser file is tightened and the next write can be skipped.
+        if file.metadata()?.permissions().mode() & 0o777 != mode {
             file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
         file.write_all(content)?;
@@ -139,6 +140,30 @@ fn write_owner_only_unnamed(path: &Path, content: &[u8], executable: bool) -> st
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    // A file that exists with a looser mode is tightened by the write, and a second write of the
+    // same bytes then changes nothing (#3024).
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_tightens_a_loose_file_and_then_skips() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_owner_only(&path, b"new").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let before = crate::write_stats::snapshot();
+        write_owner_only(&path, b"new").unwrap();
+        let delta = crate::write_stats::snapshot().since(before);
+        assert!(
+            delta.skipped >= 1,
+            "the second write of the same bytes is skipped"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
