@@ -5,33 +5,16 @@
 //! than the retention, and no process holds a path inside it open.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use anyhow::Context;
-
-use crate::materialize::cache::{
-    GcReport, gc_remove_dir, gc_remove_link, is_expired, newest_mtime,
-};
+use crate::materialize::cache::{GcReport, gc_remove_dir, gc_remove_link};
 use crate::materialize::open_files::open_paths;
 use crate::materialize::status_data::dir_size;
 
 mod claude_root;
 
-use claude_root::{is_claude_root, scan_claude_root};
-
-/// One entry that the scan found old enough to remove, and not in use.
-struct Stale {
-    path: PathBuf,
-    is_dir: bool,
-}
-
-/// What a scan of `state/tmp` found. Nothing is removed by a scan.
-#[derive(Default)]
-struct Scan {
-    stale: Vec<Stale>,
-    kept: usize,
-    failed: Vec<PathBuf>,
-}
+mod walk;
+use walk::scan;
 
 /// The stale entries of `state/tmp`: how many, and how many bytes they hold.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -79,8 +62,26 @@ pub fn sweep(
 /// # Errors
 /// Fails when the in-use list cannot be read. See [`open_paths`].
 pub fn stale_summary(state_dir: &Path, older_than: Duration) -> anyhow::Result<StaleSummary> {
-    let in_use = open_paths()?;
-    stale_summary_in(&state_dir.join("tmp"), older_than, &in_use)
+    stale_summary_with(state_dir, older_than, open_paths)
+}
+
+/// [`stale_summary`] with the in-use list supplied on demand.
+///
+/// The in-use list only removes entries from the stale count, so a scan with no in-use list
+/// gives the upper bound. When that bound holds no stale and no unreadable entry, the answer
+/// is final and `lsof` never runs. A `SessionStart` hook needs this: `lsof` lists every open
+/// file on the host, and it can take seconds (#3031).
+fn stale_summary_with(
+    state_dir: &Path,
+    older_than: Duration,
+    in_use: impl FnOnce() -> anyhow::Result<Vec<PathBuf>>,
+) -> anyhow::Result<StaleSummary> {
+    let tmp_root = state_dir.join("tmp");
+    let bound = stale_summary_in(&tmp_root, older_than, &[])?;
+    if bound.count == 0 && bound.unreadable == 0 {
+        return Ok(bound);
+    }
+    stale_summary_in(&tmp_root, older_than, &in_use()?)
 }
 
 /// The summary for `tmp_root`, with the in-use list given by the caller.
@@ -100,88 +101,6 @@ pub fn stale_summary_in(
     })
 }
 
-/// Walk `tmp_root` and sort every entry into stale, kept, or failed. The walk changes nothing.
-fn scan(tmp_root: &Path, older_than: Duration, in_use: &[PathBuf]) -> anyhow::Result<Scan> {
-    let mut scan = Scan::default();
-    let Some(entries) = crate::paths::read_dir_optional(tmp_root)? else {
-        return Ok(scan);
-    };
-    let root = std::fs::canonicalize(tmp_root)
-        .with_context(|| format!("resolving {}", tmp_root.display()))?;
-    let now = SystemTime::now();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                record_failure(&root, &e, &mut scan);
-                continue;
-            }
-        };
-        let name = entry.file_name();
-        let path = root.join(&name);
-        if in_use.iter().any(|used| used.starts_with(&path)) {
-            scan.kept += 1;
-            continue;
-        }
-        let is_dir = match entry.file_type() {
-            Ok(file_type) => file_type.is_dir(),
-            Err(e) => {
-                record_failure(&path, &e, &mut scan);
-                continue;
-            }
-        };
-        // The per-user TMPDIR root is not judged by its own mtime, because that does not show use
-        // (#1379). Its entries are judged one by one instead.
-        if is_dir && is_claude_root(&name) {
-            scan_claude_root(&path, older_than, in_use, now, &mut scan);
-            continue;
-        }
-        judge_entry(&path, is_dir, older_than, now, &mut scan);
-    }
-    Ok(scan)
-}
-
-/// Mark one entry stale when its newest mtime is older than `older_than`. Keep it otherwise.
-fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime, scan: &mut Scan) {
-    let modified = match entry_mtime(path, is_dir) {
-        Ok(modified) => modified,
-        Err(e) => {
-            record_failure(path, &e, scan);
-            return;
-        }
-    };
-    // A future mtime means the clock moved. Keep the entry, because a removal on a bad
-    // clock is not reversible.
-    if modified > now || !is_expired(now, modified, older_than) {
-        scan.kept += 1;
-    } else {
-        scan.stale.push(Stale {
-            path: path.to_path_buf(),
-            is_dir,
-        });
-    }
-}
-
-/// The newest mtime of an entry. A symlink is judged by its own mtime and never followed.
-fn entry_mtime(path: &Path, is_dir: bool) -> anyhow::Result<SystemTime> {
-    if is_dir {
-        return newest_mtime(path);
-    }
-    std::fs::symlink_metadata(path)
-        .and_then(|meta| meta.modified())
-        .with_context(|| format!("stat {}", path.display()))
-}
-
-/// Record an entry the sweep could not read or judge. The entry stays, and the next run retries.
-fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &mut Scan) {
-    tracing::error!(
-        path = %path.display(),
-        error = %error,
-        "state/tmp sweep: cannot read entry; skipping"
-    );
-    scan.failed.push(path.to_path_buf());
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -189,9 +108,41 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
-    use super::{StaleSummary, stale_summary_in, sweep};
+    use super::{StaleSummary, stale_summary_in, stale_summary_with, sweep};
 
     pub(super) const DAY: Duration = Duration::from_secs(86_400);
+
+    #[test]
+    fn summary_never_asks_lsof_when_no_entry_is_a_candidate() {
+        let state = tempfile::tempdir().unwrap();
+        fs::create_dir_all(state.path().join("tmp").join("fresh")).unwrap();
+        let summary = stale_summary_with(state.path(), DAY, || {
+            anyhow::bail!("lsof must not run when nothing is stale")
+        })
+        .unwrap();
+        assert_eq!(summary.count, 0);
+    }
+
+    #[test]
+    fn summary_asks_lsof_when_an_entry_is_stale() {
+        let state = tempfile::tempdir().unwrap();
+        let entry = state.path().join("tmp").join("old");
+        fs::create_dir_all(&entry).unwrap();
+        age_tree(&entry, SystemTime::now() - 2 * DAY);
+        let summary = stale_summary_with(state.path(), DAY, || Ok(Vec::new())).unwrap();
+        assert_eq!(summary.count, 1);
+    }
+
+    #[test]
+    fn summary_keeps_a_stale_entry_that_lsof_reports_in_use() {
+        let state = tempfile::tempdir().unwrap();
+        let entry = state.path().join("tmp").join("busy");
+        fs::create_dir_all(&entry).unwrap();
+        age_tree(&entry, SystemTime::now() - 2 * DAY);
+        let in_use = vec![fs::canonicalize(&entry).unwrap()];
+        let summary = stale_summary_with(state.path(), DAY, || Ok(in_use)).unwrap();
+        assert_eq!(summary.count, 0);
+    }
 
     /// Set the mtime of `path` and of everything under it, so the newest mtime is `when`.
     pub(super) fn age_tree(path: &Path, when: SystemTime) {

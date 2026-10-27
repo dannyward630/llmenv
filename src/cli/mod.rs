@@ -26,6 +26,7 @@ mod setup;
 mod status;
 pub(crate) mod statusline;
 mod style;
+mod task_done;
 mod upgrade;
 
 pub(crate) use style::doctor_info;
@@ -3209,20 +3210,7 @@ fn run_task_command(command: TaskCommand, color: ColorMode) -> anyhow::Result<()
             id,
             force,
             other_session,
-        } => {
-            let audit = guard_task(&state_dir, &id, other_session.as_deref())?;
-            // The caller is resolved before the close, so a failure here leaves the task open.
-            let caller = caller_session_for_task(&state_dir)?;
-            let completed = crate::task::complete_task_by(&state_dir, &id, force, &caller)?;
-            println!("Completed '{}'", completed.task.slug);
-            if let Some(note) = completed.skipped_start_note() {
-                println!("{note}");
-            }
-            if let Some(note) = completed.undone_children_note() {
-                println!("{note}");
-            }
-            record_override(&state_dir, audit)?;
-        }
+        } => task_done::run(&state_dir, &id, force, other_session.as_deref())?,
         TaskCommand::Reopen { ids, other_session } => {
             let audits = ids
                 .iter()
@@ -3632,6 +3620,12 @@ fn run_task_session_command(
                     format!("session '{session_id}' started, but task '{title}' was not added")
                 })?;
                 println!("Added task '{}' ({})", task.slug, task.title);
+            }
+            if tasks.is_empty() {
+                // Known steps added now let the idle reminders catch a step that never starts (#2987).
+                println!(
+                    "Add every known step now with `llmenv task add <title>`, and add `--session <id>` when more than one session is open."
+                );
             }
         }
         TaskSessionCommand::Edit { id, resume_context } => {

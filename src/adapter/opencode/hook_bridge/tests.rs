@@ -4,6 +4,7 @@
 use super::*;
 
 mod bus_events;
+mod gates;
 
 /// A fake opencode 2.x plugin context. It records the hook callbacks, sends one
 /// `session.created` event, and then drives the callbacks the way opencode does.

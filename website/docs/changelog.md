@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
 
+### Fixed
+
+- Stop showing `pr: gh failed` on a branch with no open PR. Real `gh` prints "No pull requests found" with a capital N, and that now counts as no PR. [fix:statusline] [#2975]
+- Print a hint to add the next step when `llmenv task done` closes the last open task in a session. The all-done stop reminder now says that a question blocks only its own step, and that a running CI job is not a stop point. `task session start` without tasks suggests adding the known steps. [fix:task] [#2987]
+- Stop reading the keychain on every shell prompt when the credential is expired. A dead read is held back for five minutes, and a dead folder credential is no longer written over the cache. [fix:auth] [#3008]
+- Run `lsof` in the once-a-day stale `state/tmp` check only when an entry is a candidate. When no entry is stale, the SessionStart hook no longer waits 0.4 to 2.7 s. [fix:materialize] [#3031]
+- Block an opencode `failClosed` hook that exits with any code other than 0 or 2, or dies on a signal. Such a hook used to let the call through. A block from a SessionStart or PostToolUse hook now reaches the agent, hook errors print where they occur, and a malformed hook table is named on every request. [fix:opencode] [#2979]
+
 ### Security
 
 - Update `rustls-webpki` and `webpki-root-certs` to clear RUSTSEC-2026-0382 and RUSTSEC-2026-0383, which accept distrusted certificate intermediates. [chore:deps]

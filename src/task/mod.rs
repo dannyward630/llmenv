@@ -12,12 +12,15 @@
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
 pub(crate) mod core_text;
+mod finish_hints;
 pub(crate) mod ownership;
 pub(crate) mod project;
 pub(crate) mod relation;
 pub(crate) mod reopen;
 mod resolve;
 pub(crate) mod resume;
+pub(crate) use finish_hints::last_task_hint;
+use finish_hints::session_finish_reminders;
 mod tracking;
 pub(crate) use tracking::{Tracking, tracking};
 pub mod session;
@@ -1669,51 +1672,6 @@ fn execution_order(tasks: &[Task]) -> Vec<Task> {
         .into_iter()
         .map(|r| r.task)
         .collect()
-}
-
-/// For every session open for the current project (resolved from the
-/// process's actual cwd — hooks run with cwd set to the project directory)
-/// whose tasks are all done, build a reminder nudging the agent to close it
-/// out. Empty string if none qualify, or on any internal error (degrades
-/// silently — hooks must never block the agent).
-///
-/// Like [`wip_reminder`], this can't tell whether a fully-done session
-/// belongs to the current conversation or a different, concurrently running
-/// one (#1028) — closing out someone else's session is a real mutation of
-/// their bookkeeping, so the nudge is conditioned on recognizing the session
-/// rather than issued as a bare command.
-fn session_finish_reminders(state_dir: &Path, caller: Option<&str>) -> String {
-    for_current_project(|project| match store_for_reminder(state_dir, project) {
-        Ok(_) => finish_reminder_lines(state_dir, project, caller),
-        Err(warning) => warning,
-    })
-}
-
-fn finish_reminder_lines(state_dir: &Path, project: &str, caller: Option<&str>) -> String {
-    let open = match session::try_open_sessions_visible_to(state_dir, project, caller) {
-        Ok(open) => open,
-        Err(e) => return store_warning_text(&e),
-    };
-    let mut lines = Vec::new();
-    for session in open {
-        // A task file that cannot be read must not make a session look finished.
-        let (done, total) = match session::try_session_progress(state_dir, &session.id) {
-            Ok(progress) => progress,
-            Err(e) => return store_warning_text(&e),
-        };
-        if total == 0 || done < total {
-            continue;
-        }
-        let label = session.name.as_deref().unwrap_or(session.id.as_str());
-        lines.push(format!(
-            "All {total} task(s) in session '{label}' ({id}) are done. If you recognize this \
-             as your own session, run `llmenv task session finish {id}` to close it out, or \
-             `llmenv task add <title> --session {id}` to add more work to it. If you don't \
-             recognize it, it belongs to a different session — leave it alone.",
-            id = session.id
-        ));
-    }
-    lines.join("\n\n")
 }
 
 /// Run `reminder` for the current project. A project tag that cannot be resolved is logged, and
