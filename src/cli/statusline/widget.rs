@@ -16,6 +16,8 @@ mod git;
 use git::*;
 mod gh_cmd;
 use gh_cmd::GhPrCmd;
+mod gh_lookup;
+use gh_lookup::{GhFailure, classify_gh_exit};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EngineData {
@@ -574,28 +576,6 @@ impl PrError {
     }
 }
 
-/// A `gh pr view` call that gave no answer. A non-zero exit for "no open PR" or "no remote" is
-/// an answer, not a failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum GhFailure {
-    /// `gh` is not installed.
-    Missing,
-    /// `gh` is not logged in, or its login expired.
-    Unauthenticated,
-    /// A timeout, a failed read or wait, or a spawn error other than a missing binary.
-    Failed,
-}
-
-impl GhFailure {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Missing => "pr: gh missing",
-            Self::Unauthenticated => "pr: gh not logged in",
-            Self::Failed => "pr: gh failed",
-        }
-    }
-}
-
 /// The result of one PR lookup: the PR, `None` for no open PR, or why `gh` gave no answer.
 type PrLookup = Result<Option<PrInfo>, GhFailure>;
 
@@ -796,34 +776,6 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
             Err(GhFailure::Failed)
         }
     }
-}
-
-/// The `gh pr view` errors that mean "there is no PR to show", not a failure.
-const GH_NO_PR_SIGNS: [&str; 3] = [
-    "no pull requests found",
-    "no git remotes found",
-    "not a git repository",
-];
-
-/// The `gh` errors that mean the login is missing or expired.
-const GH_LOGIN_SIGNS: [&str; 3] = ["gh auth login", "HTTP 401", "authentication required"];
-
-/// The lookup for a `gh pr view` that exited non-zero. Only a known "no PR" answer is
-/// `Ok(None)`. The "no PR" check runs first, because that message quotes the branch name, and a
-/// branch name can hold a login word. Any other exit, such as a network or rate-limit error, is
-/// a failure, so it cannot look like "no open PR" (#2821).
-fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -> PrLookup {
-    let first_line = stderr.lines().next().unwrap_or("");
-    if GH_NO_PR_SIGNS.iter().any(|sign| stderr.contains(sign)) {
-        tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
-        return Ok(None);
-    }
-    if GH_LOGIN_SIGNS.iter().any(|sign| stderr.contains(sign)) {
-        tracing::error!("gh pr view: gh is not logged in ({status}): {first_line}");
-        return Err(GhFailure::Unauthenticated);
-    }
-    tracing::error!("gh pr view failed ({status}): {first_line}");
-    Err(GhFailure::Failed)
 }
 
 /// Parse `gh pr view --json number,url,reviewDecision`'s stdout into a
@@ -1113,6 +1065,7 @@ const SEVEN_DAY_SECS: i64 = 7 * 86_400;
 #[cfg(test)]
 mod tests {
 
+    use super::gh_lookup::{GH_LOGIN_SIGNS, GH_NO_PR_SIGNS};
     use super::*;
     use proptest::prelude::*;
 
@@ -1882,7 +1835,7 @@ mod tests {
         let repo_dir = tempfile::tempdir().unwrap();
         let gh = write_fake_gh(
             bin_dir.path(),
-            "#!/bin/sh\necho 'no pull requests found' >&2\nexit 1\n",
+            "#!/bin/sh\necho 'No pull requests found for branch \"feat/x\"' >&2\nexit 1\n",
         );
         assert_eq!(
             gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
@@ -1952,6 +1905,9 @@ mod tests {
         let status = std::process::ExitStatus::from_raw(1 << 8);
         let no_pr = "no pull requests found for branch \"fix/authentication-retry\"";
         assert_eq!(classify_gh_exit(status, no_pr), Ok(None));
+        // Real `gh` 2.102.0 capitalizes the first letter (#2975).
+        let real_no_pr = "No pull requests found for branch \"release/3.x\"";
+        assert_eq!(classify_gh_exit(status, real_no_pr), Ok(None));
         assert_eq!(
             classify_gh_exit(status, "To get started, please run:  gh auth login"),
             Err(GhFailure::Unauthenticated)
@@ -1969,7 +1925,9 @@ mod tests {
         fn classify_gh_exit_never_reads_unknown_text_as_no_pr(stderr in "\\PC{0,80}") {
             use std::os::unix::process::ExitStatusExt as _;
             let status = std::process::ExitStatus::from_raw(1 << 8);
-            let known = GH_NO_PR_SIGNS.iter().chain(GH_LOGIN_SIGNS.iter()).any(|s| stderr.contains(s));
+            let lowered = stderr.to_ascii_lowercase();
+            let known = GH_NO_PR_SIGNS.iter().any(|s| lowered.contains(s))
+                || GH_LOGIN_SIGNS.iter().any(|s| stderr.contains(s));
             proptest::prop_assume!(!known);
             proptest::prop_assert_eq!(classify_gh_exit(status, &stderr), Err(GhFailure::Failed));
         }
