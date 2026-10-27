@@ -56,7 +56,7 @@ pub(super) fn post_session_consolidation_in(
         crate::session_log::detached_child_log_path,
     );
     crate::mcp::proxy::detach_process_group(&mut cmd);
-    match cmd.spawn() {
+    match crate::trace::spawn_counted("consolidation:run", &mut cmd) {
         Ok(child) => Some(child),
         Err(e) => {
             tracing::error!(

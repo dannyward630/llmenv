@@ -122,10 +122,17 @@ async fn probe_stdio(
     let mut stderr = child.stderr.take();
     // The timeout wraps the exchange only, so the stop below always runs: a dropped future would
     // leave the server and what it started running.
-    let result = tokio::time::timeout(PROBE_TIMEOUT, stdio_exchange(StdioRpc::new(stdin, stdout)))
-        .await
-        .unwrap_or_else(|_| Err(timeout_error()));
+    let started = std::time::Instant::now();
+    let result =
+        tokio::time::timeout(PROBE_TIMEOUT, stdio_exchange(StdioRpc::new(stdin, stdout))).await;
+    let timed_out = result.is_err();
+    let result = result.unwrap_or_else(|_| Err(timeout_error()));
     stop_group(&mut child, command).await;
+    crate::trace::emit_spawn_trace(
+        "probe:mcp-stdio",
+        started.elapsed(),
+        crate::trace::SpawnExit::of_probe(result.is_ok(), timed_out),
+    );
     match result {
         Ok(ok) => Ok(ok),
         Err(e) => Err(match stderr_tail(stderr.as_mut()).await {

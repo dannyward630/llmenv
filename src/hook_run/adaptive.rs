@@ -2,6 +2,7 @@
 //!
 //! Design: docs/superpowers/specs/2026-09-27-adaptive-icm-recall-design.md
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use crate::hook_run::HookEvent;
 use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget};
 use crate::hook_run::relevance::{self, TurnSignals};
-use crate::hook_run::session_ledger::{Ledger, LedgerStore, MAIN_AGENT, record_hash};
+use crate::hook_run::session_ledger::{Ledger, LedgerStore, LedgerTiming, MAIN_AGENT, record_hash};
 use crate::hook_run::session_state::unix_now;
 use crate::hook_run::transcript;
 use llmenv_mcp::mcp_client::McpHttpClient;
@@ -101,10 +102,25 @@ fn report(ctx: &AdaptiveCtx<'_>, flow: &str, outcome: &Outcome, budget: &RecallB
     if let Some(line) = outage_notice(flow, outcome) {
         agent_notice::record_logged(line);
     }
-    // Same env var that gates hook-run's other stderr telemetry (#1261).
-    let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
-    if let Some(line) = budget.trace_line(tracing_enabled) {
-        eprintln!("{line}");
+    if let Some(line) = budget.trace_line(crate::trace::enabled()) {
+        crate::trace::emit_trace_line(&line);
+    }
+}
+
+/// Print the `[LLMENV_LEDGER]` trace line for the ledger update of one flow (#3012).
+fn report_ledger(flow: &str, timing: &LedgerTiming) {
+    if crate::trace::enabled() {
+        crate::trace::emit_trace_line(&crate::trace::lines::ledger_flow_line(
+            flow,
+            crate::trace::lines::LedgerFields {
+                lock_attempts: timing.lock_attempts,
+                lock_wait_us: timing.lock_wait_us,
+                read_us: timing.read_us,
+                write_us: timing.write_us,
+                bytes: timing.ledger_bytes,
+                state_unsaved: timing.state_unsaved,
+            },
+        ));
     }
 }
 
@@ -163,7 +179,7 @@ pub(super) async fn session_start(
     let recall_project = project.clone();
     // One locked update, so a busy lock can never leave a pre-reset sent set in use.
     let resume = super::resume_cache::ResumeCache::from_payload(ctx.payload);
-    let updated = ctx.store.update_reporting_save(ctx.session_id, |l| {
+    let (updated, ledger_timing) = ctx.store.update_reporting_save(ctx.session_id, |l| {
         l.resume_cache = Some(resume);
         if reset {
             l.reset();
@@ -177,7 +193,7 @@ pub(super) async fn session_start(
         tracing::error!("session start ledger update failed (reset requested: {reset}): {notice}");
         agent_notice::record(notice);
     }
-    let sent = updated.map(|(sent, _)| sent).unwrap_or_default();
+    let sent = updated.map_or_else(BTreeSet::new, |(sent, _saved)| sent);
     // A resumed session already holds its pack, so it makes neither call (#2142). A failed
     // wake-up call must not discard the project memories that did load, so they are kept on the
     // error path below (#2756).
@@ -213,6 +229,7 @@ pub(super) async fn session_start(
         agent_notice::record(notice);
     }
     report(ctx, "session_start", &outcome, &budget);
+    report_ledger("session_start", &ledger_timing);
     let wake = match wake {
         Ok(text) => text,
         Err(e) if (outcome.all_failed() || scope_len == 0) && own.is_empty() => return Err(e),
@@ -336,22 +353,21 @@ pub(super) async fn turn_start(
     report(ctx, "turn_start", &outcome, &budget);
     let kept = budget.kept_hashes();
     let now = unix_now();
-    note_unless_saved(
-        ctx.store.update(ctx.session_id, |l| {
-            l.mark_sent(MAIN_AGENT, kept);
-            l.last_turn_at = now;
-            // A failed recall is not a finished query; the skip rule must not reuse it.
-            if main_ok {
-                l.last_query_hash = Some(query_hash);
-            }
-            // The fallback is tried once per session epoch. A failed try is not repeated on
-            // every turn: the outage would repeat it, and the SessionStart pack is the main path.
-            if fallback {
-                l.set_scope_sent(MAIN_AGENT);
-            }
-        }),
-        RECALL_STATE_UNSAVED,
-    );
+    let (updated, timing) = ctx.store.update_timed(ctx.session_id, |l| {
+        l.mark_sent(MAIN_AGENT, kept);
+        l.last_turn_at = now;
+        // A failed recall is not a finished query; the skip rule must not reuse it.
+        if main_ok {
+            l.last_query_hash = Some(query_hash);
+        }
+        // The fallback is tried once per session epoch. A failed try is not repeated on
+        // every turn: the outage would repeat it, and the SessionStart pack is the main path.
+        if fallback {
+            l.set_scope_sent(MAIN_AGENT);
+        }
+    });
+    note_unless_saved(updated, RECALL_STATE_UNSAVED);
+    report_ledger("turn_start", &timing);
     Ok(budget.hook_text(Vec::new()))
 }
 

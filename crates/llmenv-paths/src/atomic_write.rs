@@ -67,6 +67,11 @@ fn write_owner_only_atomic_in_dir(
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    // The atomic write always leaves mode 0o600, so a file that already holds these bytes at 0o600
+    // needs no rewrite.
+    if crate::write_stats::already_current(final_path, content, 0o600) {
+        return Ok(());
+    }
     let pid = std::process::id();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -110,7 +115,10 @@ fn write_owner_only_atomic_in_dir(
         })();
 
         match result {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                crate::write_stats::note_write(content.len());
+                return Ok(());
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 last_err = Some(e);
                 continue;
