@@ -79,24 +79,29 @@ Emitted for MCP handshake and tool calls.
 Handshake:
 
 ```text
-[LLMENV_MCP_CALL] <method> <duration>us[ status=<code>]
+[LLMENV_MCP_CALL] <method> <duration>us req=<bytes> resp=<bytes> \
+[status=<code>]
 ```
 
 - `<method>` — `initialize` or `notifications/initialized`.
 - `<duration>us` — elapsed time in microseconds.
+- `req=<bytes>` — request payload size in bytes.
+- `resp=<bytes>` — response payload size in bytes.
 - `status=<code>` — present only on failure, the HTTP status code.
 
 Tool calls:
 
 ```text
-[LLMENV_MCP_CALL] <tool> <duration>us
+[LLMENV_MCP_CALL] <tool> <duration>us req=<bytes> resp=<bytes>
 ```
 
 - `<tool>` — tool name (e.g. `icm_memory_recall`).
 - `<duration>us` — elapsed time in microseconds.
+- `req=<bytes>` — request payload size in bytes.
+- `resp=<bytes>` — response payload size in bytes.
 
 Emitted on success only. Failure is logged via `tracing` instead, matching the
-precedent of `emit_trace_timing` and `emit_cache_trace`.
+precedent of `emit_trace_timing` and `emit_cache_trace`. (added in v3.14.0)
 
 ### `llmenv-trace` JSON marker
 
@@ -136,6 +141,110 @@ Fields:
   manifest exists).
 - `render_vars_us` — time to render environment variables (present when
   adapters materialize).
+
+### `[LLMENV_LEDGER]`
+
+Emitted when adaptive recall ledger timing is enabled.
+
+```text
+[LLMENV_LEDGER] <op> lock_attempts=<n> lock_wait_us=<n> read_us=<n> \
+write_us=<n> bytes=<n> state_unsaved=<true|false>
+```
+
+Fields:
+
+- `<op>` — flow name (e.g. `session_start`, `turn_start`, `subagent_start`).
+- `lock_attempts=<n>` — number of lock polling attempts (always present).
+- `lock_wait_us=<n>` — time spent waiting for the lock in microseconds.
+- `read_us=<n>` — time to read the ledger file in microseconds.
+- `write_us=<n>` — time to write the ledger file in microseconds.
+- `bytes=<n>` — number of bytes in the ledger file (empty when unavailable).
+- `state_unsaved=<true|false>` — whether a state update was skipped.
+
+Emitted from `src/hook_run/adaptive.rs` when `LLMENV_TRACE_TIMING` is set.
+(added in v3.14.0)
+
+### `[LLMENV_CONTEXT]`
+
+Emitted after each recall wave when the recall budget is non-empty.
+
+```text
+[LLMENV_CONTEXT] recall_entries=<n> recall_bytes=<n> injected_entries=<n> \
+injected_bytes=<n> duplicate_records=<n> already_sent=<n> omitted=<n> \
+skipped_actions=<n>
+```
+
+Fields:
+
+- `recall_entries=<n>` — total records returned by ICM.
+- `recall_bytes=<n>` — total bytes of recalled records.
+- `injected_entries=<n>` — records injected into the prompt.
+- `injected_bytes=<n>` — bytes of injected records.
+- `duplicate_records=<n>` — records dropped as duplicates.
+- `already_sent=<n>` — records skipped because the context already holds them.
+- `omitted=<n>` — records dropped for the byte budget.
+- `skipped_actions=<n>` — recall queries not run because the budget was full.
+
+Emitted from `src/hook_run/recall.rs` when `LLMENV_TRACE_TIMING` is set.
+
+### `llmenv-trace` session-start sub-phases
+
+The `llmenv-trace` JSON marker for `op: "hook_run"` carries optional sub-phase
+fields when `SessionStart` runs its fan-out.
+
+Fields:
+
+- `mcp_probe_us` — time for the initial MCP health probe.
+- `proxy_restart_us` — time for the proxy restart attempt.
+- `drift_check_us` — time for the drift re-probe.
+- `stale_hint_us` — time for the stale state/tmp hint check.
+- `agent_doc_us` — time for the agent document (cache roots) notice.
+- `wake_up_us` — time for the wake-up (ICM memory store).
+- `resume_ctx_us` — time for the resume-context handling.
+- `session_log_us` — time to capture the session log.
+- `checkpoint_us` — time to begin the codebase-memory index checkpoint.
+- `spawn_us` — time to resume detached checkpoint jobs.
+- `spawned_jobs` — number of resumed detached jobs.
+
+All sub-phase fields are in microseconds and are present only when the
+sub-phase ran. (added in v3.14.0)
+
+### Guard command trace markers
+
+The five guard commands (`config-guard`, `config-context`, `check-stale`,
+`read-once`, `throttle`) each emit one `llmenv-trace` marker with `op:
+"hook_run"` when `LLMENV_TRACE_TIMING` is set.
+
+Fields:
+
+- `config_load_us` — time to load configuration (always present).
+- `scope_eval_us` — time for scope evaluation (present for `check-stale`).
+
+These markers let a harness compare per-call guard cost with `hook-run
+pre_tool_use`. (added in v3.14.0)
+
+### `[LLMENV_DETACHED]`
+
+Emitted when a detached job (post-session memory consolidation, ICM transcript
+record, ICM memory store, or codebase-memory index) exits.
+
+```text
+[LLMENV_DETACHED] <kind> <wall_us>us cpu_us=<n> mcp_calls=<n> exit=<code|error>
+```
+
+Fields:
+
+- `<kind>` — job kind: `consolidation`, `icm-store`, `session-log-record`, or
+  `cbm-index`.
+- `<wall_us>` — total wall time in microseconds.
+- `cpu_us=<n>` — user plus system CPU time in microseconds (macOS only; zero
+  on other platforms).
+- `mcp_calls=<n>` — number of MCP tool calls the job made (zero when unknown).
+- `exit=<code|error>` — exit code on success, or `error` when the job did not
+  complete.
+
+Emitted from the child entrypoints of all detached job types when
+`LLMENV_TRACE_TIMING` is set. (added in v3.14.0)
 
 ## JSON trace file format
 

@@ -18,6 +18,9 @@ const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// (`RUST_LOG` unset) is ERROR-only and dropped the warning before it could
 /// reach that log (#1133).
 ///
+/// Emits a `[LLMENV_DETACHED] consolidation` trace line with wall time, CPU time,
+/// and exit status when `LLMENV_TRACE_TIMING` is set (#3014).
+///
 /// With a `checkpoint` (#2396) the run records its phase there. The file stays after a failure
 /// that a later run may fix, and goes away when nothing is left to do.
 ///
@@ -28,7 +31,19 @@ pub fn run_consolidation(
     config_path: &std::path::Path,
     checkpoint: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    run_consolidation_at(config_path, checkpoint).inspect_err(|e| {
+    let t0 = std::time::Instant::now();
+    let result = run_consolidation_at(config_path, checkpoint);
+    let exit = result.as_ref().map(|()| 0).unwrap_or(1);
+    let cpu_us = crate::trace::cpu_time_us();
+    // Consolidation makes multiple MCP calls; count is unknown at this level.
+    crate::trace::emit_detached_trace(
+        "consolidation",
+        t0.elapsed().as_micros() as u64,
+        cpu_us,
+        0,
+        Some(exit),
+    );
+    result.inspect_err(|e| {
         tracing::error!("consolidation-run: detached consolidation failed: {e:#}");
     })
 }

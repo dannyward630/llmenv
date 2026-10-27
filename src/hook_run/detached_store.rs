@@ -27,13 +27,28 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the default `EnvFilter` (`RUST_LOG` unset) is ERROR-only and dropped the
 /// warning before it could reach that log (#1133).
 ///
+/// Emits a `[LLMENV_DETACHED] icm-store` trace line with wall time, CPU time,
+/// and exit status when `LLMENV_TRACE_TIMING` is set (#3014).
+///
 /// # Errors
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
 pub fn run_icm_store(payload_json: &str, checkpoint: Option<&Path>) -> anyhow::Result<()> {
+    let t0 = std::time::Instant::now();
     // The error is logged here and not in `run_icm_store_with`: a test of that function would
     // otherwise reach this callsite outside a subscriber and break the capture test below.
-    run_icm_store_with(payload_json, checkpoint, run_icm_store_inner).inspect_err(|e| {
+    let result = run_icm_store_with(payload_json, checkpoint, run_icm_store_inner);
+    let exit = result.as_ref().map(|()| 0).unwrap_or(1);
+    let cpu_us = crate::trace::cpu_time_us();
+    let mcp_calls = 1; // one call to icm_memory_store
+    crate::trace::emit_detached_trace(
+        "icm-store",
+        t0.elapsed().as_micros() as u64,
+        cpu_us,
+        mcp_calls,
+        Some(exit),
+    );
+    result.inspect_err(|e| {
         tracing::error!("icm-store: detached store failed: {e}");
     })
 }

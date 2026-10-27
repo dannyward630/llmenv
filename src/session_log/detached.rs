@@ -10,7 +10,7 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +125,11 @@ fn spawn_record_in(
     }
     // Not waited on by the caller: the child is process-group-detached and
     // outlives us.
-    crate::trace::emit_spawn_trace("session_log_record", t_spawn.elapsed(), None);
+    crate::trace::emit_spawn_trace(
+        "session_log_record",
+        t_spawn.elapsed(),
+        crate::trace::SpawnExit::Detached,
+    );
     Some(child)
 }
 
@@ -154,6 +158,9 @@ pub(crate) fn record_command(
 /// also reaches the operator through the internal-ops `FileLogLayer` wired in
 /// `main.rs`.
 ///
+/// Emits a `[LLMENV_DETACHED] session-log-record` trace line with wall time,
+/// CPU time, and exit status when `LLMENV_TRACE_TIMING` is set (#3014).
+///
 /// # Errors
 /// Malformed payload, no active memory backend, an invalid backend URL, or
 /// the MCP call itself failing.
@@ -161,9 +168,22 @@ pub(crate) fn run_record(
     payload_json: &str,
     checkpoint: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    let t0 = std::time::Instant::now();
     // The error is logged here and not in `run_record_with`: a test of that function would
     // otherwise reach this callsite outside a subscriber and break the capture test below.
-    run_record_with(payload_json, checkpoint, run_record_inner).inspect_err(|e| {
+    let result = run_record_with(payload_json, checkpoint, run_record_inner);
+    let exit = result.as_ref().map(|()| 0).unwrap_or(1);
+    let cpu_us = crate::trace::cpu_time_us();
+    // One call to session_log transcript record.
+    let mcp_calls = 1;
+    crate::trace::emit_detached_trace(
+        "session-log-record",
+        t0.elapsed().as_micros() as u64,
+        cpu_us,
+        mcp_calls,
+        Some(exit),
+    );
+    result.inspect_err(|e| {
         tracing::error!("session_log: detached record failed: {e}");
     })
 }

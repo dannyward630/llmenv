@@ -20,6 +20,7 @@ use crate::mcp::resolve::{
     CODEBASE_MEMORY_MCP_NAME, MEMORY_MCP_NAME, ResolvedKind, ResolvedMcp, codebase_memory_paths,
     resolve_codebase_memory_entries, resolve_mcps,
 };
+use crate::trace::SessionStartPhases;
 
 /// How long one probe waits for an `initialize` answer.
 /// A healthy local server answers in milliseconds. The wedged codebase-memory daemon in #2358
@@ -326,24 +327,35 @@ pub(crate) fn managed_servers(
 
 /// Probe the managed servers and build the notice for the ones that are down. A failure to
 /// resolve the servers is logged and skipped: a hook must never block the session.
+///
+/// Returns the notice string and sub-phase timing data for the MCP probe, proxy
+/// restart, and drift re-probe (#3011). All three fields are `None` when the
+/// function returns `None` (no servers, or resolution failure).
 pub(super) fn session_start_notice(
     rt: &tokio::runtime::Runtime,
     config: &crate::config::Config,
     config_dir: &Path,
     active: &crate::scope::ActiveScopes,
-) -> Option<String> {
+) -> Option<(String, SessionStartPhases)> {
     let servers = match managed_servers(config, config_dir, active) {
         Ok(servers) => servers,
         Err(e) => {
             tracing::warn!(error = %e, "MCP health check could not run");
-            return Some(unresolved_notice(&e));
+            return Some((unresolved_notice(&e), SessionStartPhases::none()));
         }
     };
     if servers.is_empty() {
         return None;
     }
+    let t_mcp_probe = std::time::Instant::now();
     let mut down = rt.block_on(find_down(&servers, DEFAULT_PROBE_TIMEOUT));
+    let mut phases = SessionStartPhases {
+        mcp_probe: Some(t_mcp_probe),
+        ..SessionStartPhases::none()
+    };
     if down.iter().any(|d| d.name == MEMORY_MCP_NAME) {
+        let t_proxy_restart = std::time::Instant::now();
+        phases.proxy_restart = Some(t_proxy_restart);
         let outcome = crate::cli::ensure_local_memory_proxy(
             config,
             config_dir,
@@ -357,6 +369,8 @@ pub(super) fn session_start_notice(
                 .filter(|s| s.name == MEMORY_MCP_NAME)
                 .cloned()
                 .collect();
+            let t_drift_check = std::time::Instant::now();
+            phases.drift_check = Some(t_drift_check);
             let after = rt.block_on(find_down(&memory, DEFAULT_PROBE_TIMEOUT));
             down = merge_in_order(&servers, down, after);
         } else if let Some(note) = restart_note(&outcome) {
@@ -365,7 +379,7 @@ pub(super) fn session_start_notice(
             }
         }
     }
-    down_notice(&down)
+    (down_notice(&down)).map(|notice| (notice, phases))
 }
 
 /// Replace the memory server's entry in `down` with its result after a restart, and keep the

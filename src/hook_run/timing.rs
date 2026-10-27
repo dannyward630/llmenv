@@ -20,5 +20,9 @@ pub(crate) fn check_stale_with_timing(event: HookEvent, engine: &str) {
              Fix: run `llmenv doctor` to see the cause."
         ));
     }
-    crate::trace::emit_spawn_trace("check-stale", t_stale.elapsed(), None);
+    crate::trace::emit_spawn_trace(
+        "check-stale",
+        t_stale.elapsed(),
+        crate::trace::SpawnExit::Detached,
+    );
 }

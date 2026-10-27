@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 pub(crate) use super::record_hash::{hash_prefix, record_hash};
 use super::resume_cache::ResumeCache;
@@ -204,6 +205,40 @@ fn head_bytes(text: &str, max: usize) -> String {
         .to_string()
 }
 
+/// Timing data for a call to `LedgerStore::update_reporting_save`.
+///
+/// All fields are zero or `None` when the lock could not be taken.
+/// Pass this to the adaptive recall trace emitter (#3012).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LedgerTiming {
+    /// Number of poll attempts (1 = no contention).
+    pub lock_attempts: Option<u32>,
+    /// Total time spent polling for the lock, in microseconds.
+    pub lock_wait_us: Option<u64>,
+    /// Time to read the ledger file, in microseconds.
+    pub read_us: Option<u64>,
+    /// Time to write the ledger file, in microseconds.
+    pub write_us: Option<u64>,
+    /// Size of the ledger in bytes (after serialization).
+    pub ledger_bytes: Option<usize>,
+    /// Whether the save to disk failed.
+    pub state_unsaved: Option<bool>,
+}
+
+impl LedgerTiming {
+    /// Return a struct with all fields set to `None` or zero.
+    pub(crate) fn none() -> Self {
+        Self {
+            lock_attempts: None,
+            lock_wait_us: None,
+            read_us: None,
+            write_us: None,
+            ledger_bytes: None,
+            state_unsaved: None,
+        }
+    }
+}
+
 /// The ledger files under `state_dir()/recall_session/`.
 #[derive(Debug, Clone)]
 pub(crate) struct LedgerStore {
@@ -234,22 +269,52 @@ impl LedgerStore {
         session_id: &str,
         f: impl FnOnce(&mut Ledger) -> T,
     ) -> Option<T> {
-        self.update_reporting_save(session_id, f)
-            .map(|(result, _)| result)
+        let _lock = self.lock(session_id)?;
+        let mut ledger = self.read(session_id)?;
+        let result = f(&mut ledger);
+        let _saved = self.write(session_id, &ledger);
+        Some(result)
     }
 
     /// Like [`Self::update`], and also reports whether the ledger reached disk.
     /// The flag is `false` when the save failed, and the result of `f` is still returned.
+    ///
+    /// Returns timing data for the adaptive recall trace (#3012). All fields are
+    /// zero or `None` when the lock could not be taken.
     pub(crate) fn update_reporting_save<T>(
         &self,
         session_id: &str,
         f: impl FnOnce(&mut Ledger) -> T,
-    ) -> Option<(T, bool)> {
-        let _lock = self.lock(session_id)?;
-        let mut ledger = self.read(session_id)?;
+    ) -> Option<(T, bool, LedgerTiming)> {
+        let (file, lock_timing) = match self.lock_timed(session_id) {
+            Some(v) => v,
+            None => return Some((f(&mut Ledger::default()), false, LedgerTiming::none())),
+        };
+        let t_read = Instant::now();
+        let mut ledger = self.read_with_file(&file, session_id)?;
+        let t_read_end = Instant::now();
         let result = f(&mut ledger);
-        let saved = self.write(session_id, &ledger);
-        Some((result, saved))
+        let t_write = Instant::now();
+        let saved = self.write_with_file(&file, session_id, &ledger);
+        let ledger_bytes = serde_json::to_vec(&ledger).ok().map(|v| v.len());
+        Some((
+            result,
+            saved,
+            LedgerTiming {
+                lock_attempts: Some(lock_timing.attempts),
+                lock_wait_us: Some(lock_timing.wait_us),
+                read_us: Some(
+                    u64::try_from(t_read_end.saturating_duration_since(t_read).as_micros())
+                        .unwrap_or(u64::MAX),
+                ),
+                write_us: Some(
+                    u64::try_from(t_write.saturating_duration_since(t_read_end).as_micros())
+                        .unwrap_or(u64::MAX),
+                ),
+                ledger_bytes,
+                state_unsaved: Some(!saved),
+            },
+        ))
     }
 
     fn file(&self, session_id: &str, ext: &str) -> PathBuf {
@@ -258,6 +323,22 @@ impl LedgerStore {
 
     fn lock(&self, session_id: &str) -> Option<File> {
         super::session_state::lock_state_file(&self.dir, session_id, "recall ledger")
+    }
+
+    /// Lock the state file and return the file handle plus timing data.
+    /// Returns `None` when the lock stays busy.
+    fn lock_timed(&self, session_id: &str) -> Option<(File, super::session_state::LockTiming)> {
+        super::session_state::lock_state_file_timed(&self.dir, session_id, "recall ledger")
+    }
+
+    /// Read the ledger using an already-held file handle.
+    fn read_with_file(&self, _file: &File, session_id: &str) -> Option<Ledger> {
+        self.read(session_id)
+    }
+
+    /// Write the ledger using an already-held file handle.
+    fn write_with_file(&self, _file: &File, session_id: &str, ledger: &Ledger) -> bool {
+        self.write(session_id, ledger)
     }
 
     /// The stored ledger: a default for a missing or corrupt file, `None` for a

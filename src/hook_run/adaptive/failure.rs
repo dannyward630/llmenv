@@ -178,7 +178,7 @@ pub(in crate::hook_run) async fn tool_failure(
     outcome.push(fixes);
     let mut budget = RecallBudget::new(FAILURE_BUDGET_BYTES, sent);
     outcome.texts.iter().for_each(|t| budget.add_text(t));
-    report(ctx, "post_tool_use_failure", &outcome, &budget);
+    report(ctx, "post_tool_use_failure", &outcome, &budget, None);
     if record {
         let kept = budget.kept_hashes();
         note_unless_saved(

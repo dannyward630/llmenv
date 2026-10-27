@@ -59,7 +59,15 @@ pub(crate) fn run_export_core(
     let t_active = Instant::now();
 
     ensure_proxy(&config, &config_dir, &active);
-    crate::trace::emit_export_trace(t0, t_config, Some(t_env), Some(t_active), None, None, None);
+    crate::export_trace::emit_export_trace(
+        t0,
+        t_config,
+        Some(t_env),
+        Some(t_active),
+        None,
+        None,
+        None,
+    );
 
     // Throttled pull: check sync interval and fetch+pull if enough time has elapsed.
     // Skipped entirely when remote_sync is disabled (e.g. 1Password locked).
@@ -225,7 +233,7 @@ pub(crate) fn run_export_core(
 
     // Emit export trace with adapter materialization timing.
     let t_adapters = Instant::now();
-    crate::trace::emit_export_trace(
+    crate::export_trace::emit_export_trace(
         t0,
         t_config,
         Some(t_env),
@@ -351,7 +359,7 @@ pub(crate) fn run_export_core(
 
     // Final render timing: total export duration.
     let t_render = Instant::now();
-    crate::trace::emit_export_trace(
+    crate::export_trace::emit_export_trace(
         t0,
         t_config,
         Some(t_env),

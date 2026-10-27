@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Render an unscoped Crush `deny` rule to `options.disabled_tools`, which removes the tool from the agent. A rule scoped to a pattern or path is still not rendered, and it is logged. [feat:crush]
 - Map `Task` to Crush's `agent` tool, and add `AskUserQuestion` as a neutral tool that maps to Crush's `question` tool (Crush v0.85.0 or later). [feat:crush]
 - Render bundle env vars (`capabilities.env`) to the top-level `env` key in `crush.json`. [feat:crush]
+- Emit a `[LLMENV_DETACHED]` trace line when each detached job (consolidation, ICM store, session-log record, CBM index) exits. The line carries job kind, wall time, CPU time (macOS), MCP call count, and exit status. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace#llmenvdetached). [#3014]
 
 ### Changed
 

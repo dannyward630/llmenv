@@ -22,5 +22,5 @@ pub(crate) fn local_query(
         .env("LC_ALL", "C")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    crate::process::run_with_timeout(cmd, LOCAL_QUERY_TIMEOUT)
+    crate::process::run_traced("git:local-query", cmd, LOCAL_QUERY_TIMEOUT)
 }

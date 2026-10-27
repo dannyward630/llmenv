@@ -2,6 +2,7 @@
 //!
 //! Design: docs/superpowers/specs/2026-09-27-adaptive-icm-recall-design.md
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use crate::hook_run::action::{Action, RecallQuery, split_recall_records};
 use crate::hook_run::mcp_client::McpHttpClient;
 use crate::hook_run::recall::{RECALL_BUDGET_BYTES, RecallBudget};
 use crate::hook_run::relevance::{self, TurnSignals};
-use crate::hook_run::session_ledger::{Ledger, LedgerStore, MAIN_AGENT, record_hash};
+use crate::hook_run::session_ledger::{Ledger, LedgerStore, LedgerTiming, MAIN_AGENT, record_hash};
 use crate::hook_run::session_state::unix_now;
 use crate::hook_run::transcript;
 
@@ -95,7 +96,16 @@ fn outage_notice(flow: &str, outcome: &Outcome) -> Option<String> {
 }
 
 /// Print the outage line and the `[LLMENV_CONTEXT]` trace line for one flow.
-fn report(ctx: &AdaptiveCtx<'_>, flow: &str, outcome: &Outcome, budget: &RecallBudget) {
+///
+/// `ledger` carries optional adaptive recall ledger timing (#3012). Pass `None`
+/// when the flow has no ledger write.
+fn report(
+    ctx: &AdaptiveCtx<'_>,
+    flow: &str,
+    outcome: &Outcome,
+    budget: &RecallBudget,
+    ledger: Option<&LedgerTiming>,
+) {
     let ok = outcome.calls.saturating_sub(outcome.failed);
     crate::hook_run::recall_health::record(ctx.state_dir, ok, outcome.failed, unix_now());
     // The engine drops a hook's stderr, so the outage goes to the agent as a notice.
@@ -106,6 +116,20 @@ fn report(ctx: &AdaptiveCtx<'_>, flow: &str, outcome: &Outcome, budget: &RecallB
     let tracing_enabled = std::env::var_os("LLMENV_TRACE_TIMING").is_some();
     if let Some(line) = budget.trace_line(tracing_enabled) {
         eprintln!("{line}");
+    }
+    // Emit ledger timing when the adaptive recall trace is enabled (#3012).
+    if let (true, Some(l)) = (tracing_enabled, ledger) {
+        let us = |v: Option<u64>| v.unwrap_or(0);
+        let la = l.lock_attempts.unwrap_or(0);
+        let lw = us(l.lock_wait_us);
+        let ru = us(l.read_us);
+        let wu = us(l.write_us);
+        let lb = l.ledger_bytes.map(|v| v.to_string()).unwrap_or_default();
+        let su = l.state_unsaved.map(|v| v.to_string()).unwrap_or_default();
+        crate::trace::emit_trace_line(&format!(
+            "[LLMENV_LEDGER] {flow} lock_attempts={la} lock_wait_us={lw} \
+             read_us={ru} write_us={wu} bytes={lb} state_unsaved={su}"
+        ));
     }
 }
 
@@ -174,11 +198,19 @@ pub(super) async fn session_start(
         }
         l.sent_for(MAIN_AGENT)
     });
-    if let Some(notice) = first_update_notice(FirstUpdate::of(updated.as_ref()), reset) {
+    let (first_sent, first_saved) = match &updated {
+        Some((s, saved, _)) => (Some(s.clone()), *saved),
+        None => (None, false),
+    };
+    let first_result = (&first_sent, first_saved);
+    if let Some(notice) = first_update_notice(FirstUpdate::of(Some(&first_result)), reset) {
         tracing::error!("session start ledger update failed (reset requested: {reset}): {notice}");
         agent_notice::record(notice);
     }
-    let sent = updated.map(|(sent, _)| sent).unwrap_or_default();
+    let (sent, _timing) = match &updated {
+        Some((s, _, t)) => (s.clone(), t.clone()),
+        None => (BTreeSet::new(), LedgerTiming::none()),
+    };
     // A resumed session already holds its pack, so it makes neither call (#2142). A failed
     // wake-up call must not discard the project memories that did load, so they are kept on the
     // error path below (#2756).
@@ -213,7 +245,13 @@ pub(super) async fn session_start(
     if let Some(notice) = unrun {
         agent_notice::record(notice);
     }
-    report(ctx, "session_start", &outcome, &budget);
+    report(
+        ctx,
+        "session_start",
+        &outcome,
+        &budget,
+        updated.as_ref().map(|(_, _, t)| t),
+    );
     let wake = match wake {
         Ok(text) => text,
         Err(e) if (outcome.all_failed() || scope_len == 0) && own.is_empty() => return Err(e),
@@ -334,7 +372,7 @@ pub(super) async fn turn_start(
         main_ok = ok;
         outcome.merge(wave);
     }
-    report(ctx, "turn_start", &outcome, &budget);
+    report(ctx, "turn_start", &outcome, &budget, None);
     let kept = budget.kept_hashes();
     let now = unix_now();
     note_unless_saved(

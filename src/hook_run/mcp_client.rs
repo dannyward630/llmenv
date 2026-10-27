@@ -96,8 +96,8 @@ fn is_stale_session_status(status: reqwest::StatusCode) -> bool {
 /// `icm_memory_store`) — this client is a generic MCP transport with no
 /// notion of what a "result" means for any given tool, and parsing ICM's
 /// recall-specific text format here would be a layering violation.
-fn emit_mcp_call_trace(tool: &str, elapsed: Duration) {
-    crate::mcp_trace::emit_mcp_call_trace(tool, elapsed);
+fn emit_mcp_call_trace(tool: &str, elapsed: Duration, req_bytes: u64, resp_bytes: u64) {
+    crate::mcp_trace::emit_mcp_call_trace(tool, elapsed, req_bytes, resp_bytes);
 }
 
 impl McpHttpClient {
@@ -197,10 +197,18 @@ impl McpHttpClient {
             .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {} for MCP initialize", self.display_url()))
             .map_err(crate::proxy_note::with_proxy_note)?;
+        let init_req_bytes = init_req.to_string().len() as u64;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = body::error_body(resp, "MCP initialize").await;
-            crate::mcp_trace::emit_mcp_handshake_trace("initialize", init_start.elapsed(), None);
+            let resp_bytes = body.len() as u64;
+            crate::mcp_trace::emit_mcp_handshake_trace(
+                "initialize",
+                init_start.elapsed(),
+                Some(status.as_u16()),
+                init_req_bytes,
+                resp_bytes,
+            );
             return Err(anyhow!("MCP initialize returned HTTP {status}: {body}"));
         }
         let _init_elapsed = init_start.elapsed();
@@ -209,18 +217,30 @@ impl McpHttpClient {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        if capture_info {
+        let init_resp_bytes = if capture_info {
             let text = body::read_capped(resp, body::MAX_REPLY_BYTES, "MCP initialize")
                 .await
                 .with_context(|| format!("reading the reply from {}", self.display_url()))?;
             *self.init_info.lock().await = Some(parse_initialize_info(&text)?);
-        }
+            text.len() as u64
+        } else {
+            0
+        };
+        crate::mcp_trace::emit_mcp_handshake_trace(
+            "initialize",
+            init_start.elapsed(),
+            None,
+            init_req_bytes,
+            init_resp_bytes,
+        );
 
         if let Some(sid) = &sid {
             // Best-effort: some servers require this ack before accepting
             // further calls, others ignore it. Its own failure isn't fatal —
             // the subsequent tools/call attempt is the real signal, and it carries the cause.
             let ack_start = std::time::Instant::now();
+            let ack_req = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+            let ack_req_bytes = ack_req.to_string().len() as u64;
             let ack = self
                 .client
                 .post(&self.url)
@@ -229,13 +249,20 @@ impl McpHttpClient {
                     "application/json, text/event-stream",
                 )
                 .header("mcp-session-id", sid)
-                .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+                .json(&ack_req)
                 .send()
                 .await;
+            let ack_resp_bytes = if let Ok(r) = &ack {
+                r.content_length().unwrap_or(0)
+            } else {
+                0
+            };
             crate::mcp_trace::emit_mcp_handshake_trace(
                 "notifications/initialized",
                 ack_start.elapsed(),
                 None,
+                ack_req_bytes,
+                ack_resp_bytes,
             );
             if let Err(e) = ack {
                 tracing::debug!(
@@ -347,8 +374,11 @@ impl McpHttpClient {
         // visible. Emitted on success only, matching emit_trace_timing's and
         // emit_cache_trace's precedent (the failure itself already logs via
         // the tracing::warn!/Action::run's own error path).
-        if result.is_ok() {
-            emit_mcp_call_trace(name, start.elapsed());
+        if let Ok(text) = &result {
+            let params = json!({ "name": name, "arguments": arguments });
+            let req_bytes = params.to_string().len() as u64;
+            let resp_bytes = text.len() as u64;
+            emit_mcp_call_trace(name, start.elapsed(), req_bytes, resp_bytes);
         }
         result
     }
@@ -357,9 +387,11 @@ impl McpHttpClient {
     /// (worth clearing the cache and retrying once) from every other failure.
     async fn try_call_tool(&self, name: &str, arguments: &Value) -> Result<String, CallToolError> {
         let params = json!({ "name": name, "arguments": arguments });
+        let req_bytes = params.to_string().len() as u64;
         let body = self
             .post_rpc("tools/call", &params, &format!("tool {name}"))
             .await?;
+        let resp_bytes = body.to_string().len() as u64;
         let text = extract_text(&body).ok_or_else(|| {
             CallToolError::Fatal(anyhow!(
                 "tool {name} response missing result.content[].text"
@@ -372,6 +404,8 @@ impl McpHttpClient {
                 "tool {name} reported an error: {text}"
             )));
         }
+        // Emit trace with byte sizes for the tool call.
+        crate::mcp_trace::emit_mcp_call_trace(name, Duration::ZERO, req_bytes, resp_bytes);
         Ok(text)
     }
 

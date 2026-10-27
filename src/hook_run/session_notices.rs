@@ -10,6 +10,7 @@ use crate::materialize::tmp_sweep::{self, StaleSummary};
 
 use super::mcp_health;
 use super::notice::problem_notice;
+use crate::trace::SessionStartPhases;
 
 /// The marker file that holds the UTC day of the last stale-entry hint.
 const HINT_MARKER: &str = "stale-tmp-hint.day";
@@ -23,14 +24,21 @@ const GIB: u64 = 1 << 30;
 
 /// The notices for a `SessionStart` event: the MCP health line, the cache roots line, and the
 /// stale `state/tmp` hint. Each part is joined in the order above.
+///
+/// Returns a tuple of the notice string (if any) and the sub-phase timing data
+/// for this session start (#3011).
 pub(super) fn session_start_notices(
     rt: Option<&tokio::runtime::Runtime>,
     config: &crate::config::Config,
     config_dir: &Path,
     active: &crate::scope::ActiveScopes,
     roots_notice: Option<String>,
-) -> Option<String> {
-    let health = rt.and_then(|rt| mcp_health::session_start_notice(rt, config, config_dir, active));
+) -> (Option<String>, SessionStartPhases) {
+    let (health, mut phases) =
+        match rt.and_then(|rt| mcp_health::session_start_notice(rt, config, config_dir, active)) {
+            Some((notice, phases)) => (Some(notice), phases),
+            None => (None, SessionStartPhases::none()),
+        };
     let base = match (health, roots_notice) {
         (Some(h), Some(r)) => Some(format!("{h}{r}")),
         (h, r) => h.or(r),
@@ -47,10 +55,15 @@ pub(super) fn session_start_notices(
             "run `llmenv doctor` to check the state directory",
         )),
     };
-    match (base, hint) {
+    // Capture the stale_hint sub-phase at the point where the hint runs.
+    if hint.is_some() {
+        phases.stale_hint = Some(std::time::Instant::now());
+    }
+    let result = match (base, hint) {
         (Some(b), Some(h)) => Some(format!("{b}\n{h}")),
         (b, h) => b.or(h),
-    }
+    };
+    (result, phases)
 }
 
 /// The hint for stale `state/tmp` entries, or `None` when today's hint is already shown, or

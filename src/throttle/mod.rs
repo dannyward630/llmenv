@@ -171,6 +171,7 @@ fn compute_delay(snapshot: &UsageSnapshot, cfg: &Throttle) -> Duration {
 pub(crate) fn run_throttle_hook(event: &str) {
     use std::io::Read;
 
+    let t0 = std::time::Instant::now();
     // Consume stdin so the pipe doesn't break, even if we don't use the body.
     let mut stdin_buf = String::new();
     let mut notices = Vec::new();
@@ -182,6 +183,7 @@ pub(crate) fn run_throttle_hook(event: &str) {
                  Fix: run `llmenv doctor` to check the hook setup."
             ));
             write_output(&engine_event_name(event), "", &notices);
+            crate::trace::emit_guard_trace_timing(t0, t0, None);
             return;
         }
     };
@@ -193,6 +195,7 @@ pub(crate) fn run_throttle_hook(event: &str) {
         String::new()
     });
     write_output(&hook_event_name, &note, &notices);
+    crate::trace::emit_guard_trace_timing(t0, t0, None);
 }
 
 /// The engine name of the hook event in `stdin`. Text that is not JSON, or JSON with no name,

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 mod clean;
 mod config_guard;
 mod export_trace;
+mod guard;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
 mod plugin_payloads;
@@ -879,22 +880,16 @@ pub fn run() -> anyhow::Result<()> {
             run_sync(dry_run)?;
         }
         Some(Command::CheckStale { auto_fix, engine }) => {
-            tracing::debug!(engine, "check-stale invoked by engine");
-            warn_if_unknown_engine(&engine);
-            run_check_stale(use_color, auto_fix)?;
+            guard::dispatch_check_stale(use_color, auto_fix, &engine)?;
         }
         Some(Command::ConfigContext { engine }) => {
-            tracing::debug!(engine, "config-context invoked by engine");
-            warn_if_unknown_engine(&engine);
-            run_config_context();
+            guard::dispatch_config_context(&engine);
         }
         Some(Command::ConfigGuard { engine }) => {
-            tracing::debug!(engine, "config-guard invoked by engine");
-            warn_if_unknown_engine(&engine);
-            config_guard::run(&engine);
+            guard::dispatch_config_guard(&engine);
         }
         Some(Command::Throttle { event }) => {
-            crate::throttle::run_throttle_hook(&event);
+            guard::dispatch_throttle(&event);
         }
         Some(Command::HookRun { event, engine }) => {
             tracing::debug!(engine, "hook-run invoked by engine");
@@ -1728,7 +1723,7 @@ fn materialize_from_manifest(
     // form llmenv's complete owned set (#196). Idempotent.
     let t_mat = std::time::Instant::now();
     let adapter_owned = adapter.materialize(manifest, &cache_path)?;
-    crate::trace::record_materialize(
+    crate::materialize_trace::record_materialize(
         adapter,
         &cache_path,
         manifest,

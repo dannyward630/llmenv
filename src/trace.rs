@@ -41,23 +41,32 @@ pub(crate) fn emit_trace_line(line: &str) {
     }
     if let Some(path) = std::env::var_os("LLMENV_TRACE_FILE") {
         let path = std::path::PathBuf::from(path);
-        if let Ok(mut f) = open_trace_file(&path) {
-            let ts = current_timestamp();
-            let pid = std::process::id();
-            let obj = serde_json::json!({
-                "ts": ts,
-                "pid": pid,
-                "line": line,
-            });
-            let _ = writeln!(f, "{}", obj);
-            let _ = f.flush();
+        match open_trace_file(&path) {
+            Ok(mut f) => {
+                let ts = current_timestamp();
+                let pid = std::process::id();
+                let obj = serde_json::json!({
+                    "ts": ts,
+                    "pid": pid,
+                    "line": line,
+                });
+                if let Err(e) = writeln!(f, "{}", obj) {
+                    tracing::warn!("trace file write failed to {}: {e}", path.display());
+                }
+                if let Err(e) = f.flush() {
+                    tracing::warn!("trace file flush failed to {}: {e}", path.display());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cannot open trace file {}: {e}", path.display());
+            }
         }
     }
 }
 
 /// Emit a JSON trace object with `op` and the supplied fields. The object
 /// also carries `ts`, `pid`, and `"v": 1`.
-fn emit_json_trace(op: &str, fields: serde_json::Value) {
+pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Value) {
     let obj = serde_json::json!({
         "v": 1,
         "op": op,
@@ -66,6 +75,43 @@ fn emit_json_trace(op: &str, fields: serde_json::Value) {
         "data": fields,
     });
     emit_trace_line(&obj.to_string());
+}
+
+/// Sub-phase boundaries for a `SessionStart` fan-out.
+///
+/// Each field is `None` when the sub-phase did not run. Pass these to
+/// `emit_trace_timing` so the JSON marker carries per-sub-phase timings
+/// (#3011).
+pub struct SessionStartPhases {
+    /// Start of the MCP health probe.
+    pub mcp_probe: Option<Instant>,
+    /// Start of the proxy restart attempt.
+    pub proxy_restart: Option<Instant>,
+    /// Start of the drift re-probe (after proxy restart).
+    pub drift_check: Option<Instant>,
+    /// Start of the stale state/tmp hint check.
+    pub stale_hint: Option<Instant>,
+    /// Start of the agent document (cache roots) notice.
+    pub agent_doc: Option<Instant>,
+    /// Start of the wake-up (ICM memory store).
+    pub wake_up: Option<Instant>,
+    /// Start of the resume-context handling.
+    pub resume_ctx: Option<Instant>,
+}
+
+impl SessionStartPhases {
+    /// Return a new struct with all fields set to `None`.
+    pub fn none() -> Self {
+        Self {
+            mcp_probe: None,
+            proxy_restart: None,
+            drift_check: None,
+            stale_hint: None,
+            agent_doc: None,
+            wake_up: None,
+            resume_ctx: None,
+        }
+    }
 }
 
 /// Emit a `[LLMENV_CACHE] <name> <hit|miss> <duration>ms[ <extra>]` line to
@@ -98,18 +144,61 @@ pub(crate) fn emit_cache_trace(name: &str, hit: bool, elapsed: Duration, extra: 
 /// (#1128: previously only events reaching the full memory-dispatch path —
 /// 4 of 11 — emitted this marker at all).
 ///
+/// `phases` carries optional sub-phase boundaries for `SessionStart` that
+/// break out `prep_us` + `mcp_us` into individual fields (#3011). Pass a
+/// struct with `None` fields when the sub-phase did not run, so the
+/// early-return rule holds.
+///
 /// The JSON marker carries `"v": 1` so a consumer can distinguish formats
 /// when new optional fields are added by later sub-issues (#3018).
-pub(crate) fn trace_timing_json(
-    t0: Instant,
-    t_config: Instant,
-    t_scope: Option<Instant>,
-    t_chunk: Option<Instant>,
-    t_end: Option<Instant>,
-) -> serde_json::Value {
+/// Phase boundaries and per-event timings for one hook run.
+///
+/// `t0` and `t_config` are always set. Every other field is `None` when the
+/// run returned before that phase.
+pub(crate) struct HookTiming {
+    pub t0: Instant,
+    pub t_config: Instant,
+    pub t_scope: Option<Instant>,
+    pub t_chunk: Option<Instant>,
+    pub t_end: Option<Instant>,
+    pub phases: SessionStartPhases,
+    pub session_log_us: Option<u64>,
+    pub checkpoint_us: Option<u64>,
+    pub spawn_us: Option<u64>,
+    pub spawned_jobs: Option<u64>,
+}
+
+impl HookTiming {
+    /// Timing for a run that returned right after the config load.
+    pub(crate) fn new(t0: Instant, t_config: Instant) -> Self {
+        Self {
+            t0,
+            t_config,
+            t_scope: None,
+            t_chunk: None,
+            t_end: None,
+            phases: SessionStartPhases::none(),
+            session_log_us: None,
+            checkpoint_us: None,
+            spawn_us: None,
+            spawned_jobs: None,
+        }
+    }
+}
+
+pub(crate) fn trace_timing_json(timing: HookTiming) -> serde_json::Value {
     // Cap rather than panic on the (unreachable) overflow of an in-process
     // Instant delta past u64::MAX microseconds (~585,000 years).
     let us = |d: Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
+    let HookTiming {
+        t0,
+        t_config,
+        t_scope,
+        t_chunk,
+        t_end,
+        phases,
+        ..
+    } = timing;
     let mut fields = serde_json::Map::new();
     fields.insert("v".to_string(), serde_json::json!(1));
     fields.insert(
@@ -126,6 +215,27 @@ pub(crate) fn trace_timing_json(
                 "prep_us".to_string(),
                 serde_json::json!(us(t_chunk.saturating_duration_since(t_scope))),
             );
+            // Each sub-phase (#3011) is measured from the latest earlier
+            // boundary that ran, so a skipped sub-phase does not break the chain.
+            let ordered = [
+                ("mcp_probe_us", phases.mcp_probe),
+                ("proxy_restart_us", phases.proxy_restart),
+                ("drift_check_us", phases.drift_check),
+                ("stale_hint_us", phases.stale_hint),
+                ("agent_doc_us", phases.agent_doc),
+                ("wake_up_us", phases.wake_up),
+                ("resume_ctx_us", phases.resume_ctx),
+            ];
+            let mut base = t_chunk;
+            for (name, start) in ordered {
+                if let Some(t) = start {
+                    fields.insert(
+                        name.to_string(),
+                        serde_json::json!(us(t.saturating_duration_since(base))),
+                    );
+                    base = t;
+                }
+            }
             if let Some(t_end) = t_end {
                 fields.insert(
                     "mcp_us".to_string(),
@@ -134,193 +244,80 @@ pub(crate) fn trace_timing_json(
             }
         }
     }
+    // Per-hook-event fields for session-log and checkpoint timing (#3013).
+    let extras = [
+        ("session_log_us", timing.session_log_us),
+        ("checkpoint_us", timing.checkpoint_us),
+        ("spawn_us", timing.spawn_us),
+        ("spawned_jobs", timing.spawned_jobs),
+    ];
+    for (name, value) in extras {
+        if let Some(v) = value {
+            fields.insert(name.to_string(), serde_json::json!(v));
+        }
+    }
     serde_json::Value::Object(fields)
 }
 
 /// Emit the per-phase timing marker to the trace sink.
-pub(crate) fn emit_trace_timing(
-    t0: Instant,
-    t_config: Instant,
-    t_scope: Option<Instant>,
-    t_chunk: Option<Instant>,
-    t_end: Option<Instant>,
-) {
-    emit_json_trace(
-        "hook_run",
-        trace_timing_json(t0, t_config, t_scope, t_chunk, t_end),
-    );
+pub(crate) fn emit_trace_timing(timing: HookTiming) {
+    emit_json_trace("hook_run", trace_timing_json(timing));
 }
 
-/// Emit a `[LLMENV_SPAWN] <label> <duration>us exit=<code|timeout|spawn-error>` line to the
-/// trace sink. The label is a fixed string such as `probe:ssid` — never print arguments,
-/// because they can carry secrets such as keychain item names.
-pub(crate) fn emit_spawn_trace(label: &str, elapsed: Duration, exit: Option<i32>) {
+/// Emit a trace marker for guard commands (config-guard, config-context,
+/// check-stale, read-once, throttle). These commands load config and/or
+/// evaluate scopes but do not run session-log or checkpoint phases. Pass
+/// `t0` (start), `t_config` (config load end), and optionally `t_scope`
+/// (scope eval end).
+pub(crate) fn emit_guard_trace_timing(t0: Instant, t_config: Instant, t_scope: Option<Instant>) {
+    emit_trace_timing(HookTiming {
+        t_scope,
+        ..HookTiming::new(t0, t_config)
+    });
+}
+
+/// How a traced child process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpawnExit {
+    /// The child exited with this code.
+    Code(i32),
+    /// The child ended on a signal.
+    Signal,
+    /// The child ran past its deadline and was killed.
+    Timeout,
+    /// The child did not start, or its output could not be read.
+    Error,
+    /// The parent started the child and did not wait for it.
+    Detached,
+}
+
+impl SpawnExit {
+    /// Classify the result of a waited child.
+    pub(crate) fn of(result: &std::io::Result<std::process::Output>) -> Self {
+        match result {
+            Ok(out) => out.status.code().map_or(Self::Signal, Self::Code),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Self::Timeout,
+            Err(_) => Self::Error,
+        }
+    }
+}
+
+/// Emit a `[LLMENV_SPAWN] <label> <duration>us exit=<code|signal|timeout|spawn-error|detached>`
+/// line to the trace sink. The label is a fixed string such as `probe:ssid` — never print
+/// arguments, because they can carry secrets such as keychain item names.
+pub(crate) fn emit_spawn_trace(label: &str, elapsed: Duration, exit: SpawnExit) {
     if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
         return;
     }
     let us = elapsed.as_micros();
     let exit_str = match exit {
-        Some(code) => format!("exit={code}"),
-        None => "exit=spawn-error".to_string(),
+        SpawnExit::Code(code) => code.to_string(),
+        SpawnExit::Signal => "signal".to_string(),
+        SpawnExit::Timeout => "timeout".to_string(),
+        SpawnExit::Error => "spawn-error".to_string(),
+        SpawnExit::Detached => "detached".to_string(),
     };
-    emit_trace_line(&format!("[LLMENV_SPAWN] {label} {us}us {exit_str}"));
-}
-
-/// Emit a `llmenv-trace {"op":"export",...}` line with per-phase timing.
-/// The fields are optional — a phase that did not run is left out.
-pub(crate) fn emit_export_trace(
-    t0: Instant,
-    t_config: Instant,
-    t_env: Option<Instant>,
-    t_active: Option<Instant>,
-    t_manifest: Option<Instant>,
-    t_adapters: Option<Instant>,
-    t_render: Option<Instant>,
-) {
-    let us = |d: Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
-    let mut fields = serde_json::Map::new();
-    fields.insert(
-        "config_load_us".to_string(),
-        serde_json::json!(us(t_config.saturating_duration_since(t0))),
-    );
-    if let Some(t_env) = t_env {
-        fields.insert(
-            "detect_env_us".to_string(),
-            serde_json::json!(us(t_env.saturating_duration_since(t_config))),
-        );
-    }
-    if let Some(t_active) = t_active {
-        fields.insert(
-            "evaluate_active_us".to_string(),
-            serde_json::json!(us(
-                t_active.saturating_duration_since(t_env.unwrap_or(t_config))
-            )),
-        );
-    }
-    if let Some(t_manifest) = t_manifest {
-        fields.insert(
-            "build_manifest_us".to_string(),
-            serde_json::json!(us(
-                t_manifest.saturating_duration_since(t_active.unwrap_or(t_env.unwrap_or(t_config)))
-            )),
-        );
-    }
-    if let Some(t_adapters) = t_adapters {
-        fields.insert(
-            "materialize_adapters_us".to_string(),
-            serde_json::json!(us(t_adapters.saturating_duration_since(
-                t_manifest.unwrap_or(t_active.unwrap_or(t_env.unwrap_or(t_config)))
-            ))),
-        );
-    }
-    if let Some(t_render) = t_render {
-        fields.insert(
-            "render_vars_us".to_string(),
-            serde_json::json!(us(t_render
-                .saturating_duration_since(t_adapters.unwrap_or(
-                    t_manifest.unwrap_or(t_active.unwrap_or(t_env.unwrap_or(t_config)))
-                )))),
-        );
-    }
-    emit_json_trace("export", serde_json::Value::Object(fields));
-}
-
-/// Emit a `[LLMENV_MATERIALIZE] <adapter> written=<n> unchanged=<n> removed=<n> bytes=<n> <us>us`
-/// line to the trace sink.
-///
-/// The function lists all files in the adapter cache directory, excludes metadata
-/// files (`llmenv-status.json`, `.llmenv-manifest.json`), and compares the result
-/// against the manifest to compute written / unchanged / removed counts and the
-/// total bytes of written files.
-fn emit_materialize_trace(
-    adapter_name: &str,
-    cache_path: &std::path::Path,
-    manifest_file_names: &[&str],
-    written_file_names: &[&str],
-    elapsed: Duration,
-) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
-        return;
-    }
-    // Metadata files that should not count toward materialize stats.
-    let meta: &[&str] = &["llmenv-status.json", ".llmenv-manifest.json"];
-    // All files in the cache directory, excluding metadata, as owned names.
-    let cache_names: Vec<String> = match std::fs::read_dir(cache_path) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if meta.contains(&name.as_str()) {
-                    return None;
-                }
-                Some(name)
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    let mut written_bytes: u64 = 0;
-    for name in written_file_names {
-        let path = cache_path.join(*name);
-        if let Ok(fmeta) = std::fs::metadata(&path)
-            && fmeta.is_file()
-        {
-            written_bytes += fmeta.len();
-        }
-    }
-    // Files in cache but not in manifest = removed.
-    let removed: usize = cache_names
-        .iter()
-        .filter(|n| !manifest_file_names.contains(&n.as_str()))
-        .count();
-    let unchanged: usize = manifest_file_names
-        .iter()
-        .filter(|n| {
-            let path = cache_path.join(**n);
-            std::fs::metadata(&path).is_ok_and(|m| m.is_file())
-        })
-        .count();
-    let written = written_file_names.len();
-    let us = elapsed.as_micros();
-    emit_trace_line(&format!(
-        "[LLMENV_MATERIALIZE] {adapter_name} \
-         written={written} unchanged={unchanged} removed={removed} \
-         bytes={written_bytes} {us}us"
-    ));
-}
-
-/// Record materialize file counts for one adapter and emit the trace line.
-///
-/// This is a thin wrapper that extracts file names from the manifest and
-/// adapter-owned paths, then calls `emit_materialize_trace`. Call this
-/// after `adapter.materialize()` returns.
-pub(crate) fn record_materialize(
-    adapter: &dyn crate::adapter::AgentAdapter,
-    cache_path: &std::path::Path,
-    manifest: &crate::merge::MergedManifest,
-    adapter_owned: &[std::path::PathBuf],
-    elapsed: Duration,
-) {
-    // Collect into owned strings to avoid lifetime issues with iterator temporaries.
-    let manifest_names: Vec<String> = manifest
-        .files
-        .keys()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    let written_names: Vec<String> = adapter_owned
-        .iter()
-        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .collect();
-    emit_materialize_trace(
-        adapter.name(),
-        cache_path,
-        // Safe: file names from the manifest and adapter are always valid UTF-8 on POSIX.
-        &manifest_names
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        &written_names.iter().map(String::as_str).collect::<Vec<_>>(),
-        elapsed,
-    );
+    emit_trace_line(&format!("[LLMENV_SPAWN] {label} {us}us exit={exit_str}"));
 }
 
 /// Emit a `[LLMENV_LEDGER] <op> <duration>us` line to the trace sink.
@@ -347,6 +344,11 @@ fn current_timestamp() -> String {
         .unwrap_or_default()
 }
 
+/// FFI bindings for `getrusage` on macOS.
+mod detached;
+
+pub(crate) use detached::{cpu_time_us, emit_detached_trace};
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -363,5 +365,162 @@ mod tests {
     #[test]
     fn emit_json_trace_never_panics_without_env_var() {
         emit_json_trace("export", serde_json::json!({ "config_load_us": 12 }));
+    }
+
+    // Every documented trace line example parses with the same code path
+    // the binary uses to emit them. A format change that breaks parsing
+    // fails this test until the docs are updated.
+
+    // [LLMENV_CACHE] line parses correctly.
+    #[test]
+    fn cache_trace_line_parses() {
+        let line = "[LLMENV_CACHE] content_hash hit 1.234ms extra_data";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_SPAWN] line parses correctly.
+    #[test]
+    fn spawn_trace_line_parses() {
+        let line = "[LLMENV_SPAWN] probe:ssid 1234us exit=0";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_MCP_CALL] handshake line parses correctly.
+    #[test]
+    fn mcp_call_trace_line_parses() {
+        let line = "[LLMENV_MCP_CALL] initialize 5678us";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_MCP_CALL] line with status parses correctly.
+    #[test]
+    fn mcp_call_trace_line_with_status_parses() {
+        let line = "[LLMENV_MCP_CALL] initialize 5678us status=500";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_MCP_CALL] handshake line with req/resp bytes parses correctly.
+    #[test]
+    fn mcp_call_trace_line_with_bytes_parses() {
+        let line = "[LLMENV_MCP_CALL] initialize 5678us req=256 resp=1024";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_MCP_CALL] handshake line with bytes and status parses correctly.
+    #[test]
+    fn mcp_call_trace_line_with_bytes_and_status_parses() {
+        let line = "[LLMENV_MCP_CALL] initialize 5678us req=256 resp=1024 status=500";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_MCP_CALL] tool call line with req/resp bytes parses correctly.
+    #[test]
+    fn mcp_call_trace_tool_line_with_bytes_parses() {
+        let line = "[LLMENV_MCP_CALL] icm_memory_recall 123us req=512 resp=2048";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_LEDGER] line parses correctly.
+    #[test]
+    fn ledger_trace_line_parses() {
+        let line = "[LLMENV_LEDGER] session_start lock_attempts=5 lock_wait_us=100 read_us=200 write_us=300 bytes=1024 state_unsaved=false";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_CONTEXT] recall-budget line parses correctly.
+    #[test]
+    fn context_trace_line_parses() {
+        let line = "[LLMENV_CONTEXT] recall_entries=10 recall_bytes=2048 injected_entries=5 injected_bytes=1024 duplicate_records=2 already_sent=1 omitted=3 skipped_actions=0";
+        emit_trace_line(line);
+    }
+
+    // JSON marker carries "v": 1.
+    #[test]
+    fn json_marker_carry_version() {
+        let obj = serde_json::json!({
+            "v": 1,
+            "op": "hook_run",
+            "data": { "config_load_us": 12 },
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
+        assert_eq!(parsed["v"], 1);
+        assert_eq!(parsed["op"], "hook_run");
+    }
+
+    // JSON marker for export carries "v": 1.
+    #[test]
+    fn export_marker_carry_version() {
+        let obj = serde_json::json!({
+            "v": 1,
+            "op": "export",
+            "data": { "config_load_us": 12 },
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
+        assert_eq!(parsed["v"], 1);
+        assert_eq!(parsed["op"], "export");
+    }
+
+    // [LLMENV_DETACHED] line parses correctly.
+    #[test]
+    fn detached_trace_line_parses() {
+        let line = "[LLMENV_DETACHED] consolidation 12345us cpu_us=10000 mcp_calls=3 exit=0";
+        emit_trace_line(line);
+    }
+
+    // [LLMENV_DETACHED] line with error exit parses correctly.
+    #[test]
+    fn detached_trace_line_error_exit_parses() {
+        let line = "[LLMENV_DETACHED] icm-store 5678us cpu_us=4000 mcp_calls=1 exit=1";
+        emit_trace_line(line);
+    }
+
+    // trace_timing_json always yields a JSON object with "v": 1 and
+    // "config_load_us" present, and all timing values are non-negative.
+    proptest::proptest! {
+        #[test]
+        fn trace_timing_json_has_version_and_non_negative_timing(
+            config_us in proptest::prelude::any::<u64>(),
+            scope_us in proptest::prelude::any::<u64>(),
+            chunk_us in proptest::prelude::any::<u64>(),
+            end_us in proptest::prelude::any::<u64>(),
+        ) {
+            let t0 = std::time::Instant::now();
+            let t_config = t0 + std::time::Duration::from_micros(config_us);
+            let t_scope = t0 + std::time::Duration::from_micros(scope_us);
+            let t_chunk = t0 + std::time::Duration::from_micros(chunk_us);
+            let t_end = t0 + std::time::Duration::from_micros(end_us);
+            let obj = trace_timing_json(HookTiming {
+                t_scope: Some(t_scope),
+                t_chunk: Some(t_chunk),
+                t_end: Some(t_end),
+                ..HookTiming::new(t0, t_config)
+            });
+            let json: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
+            proptest::prop_assert_eq!(&json["v"], &serde_json::json!(1));
+            proptest::prop_assert!(json.get("config_load_us").is_some());
+            proptest::prop_assert!(json["config_load_us"].is_u64());
+            if let Some(scope) = json.get("scope_eval_us") {
+                proptest::prop_assert!(scope.is_u64());
+            }
+            if let Some(prep) = json.get("prep_us") {
+                proptest::prop_assert!(prep.is_u64());
+            }
+            if let Some(mcp) = json.get("mcp_us") {
+                proptest::prop_assert!(mcp.is_u64());
+            }
+        }
+
+        // trace_timing_json with all-None phases still carries "v": 1.
+        #[test]
+        fn trace_timing_json_with_none_phases_has_version(
+            config_us in proptest::prelude::any::<u64>(),
+        ) {
+            let t0 = std::time::Instant::now();
+            let t_config = t0 + std::time::Duration::from_micros(config_us);
+            let obj = trace_timing_json(HookTiming::new(t0, t_config));
+            let json: serde_json::Value = serde_json::from_str(&obj.to_string()).unwrap();
+            proptest::prop_assert_eq!(&json["v"], &serde_json::json!(1));
+            proptest::prop_assert!(json.get("config_load_us").is_some());
+        }
     }
 }
