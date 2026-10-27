@@ -51,4 +51,13 @@ exclude_re = [
   # A one-line wrapper that passes the PATH lookup of codebase-memory-mcp to trigger_index_with,
   # which the tests run with a fixed program. Its result depends on the host's PATH.
   "replace trigger_codebase_memory_index -> Option<String> with",
+  # Trace emission is side-effect glue: its output goes to stderr or LLMENV_TRACE_FILE, which a unit
+  # test cannot read in a shared process. The formats (src/trace/lines.rs, trace_timing_json) and the
+  # sink are tested, and trace::docs_sync checks the formats against the docs page (#3018).
+  "replace report_ledger with \\(\\)",
+  "replace emit_mcp_call_trace with \\(\\)",
+  "delete field \\w+ from struct crate::trace::HookTiming expression in run_inner",
+  "delete field mcp_probe from struct SessionStartPhases expression in session_start_notice",
+  "in check_stale_with_timing",
+  "replace check_stale_with_timing with \\(\\)",
 ]
