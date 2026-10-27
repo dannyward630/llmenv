@@ -63,7 +63,7 @@ serde_yaml = { package = "serde_yaml_ng", version = "=0.10.0" }
 # Reads the [package] and [tool.*] tables of scanned Cargo.toml and pyproject.toml files for
 # onboarding (#2785). No writer: onboarding never re-serializes a manifest.
 toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync"] }
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
 thiserror = "=2.0.21"
