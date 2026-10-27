@@ -25,9 +25,9 @@ pub fn open_paths() -> anyhow::Result<Vec<PathBuf>> {
 }
 
 /// The longest wait for `lsof`. A full list takes a few seconds on a busy host, and a hung
-/// network or SMB mount blocks lsof with no end (#2832). The value is fixed, because the sweep
-/// runs only from `llmenv clean` and `llmenv doctor --gc`. A minute is a clear sign of a hung
-/// mount.
+/// network or SMB mount blocks lsof with no end (#2832). The SessionStart hint also waits for
+/// this bound when a candidate exists (#3031), so the value stays fixed. A minute is a clear
+/// sign of a hung mount.
 #[cfg(unix)]
 const DEFAULT_LSOF_TIMEOUT: Duration = Duration::from_secs(60);
 

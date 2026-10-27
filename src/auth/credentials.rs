@@ -16,14 +16,17 @@
 //! **Cache layout**: `<state_dir>/auth/credentials.json`, owner-only (0o600).
 //! One file — Claude Code holds one active credential per config dir.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Only `keychain_service` hashes, and that is macOS/test-only — see its cfg.
 #[cfg(any(target_os = "macos", test))]
 use sha2::{Digest, Sha256};
 
+mod cache;
+mod dead_folder;
 mod keychain;
+pub(crate) use cache::{cache_if_needed, cache_path, inject_if_missing, load_cached, save_cached};
 pub(crate) use keychain::forget;
 #[cfg(test)]
 use keychain::parse_keychain_stdout;
@@ -220,51 +223,6 @@ fn keychain_service(config_dir: &Path) -> String {
     )
 }
 
-/// Cache file path: `<state_dir>/auth/credentials.json`.
-#[must_use]
-pub(crate) fn cache_path(adapter_root: &Path) -> PathBuf {
-    super::auth_cache_dir(adapter_root).join(CACHE_FILE)
-}
-
-/// Read the cached credential blob, if any.
-///
-/// A corrupt cache file is reported as absent (traced at debug) rather than
-/// failing — a half-written blob must not wedge every future export.
-///
-/// # Errors
-/// Returns an error only when the file exists but cannot be read.
-pub(crate) fn load_cached(adapter_root: &Path) -> anyhow::Result<Option<Credentials>> {
-    let path = cache_path(adapter_root);
-    let bytes = match crate::paths::bounded::state_bytes_io(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", path.display())),
-    };
-    match serde_json::from_slice::<serde_json::Value>(&bytes) {
-        Ok(value) => Ok(Credentials::from_json(value)),
-        Err(e) => {
-            tracing::debug!(
-                "cached credential blob at {} is not usable (line {}, column {})",
-                path.display(),
-                e.line(),
-                e.column()
-            );
-            Ok(None)
-        }
-    }
-}
-
-/// Write the credential cache, owner-only (0o600) and atomically.
-///
-/// # Errors
-/// Returns an error when serialization or the atomic write fails.
-pub(crate) fn save_cached(adapter_root: &Path, creds: &Credentials) -> anyhow::Result<()> {
-    let path = cache_path(adapter_root);
-    let blob = creds.to_blob()?;
-    crate::paths::write_owner_only_atomic(&path, blob.as_bytes())
-        .map_err(|e| anyhow::anyhow!("writing credential cache {}: {e}", path.display()))
-}
-
 /// Read the credential a materialized folder currently holds.
 ///
 /// # Errors
@@ -325,61 +283,6 @@ fn read_credentials_file(config_dir: &Path) -> anyhow::Result<Option<Credentials
             Ok(None)
         }
     }
-}
-
-/// Cache the folder's credential when the cache is empty or holds a dead blob.
-///
-/// Returns `true` when the cache was written. Never overwrites a live cached
-/// blob with the folder's — the folder may be a stale rendering.
-///
-/// # Errors
-/// Returns an error when a backend read or the cache write fails.
-pub(crate) fn cache_if_needed(
-    backend: Backend,
-    adapter_root: &Path,
-    config_dir: &Path,
-) -> anyhow::Result<bool> {
-    // Cache first: it is a local file read, whereas the folder's backend may be
-    // the macOS keychain (a `security` subprocess). A live cached blob wins
-    // regardless, so reading the folder in that case would be pure overhead on
-    // a path that runs on every `export`.
-    let now = now_ms();
-    if load_cached(adapter_root)?.is_some_and(|c| !c.is_expired(now)) {
-        return Ok(false);
-    }
-    let Some(folder) = read_backend(backend, config_dir)? else {
-        return Ok(false);
-    };
-    save_cached(adapter_root, &folder)?;
-    Ok(true)
-}
-
-/// Seed a materialized folder from the cache when it has no credential.
-///
-/// Returns `true` when a credential was injected. Never overwrites one the
-/// folder already holds, and skips a cached blob that is itself dead.
-///
-/// # Errors
-/// Returns an error when a backend read or the backend write fails.
-pub(crate) fn inject_if_missing(
-    backend: Backend,
-    adapter_root: &Path,
-    config_dir: &Path,
-) -> anyhow::Result<bool> {
-    // Cache first, for the same reason as `cache_if_needed`: nothing usable
-    // cached means nothing to inject, so the folder's backend need not be read.
-    let Some(cached) = load_cached(adapter_root)? else {
-        return Ok(false);
-    };
-    if cached.is_expired(now_ms()) {
-        tracing::debug!("cached credential has expired; not injecting (re-run `llmenv login`)");
-        return Ok(false);
-    }
-    if read_backend(backend, config_dir)?.is_some() {
-        return Ok(false);
-    }
-    write_backend(backend, config_dir, &cached)?;
-    Ok(true)
 }
 
 /// Wall clock in epoch milliseconds — the unit Claude Code's expiry fields use.

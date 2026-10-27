@@ -1598,6 +1598,7 @@ The `branch` widget shows `branch: unreadable` when the repository's `HEAD` exis
 The `pr` widget shows `pr: unreadable` when the branch cannot be read, instead of hiding itself (changed in v3.13.0).
 When `gh` gives no answer, the `pr` widget names the cause: `pr: gh missing` when `gh` is not installed, `pr: gh not logged in` when its login failed or expired, and `pr: gh failed` for a timeout or another error (changed in v3.13.0).
 The cause stays cached for the same 60 seconds as a PR answer.
+A branch with no open PR shows nothing in the `pr` widget, and it does not show `pr: gh failed` (fixed in v3.14.0).
 A branch with no open PR, or a repository with no GitHub remote, still shows nothing.
 
 An unrecognized placeholder inside a custom `format` string (e.g. `{title}`
@@ -1742,6 +1743,7 @@ item" (most commonly a locked keychain) surfaces as an explicit error rather
 than being treated as "no credential stored" (added in v3.8.0).
 
 Each keychain call has a deadline (added in v3.13.0).
+When the cached and the folder credential are both expired, llmenv holds back the next keychain read for five minutes, so a shell prompt does not read the keychain each time (changed in v3.14.0).
 A read waits at most 120 s, because macOS can ask you to allow the access.
 At a terminal, llmenv prints a line before the read, so a waiting prompt is visible.
 A write of the credential also waits at most 120 s, for the same reason.
