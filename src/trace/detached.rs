@@ -77,7 +77,7 @@ fn append_to_state_log(path: &std::path::Path, line: &str) {
 }
 
 /// Return user+sys CPU time of this process as microseconds.
-pub(crate) fn cpu_time_us() -> u64 {
+fn cpu_time_us() -> u64 {
     let t = rustix::time::clock_gettime(rustix::time::ClockId::ProcessCPUTime);
     let secs = u64::try_from(t.tv_sec).unwrap_or(0);
     let nanos = u64::try_from(t.tv_nsec).unwrap_or(0);

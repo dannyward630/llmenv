@@ -13,7 +13,7 @@ const DOCS: &str = include_str!("../../website/docs/trace.md");
 
 /// The tag and each `key=` name in `text`, with a duration shown as `#us` or `#ms` and any other
 /// value shown as `_`. Square brackets that mark an optional field are dropped.
-pub(crate) fn shape(text: &str) -> Vec<String> {
+fn shape(text: &str) -> Vec<String> {
     let mut parts = text.split_whitespace();
     let tag = parts.next().unwrap_or_default().to_string();
     let rest: String = parts.collect::<Vec<_>>().join(" ").replace(['[', ']'], "");

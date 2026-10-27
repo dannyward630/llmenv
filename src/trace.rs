@@ -29,7 +29,7 @@ pub(crate) fn enabled() -> bool {
 }
 
 /// The file named by `LLMENV_TRACE_FILE`, or `None` when it is unset or empty.
-pub(crate) fn file_sink_path() -> Option<std::path::PathBuf> {
+fn file_sink_path() -> Option<std::path::PathBuf> {
     std::env::var_os("LLMENV_TRACE_FILE")
         .filter(|p| !p.is_empty())
         .map(std::path::PathBuf::from)
@@ -68,7 +68,7 @@ fn report_sink_error(path: &std::path::Path, error: &std::io::Error) {
 ///
 /// The file is created owner-only, an existing looser file is tightened, and a symlink at `path`
 /// is refused, because a planted link would redirect the appends.
-pub(crate) fn append_trace_line(path: &std::path::Path, line: &str) {
+fn append_trace_line(path: &std::path::Path, line: &str) {
     let mut file = match llmenv_paths::open_append_owner_only(path) {
         Ok(file) => file,
         Err(e) => {
@@ -89,10 +89,7 @@ pub(crate) fn append_trace_line(path: &std::path::Path, line: &str) {
 /// Build the `llmenv-trace <json>` marker line. The JSON object is flat: `fields` keeps its
 /// own keys, and the line adds `"v": 1` and `"op"`. Existing consumers read the timing keys
 /// at the top level.
-pub(crate) fn json_trace_line(
-    op: &str,
-    mut fields: serde_json::Map<String, serde_json::Value>,
-) -> String {
+fn json_trace_line(op: &str, mut fields: serde_json::Map<String, serde_json::Value>) -> String {
     debug_assert!(
         !fields.contains_key("v") && !fields.contains_key("op"),
         "a trace field named v or op would be overwritten"
@@ -183,7 +180,7 @@ impl HookTiming {
     }
 }
 
-pub(crate) fn trace_timing_json(timing: HookTiming) -> serde_json::Map<String, serde_json::Value> {
+fn trace_timing_json(timing: HookTiming) -> serde_json::Map<String, serde_json::Value> {
     // Cap rather than panic on the (unreachable) overflow of an in-process
     // Instant delta past u64::MAX microseconds (~585,000 years).
     let us = |d: Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
