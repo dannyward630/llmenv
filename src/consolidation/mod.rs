@@ -142,7 +142,20 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
     }
 
     // Wait for output with timeout
-    let output = wait_with_timeout_or_kill_group(child, LLM_TIMEOUT).await?;
+    let started = std::time::Instant::now();
+    let waited = wait_with_timeout_or_kill_group(child, LLM_TIMEOUT).await;
+    crate::trace::emit_spawn_trace(
+        "consolidation:claude",
+        started.elapsed(),
+        match &waited {
+            Ok(output) => output.status.code().map_or(
+                crate::trace::SpawnExit::Signal,
+                crate::trace::SpawnExit::Code,
+            ),
+            Err(_) => crate::trace::SpawnExit::Timeout,
+        },
+    );
+    let output = waited?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

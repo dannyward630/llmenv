@@ -84,6 +84,11 @@ pub(super) fn record_spawn(pid_path: &Path, child_pid: u32, source: SpawnSource)
         .ok()
         .map(|d| d.as_secs());
     let line = attribution_line(child_pid, source, &Spawner::current(), now);
+    crate::trace::emit_spawn_trace(
+        "proxy:start",
+        std::time::Duration::ZERO,
+        crate::trace::SpawnExit::Detached,
+    );
     let written = open_proxy_log(&log_path_for(pid_path))
         .and_then(|mut log| writeln!(log, "{line}").map_err(anyhow::Error::from));
     if let Err(e) = written {
