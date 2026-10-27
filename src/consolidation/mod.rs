@@ -152,6 +152,10 @@ async fn call_claude(prompt: &str) -> anyhow::Result<String> {
                 crate::trace::SpawnExit::Signal,
                 crate::trace::SpawnExit::Code,
             ),
+            // The timeout is the only failure that is not an I/O error from the wait.
+            Err(e) if e.downcast_ref::<std::io::Error>().is_some() => {
+                crate::trace::SpawnExit::Error
+            }
             Err(_) => crate::trace::SpawnExit::Timeout,
         },
     );
