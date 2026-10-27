@@ -19,7 +19,7 @@ pub(crate) struct DetachedJob<'a> {
 /// The line goes to the trace sink. A detached job has no visible stderr, so without
 /// `LLMENV_TRACE_FILE` the line is also appended to `detached-trace.log` in the state dir.
 pub(crate) fn emit_detached_trace(job: &DetachedJob<'_>) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let wall_us = u64::try_from(job.started.elapsed().as_micros()).unwrap_or(u64::MAX);

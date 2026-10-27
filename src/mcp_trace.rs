@@ -34,7 +34,7 @@ pub(crate) fn emit_mcp_handshake_trace(
     req_bytes: u64,
     resp_bytes: u64,
 ) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let us = elapsed.as_micros();
@@ -50,7 +50,7 @@ pub(crate) fn emit_mcp_handshake_trace(
 /// Emit a `[LLMENV_MCP_CALL] <tool> <duration>us req=<bytes> resp=<bytes>`
 /// line to the trace sink.
 pub(crate) fn emit_mcp_call_trace(tool: &str, elapsed: Duration, req_bytes: u64, resp_bytes: u64) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let us = elapsed.as_micros();

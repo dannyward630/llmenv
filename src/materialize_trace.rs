@@ -12,7 +12,7 @@ pub(crate) fn record_materialize(
     before: llmenv_paths::WriteStats,
     elapsed: std::time::Duration,
 ) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let wrote = llmenv_paths::write_stats_snapshot().since(before);

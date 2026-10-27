@@ -16,7 +16,6 @@ pub(in crate::hook_run) fn session_cache_path(state_dir: &Path, session_id: &str
 /// Clear the read-once cache under `state_dir` by removing its folder, and say on stdout what
 /// happened.
 pub fn clear_cache(state_dir: &Path) -> anyhow::Result<()> {
-    let t0 = std::time::Instant::now();
     let ro_dir = read_once_state_dir(state_dir);
     if ro_dir.exists() {
         std::fs::remove_dir_all(&ro_dir)?;
@@ -24,7 +23,6 @@ pub fn clear_cache(state_dir: &Path) -> anyhow::Result<()> {
     } else {
         writeln!(std::io::stdout(), "No read-once cache to clear")?;
     }
-    crate::trace::emit_guard_trace_timing(t0, t0, None);
     Ok(())
 }
 

@@ -118,7 +118,7 @@ fn report(
         eprintln!("{line}");
     }
     // Emit ledger timing when the adaptive recall trace is enabled (#3012).
-    if let (true, Some(l)) = (tracing_enabled, ledger) {
+    if let (true, Some(l)) = (crate::trace::enabled(), ledger) {
         let us = |v: Option<u64>| v.unwrap_or(0);
         let la = l.lock_attempts.unwrap_or(0);
         let lw = us(l.lock_wait_us);

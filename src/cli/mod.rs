@@ -932,9 +932,9 @@ pub fn run() -> anyhow::Result<()> {
             run_login(global)?;
         }
         Some(Command::ReadOnce { command }) => match command {
-            ReadOnceCommand::Clear => {
-                crate::hook_run::read_once::clear_cache(&paths::state_dir()?)?
-            }
+            ReadOnceCommand::Clear => guard::timed("read-once", || {
+                crate::hook_run::read_once::clear_cache(&paths::state_dir()?)
+            })?,
         },
         Some(Command::Memory { command }) => match command {
             MemoryCommand::Stats => crate::memory::stats()?,

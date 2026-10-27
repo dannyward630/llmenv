@@ -50,7 +50,6 @@ fn config_guard_default_cache() -> Option<PathBuf> {
 pub(super) fn run(engine: &str) {
     use std::io::Read;
 
-    let t0 = std::time::Instant::now();
     let mut stdin_buf = String::new();
     // Fix C: surface stdin read failures via stderr instead of silently discarding
     // them — the guard becomes a no-op on failure, but the operator can see why.
@@ -105,7 +104,6 @@ pub(super) fn run(engine: &str) {
     for path_str in extract_hook_file_paths(&stdin_buf) {
         warn_if_cached(&cache_root, &path_str);
     }
-    crate::trace::emit_guard_trace_timing(t0, t0, None);
 }
 
 /// Warn the agent when `path_str` is inside the managed cache.

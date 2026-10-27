@@ -29,6 +29,14 @@ fn open_trace_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
+/// Whether any trace sink is on: `LLMENV_TRACE_TIMING` (stderr) or `LLMENV_TRACE_FILE` (file).
+///
+/// An emitter returns early when this is `false`, so an untraced run pays for no formatting.
+pub(crate) fn enabled() -> bool {
+    std::env::var_os("LLMENV_TRACE_TIMING").is_some()
+        || std::env::var_os("LLMENV_TRACE_FILE").is_some()
+}
+
 /// Emit `line` to stderr and, when `LLMENV_TRACE_FILE` is set, also append
 /// it as a JSON object to the trace file.
 ///
@@ -126,7 +134,7 @@ impl SessionStartPhases {
 /// Emit a `[LLMENV_CACHE] <name> <hit|miss> <duration>ms[ <extra>]` line to
 /// the trace sink.
 pub(crate) fn emit_cache_trace(name: &str, hit: bool, elapsed: Duration, extra: Option<&str>) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let status = if hit { "hit" } else { "miss" };
@@ -273,16 +281,17 @@ pub(crate) fn emit_trace_timing(timing: HookTiming) {
     emit_json_trace("hook_run", trace_timing_json(timing));
 }
 
-/// Emit a trace marker for guard commands (config-guard, config-context,
-/// check-stale, read-once, throttle). These commands load config and/or
-/// evaluate scopes but do not run session-log or checkpoint phases. Pass
-/// `t0` (start), `t_config` (config load end), and optionally `t_scope`
-/// (scope eval end).
-pub(crate) fn emit_guard_trace_timing(t0: Instant, t_config: Instant, t_scope: Option<Instant>) {
-    emit_trace_timing(HookTiming {
-        t_scope,
-        ..HookTiming::new(t0, t_config)
-    });
+/// Emit the `llmenv-trace` marker of a guard command: `{"op":"guard","command":<name>,
+/// "total_us":<n>}`. `command` is one of the five fixed guard names (#3016).
+pub(crate) fn emit_guard_trace(command: &str, total: Duration) {
+    if !enabled() {
+        return;
+    }
+    let total_us = u64::try_from(total.as_micros()).unwrap_or(u64::MAX);
+    emit_json_trace(
+        "guard",
+        serde_json::json!({ "command": command, "total_us": total_us }),
+    );
 }
 
 /// How a traced child process ended.
@@ -315,7 +324,7 @@ impl SpawnExit {
 /// line to the trace sink. The label is a fixed string such as `probe:ssid` — never print
 /// arguments, because they can carry secrets such as keychain item names.
 pub(crate) fn emit_spawn_trace(label: &str, elapsed: Duration, exit: SpawnExit) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let us = elapsed.as_micros();
@@ -333,7 +342,7 @@ pub(crate) fn emit_spawn_trace(label: &str, elapsed: Duration, exit: SpawnExit) 
 ///
 /// Tracks the time to load or update a per-session recall ledger file.
 pub(crate) fn emit_ledger_trace(op: &str, elapsed: Duration) {
-    if std::env::var_os("LLMENV_TRACE_TIMING").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let us = elapsed.as_micros();

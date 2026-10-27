@@ -169,9 +169,9 @@ pub fn run_statusline(
     };
     let icons = resolve_icons(cfg.style.icon_set, &cfg.icons);
 
-    // Track per-widget timing when LLMENV_TRACE_TIMING is set.
+    // Track per-widget timing when a trace sink is on.
     let mut widget_times: Option<std::collections::BTreeMap<String, u64>> =
-        if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
+        if crate::trace::enabled() {
             Some(std::collections::BTreeMap::new())
         } else {
             None
@@ -244,16 +244,14 @@ pub fn run_statusline(
 
 /// Emit a `llmenv-trace {"op":"statusline", ...}` line with per-widget timing.
 ///
-/// Called at the end of `run_statusline` when `LLMENV_TRACE_TIMING` is set.
+/// Called at the end of `run_statusline` when a trace sink is on.
 fn emit_statusline_trace(
     widget_times: Option<std::collections::BTreeMap<String, u64>>,
     t0: std::time::Instant,
 ) {
     if let Some(times) = widget_times {
-        let total_us = std::time::Duration::as_micros(&t0.elapsed()) as u64;
+        let total_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
         let mut fields = serde_json::Map::new();
-        fields.insert("v".to_string(), serde_json::json!(1));
-        fields.insert("op".to_string(), serde_json::json!("statusline"));
         fields.insert("total_us".to_string(), serde_json::json!(total_us));
         for (widget, us) in &times {
             fields.insert(format!("{widget}_us"), serde_json::json!(us));

@@ -212,13 +212,14 @@ sub-phase ran. (added in v3.14.0)
 ### Guard command trace markers
 
 The five guard commands (`config-guard`, `config-context`, `check-stale`,
-`read-once`, `throttle`) each emit one `llmenv-trace` marker with `op:
-"hook_run"` when `LLMENV_TRACE_TIMING` is set.
+`read-once clear`, `throttle`) each emit one `llmenv-trace` marker with `op: "guard"`.
 
-Fields:
+```text
+llmenv-trace {"v": 1, "op": "guard", "command": "<name>", "total_us": <n>}
+```
 
-- `config_load_us` — time to load configuration (always present).
-- `scope_eval_us` — time for scope evaluation (present for `check-stale`).
+- `command` — the guard command name.
+- `total_us` — wall time of the whole command in microseconds.
 
 These markers let a harness compare per-call guard cost with `hook-run
 pre_tool_use`. (added in v3.14.0)
