@@ -102,9 +102,12 @@ fn related_records(body: &str, wanted: &BTreeSet<String>) -> String {
 /// The lowercase tokens of `text` that can tie a memory to a failure: a word of four or more
 /// characters that is not a stop word, or an error code such as `E0063`.
 pub(super) fn distinctive_tokens(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map(str::to_lowercase)
+    // Lowercase first: a letter such as `İ` lowercases to a letter plus a combining mark, and the
+    // mark must split a token like any other non-word character.
+    text.to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|t| is_distinctive(t))
+        .map(str::to_string)
         .collect()
 }
 
@@ -254,6 +257,17 @@ mod tests {
         );
         assert_eq!(rel("", "boom"), "");
         assert_eq!(rel("No memories found.", "boom"), "");
+    }
+
+    #[test]
+    fn a_letter_that_lowercases_to_a_mark_splits_the_token() {
+        let tokens = distinctive_tokens("İstanbul");
+        assert!(tokens.contains("stanbul"), "got {tokens:?}");
+        assert!(
+            tokens
+                .iter()
+                .all(|t| t.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        );
     }
 
     proptest! {
