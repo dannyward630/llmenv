@@ -78,7 +78,7 @@ pub(crate) fn forget(config_dir: &Path) -> anyhow::Result<bool> {
     // stderr discarded deliberately (#1092): the overwhelmingly common failure
     // is "item not found", which the `bool` return already communicates as
     // `false` — there's nothing more a caller needs from stderr for a delete.
-    let mut cmd = std::process::Command::new(SECURITY_BIN);
+    let mut cmd = std::process::Command::new(security_bin()?);
     cmd.args(["delete-generic-password", "-s", &service, "-a", &account])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -99,8 +99,41 @@ pub(crate) fn forget(_config_dir: &Path) -> anyhow::Result<bool> {
 }
 
 /// Absolute path so a hijacked `PATH` cannot substitute the keychain tool.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const SECURITY_BIN: &str = "/usr/bin/security";
+
+/// Overrides the `security` path. A test or a measurement points it at a stub, so the keychain
+/// path runs without the real login keychain (#3030).
+#[cfg(any(target_os = "macos", test))]
+const SECURITY_BIN_ENV: &str = "LLMENV_SECURITY_BIN";
+
+/// Picks the `security` binary: the override when set, else [`SECURITY_BIN`].
+///
+/// # Errors
+/// Returns an error when the override is empty or is not an absolute path.
+#[cfg(any(target_os = "macos", test))]
+fn resolve_security_bin(override_path: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
+    match override_path {
+        None => Ok(std::path::PathBuf::from(SECURITY_BIN)),
+        Some("") => {
+            anyhow::bail!("{SECURITY_BIN_ENV} is empty. Set it to an absolute path, or unset it")
+        }
+        Some(p) if Path::new(p).is_absolute() => Ok(std::path::PathBuf::from(p)),
+        Some(p) => anyhow::bail!(
+            "{SECURITY_BIN_ENV} is the relative path {p}; the keychain tool must be an absolute \
+             path. Set {SECURITY_BIN_ENV} to an absolute path, or unset it"
+        ),
+    }
+}
+
+/// Reads the environment override, then picks the `security` binary.
+///
+/// # Errors
+/// Returns an error when the variable is not UTF-8 or the override is not absolute.
+#[cfg(target_os = "macos")]
+fn security_bin() -> anyhow::Result<std::path::PathBuf> {
+    resolve_security_bin(crate::env_var::utf8_var(SECURITY_BIN_ENV)?.as_deref())
+}
 
 #[cfg(target_os = "macos")]
 fn keychain_account() -> anyhow::Result<String> {
@@ -150,7 +183,7 @@ fn classify_keychain_read_failure(status: &std::process::ExitStatus) -> Keychain
 pub(super) fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<super::Credentials>> {
     let service = super::keychain_service(config_dir);
     let account = keychain_account()?;
-    let mut cmd = std::process::Command::new(SECURITY_BIN);
+    let mut cmd = std::process::Command::new(security_bin()?);
     cmd.args([
         "find-generic-password",
         "-w",
@@ -308,6 +341,35 @@ mod tests {
                 classify_keychain_read_failure(&exit_status(code)),
                 KeychainReadFailure::Other,
                 "exit code {code} should classify as Other"
+            );
+        }
+    }
+
+    // -- security binary override (test seam for #3030) --
+
+    #[test]
+    fn the_security_binary_defaults_to_the_absolute_system_path() {
+        assert_eq!(
+            resolve_security_bin(None).unwrap(),
+            Path::new("/usr/bin/security")
+        );
+    }
+
+    #[test]
+    fn an_absolute_security_override_replaces_the_default() {
+        assert_eq!(
+            resolve_security_bin(Some("/tmp/stub-security")).unwrap(),
+            Path::new("/tmp/stub-security")
+        );
+    }
+
+    #[test]
+    fn a_relative_or_empty_security_override_is_rejected_with_the_fix() {
+        for bad in ["security", "bin/security", ""] {
+            let err = resolve_security_bin(Some(bad)).unwrap_err().to_string();
+            assert!(
+                err.contains("LLMENV_SECURITY_BIN") && err.contains("absolute"),
+                "{err}"
             );
         }
     }
