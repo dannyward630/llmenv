@@ -1403,7 +1403,7 @@ Each entry under `widgets:` accepts:
 | `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
 | `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
-| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). Overridden by `format` when both are set; ignored by widgets without a display mode |
+| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). `usage_5h` and `usage_7d` accept `clock_24h` (`04:20`) or `clock_12h` (`12:40pm`) to show the local clock time when the window resets, instead of the countdown (added in v3.14.0). A 7-day window adds the weekday before the time (`mon 04:20`). The default is the countdown. Overridden by `format` when both are set; ignored by widgets without a display mode |
 | `width` | Bar cell width for `context`/`cache_usage`/`usage_5h`/`usage_7d` (default `10`). Ignored by other widgets |
 | `thresholds` | Two ascending percentages `[warn, crit]` for value-based coloring. Ignored by widgets without threshold coloring |
 
@@ -1518,7 +1518,7 @@ All nine honor `format:`.
 | `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
 | `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
-| `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes) |
+| `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes). Both show `?` when the size cannot be read (added in v3.14.0) |
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |
