@@ -76,7 +76,7 @@ fn main() {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
-                .with_filter(EnvFilter::from_default_env()),
+                .with_filter(stderr_filter(std::env::var("RUST_LOG").ok().as_deref())),
         )
         .with(file_layer)
         .init();
@@ -87,12 +87,32 @@ fn main() {
     }
 }
 
+/// The filter for the stderr layer. With `RUST_LOG` unset it passes WARN and ERROR, so a user
+/// sees the warnings that report a degraded result (#3061). `RUST_LOG` still overrides it.
+fn stderr_filter(rust_log: Option<&str>) -> EnvFilter {
+    EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
+        .parse_lossy(rust_log.unwrap_or(""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn args(raw: &[&str]) -> Vec<std::ffi::OsString> {
         raw.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn stderr_filter_shows_warnings_when_rust_log_is_unset() {
+        let level = stderr_filter(None).max_level_hint();
+        assert_eq!(level, Some(tracing_subscriber::filter::LevelFilter::WARN));
+    }
+
+    #[test]
+    fn stderr_filter_follows_rust_log_when_it_is_set() {
+        let level = stderr_filter(Some("debug")).max_level_hint();
+        assert_eq!(level, Some(tracing_subscriber::filter::LevelFilter::DEBUG));
     }
 
     #[test]
