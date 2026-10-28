@@ -9,7 +9,6 @@ use crate::config::Config;
 use crate::materialize::cache::GcReport;
 use crate::materialize::{cache, tmp_sweep};
 use crate::paths;
-use crate::session_log;
 
 /// How the sweeps print their result, and whether they remove anything.
 #[derive(Debug, Clone, Copy)]
@@ -55,8 +54,14 @@ impl GcOutput<'_> {
     }
 }
 
+mod credentials;
 mod index_use;
+mod session_rotation;
+mod state_gate;
+pub(in crate::cli) use credentials::forget_credentials_for;
 use index_use::{CacheUse, bundles_dir, cache_use};
+use session_rotation::prune_session_log;
+use state_gate::state_may_have_stale_entries;
 
 /// Run every sweep, and return how many entries or sweeps failed. All of them use
 /// `cache.cache_retention_hours` (default 168). A `null` value turns all of them off (#2829).
@@ -132,9 +137,13 @@ fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOu
 /// codebase-memory indexes. Returns the count of failures.
 ///
 /// The in-use list comes from one lsof call, which the two sweeps share. lsof can take up to a
-/// minute on a hung mount.
+/// minute on a hung mount, so the call runs only when a sweep may remove something (#3039).
 fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) -> usize {
-    let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
+    let in_use = if state_may_have_stale_entries(state_dir, retention) {
+        crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"))
+    } else {
+        Ok(Vec::new())
+    };
     let in_use = in_use.as_ref().map(Vec::as_slice).map_err(String::as_str);
     sweep_state_tmp(state_dir, retention, in_use, out)
         + prune_session_log(state_dir, retention, out)
@@ -224,51 +233,6 @@ fn sweep_cbm_indexes(
         }
         Err(e) => {
             eprintln!("{warn} GC of old codebase-memory indexes skipped: {e}");
-            1
-        }
-    }
-}
-
-/// Drop the platform credential entry belonging to each cache folder GC just
-/// deleted, and report how many went (#1057).
-///
-/// Keyed by folder path, so this only ever touches entries llmenv's own folders
-/// owned — never the user's default `~/.claude` login. Deliberately confined to
-/// the explicit `llmenv clean` path: removing credential entries as a side effect
-/// of `export` would be the wrong default.
-pub(in crate::cli) fn forget_credentials_for(removed: &[PathBuf]) -> usize {
-    removed
-        .iter()
-        .filter(|path| {
-            crate::auth::credentials::forget(path)
-                .inspect_err(|e| {
-                    tracing::error!(
-                        "could not drop credential entry for {}: {e}",
-                        path.display()
-                    );
-                })
-                .unwrap_or(false)
-        })
-        .count()
-}
-
-/// Remove session-log rotations older than the retention (#2816). The active file is kept.
-/// Returns 1 when the pass failed.
-fn prune_session_log(state_dir: &Path, retention: Duration, out: GcOutput<'_>) -> usize {
-    let path = session_log::file_sink::file_path_in(state_dir);
-    match session_log::rotation::prune_rotations(&path, retention, out.dry_run) {
-        Ok(removed) => {
-            eprintln!(
-                "{} GC: {} {} rotated session-log file(s)",
-                out.pass,
-                out.verb(),
-                removed.len()
-            );
-            out.list(&removed);
-            0
-        }
-        Err(e) => {
-            eprintln!("{} GC of session-log rotations failed: {e:#}", out.warn);
             1
         }
     }
