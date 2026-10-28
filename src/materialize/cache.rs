@@ -5,15 +5,17 @@ use std::time::{Duration, SystemTime};
 pub(crate) use crate::materialize::expiry::is_expired;
 use tracing;
 
-use anyhow::Context as _;
 use sha2::{Digest, Sha256};
 
 use crate::config::HashingMode;
 use crate::merge::MergedManifest;
 
 mod gc_report;
+mod mtime;
+
 pub use gc_report::GcReport;
 pub(crate) use gc_report::{gc_remove_dir, gc_remove_link};
+pub(crate) use mtime::newest_mtime;
 
 /// Stable SHA-256 of the merged manifest. Each field is length-prefixed
 /// (little-endian u64) before its bytes so concatenation cannot ambiguate
@@ -695,51 +697,8 @@ fn gc_normal_shapes(
     Ok(())
 }
 
-/// Newest mtime found anywhere under `dir` (including the dir itself).
-pub(crate) fn newest_mtime(dir: &Path) -> anyhow::Result<SystemTime> {
-    let mut newest = dir
-        .metadata()
-        .and_then(|m| m.modified())
-        .with_context(|| format!("stat {}", dir.display()))?;
-    walk_mtime(dir, &mut newest)?;
-    Ok(newest)
-}
-
-/// A child that another tool removes during the walk is skipped, not an error (#2835).
-fn walk_mtime(dir: &Path, newest: &mut SystemTime) -> anyhow::Result<()> {
-    let Some(entries) = skip_vanished(std::fs::read_dir(dir))
-        .with_context(|| format!("reading {}", dir.display()))?
-    else {
-        return Ok(());
-    };
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading entry under {}", dir.display()))?;
-        let p = entry.path();
-        // `DirEntry::metadata` does not follow a symlink, so one stat gives both the type and
-        // the mtime.
-        let Some(meta) =
-            skip_vanished(entry.metadata()).with_context(|| format!("stat {}", p.display()))?
-        else {
-            continue;
-        };
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        let m = meta
-            .modified()
-            .with_context(|| format!("mtime {}", p.display()))?;
-        if m > *newest {
-            *newest = m;
-        }
-        if meta.is_dir() {
-            walk_mtime(&p, newest)?;
-        }
-    }
-    Ok(())
-}
-
 /// `None` for a path that no longer exists. Any other error stays an error.
-fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
+pub(super) fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -750,6 +709,27 @@ fn skip_vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn newest_mtime_counts_a_symlink_its_own_age() {
+        // A folder older than the test window, with a symlink created now inside it. The
+        // symlink's own mtime is the newest thing in the folder, so the folder is fresh (#3076).
+        let root = tempfile::tempdir().unwrap();
+        let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+        std::os::unix::fs::symlink(root.path(), root.path().join("link")).unwrap();
+        std::fs::File::open(root.path())
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let newest = newest_mtime(root.path()).unwrap();
+
+        assert!(
+            newest > old + Duration::from_secs(86_400),
+            "{newest:?} is still the old age"
+        );
+    }
+
     use super::*;
     use std::fs;
 
