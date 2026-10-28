@@ -17,8 +17,8 @@ const FAILED_STATUSES: [&str; 4] = [
     "persist_failed",
 ];
 
-/// The finish time as `YYYY-MM-DD HH:MM UTC`. The `jiff` build has no time-zone database, so the
-/// time is UTC.
+/// The finish time as `YYYY-MM-DD HH:MM UTC`. The time is UTC on purpose: it is a timestamp
+/// from a log, so it does not depend on the zone of the machine that reads it.
 fn format_time(time: SystemTime) -> String {
     jiff::Timestamp::try_from(time).map_or_else(
         |_| "at an unknown time".to_string(),

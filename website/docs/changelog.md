@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Show the reset time of the `usage_5h` and `usage_7d` widgets as a local clock time, with `display: clock_24h` or `display: clock_12h`. A 7-day window also shows the weekday. The default is still the countdown. [feat:statusline] [#3022]
+- Warn in `llmenv doctor` when hook commands use the bare `llmenv` name, and name the fix. [feat:doctor] [#3049]
 - Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode]
 - Write the merged agent instructions to `CRUSH.md` in the Crush config dir, so Crush loads them as global context. [feat:crush]
 - Render opencode MCP tool tiers as permission rules. Read-only and mutation tools allow, and destructive tools ask. [feat:opencode]
@@ -34,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Show `?` for the prunable cache size in the statusline when the size cannot be read. The field no longer disappears. [feat:statusline] [#3054]
 - Skip a write when an owner-only file already holds the same bytes at the same mode, so a repeat `llmenv regenerate` leaves current files untouched. An existing file with a looser mode, such as 0644, is now tightened to 0600 on its next write. [#3020, #3024]
 - Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]

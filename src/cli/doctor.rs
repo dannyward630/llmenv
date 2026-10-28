@@ -10,6 +10,10 @@ mod autocompact;
 mod background;
 pub(super) mod cache_gc;
 mod cbm_index;
+mod dependent_tools;
+use dependent_tools::run_doctor_dependent_tools;
+mod hook_command;
+use hook_command::run_doctor_hook_command;
 mod cleartext;
 mod instruction_size;
 mod marketplace_pins;
@@ -26,7 +30,6 @@ mod recall_health;
 mod tool_availability;
 use tool_availability::run_doctor_tool_availability;
 mod version;
-use version::{cbm_floor_warning, opencode_floor_warning};
 
 /// The warning for the first of `keys` whose value is not UTF-8, or `None` when all are readable.
 fn non_utf8_message(keys: &[&str]) -> Option<String> {
@@ -538,46 +541,6 @@ fn run_doctor_icm_server(
     match local_icm_version() {
         Ok(version) => print_check(icm_server_check(&version), &pass, &warn, &info),
         Err(reason) => eprintln!("{warn} {reason}"),
-    }
-}
-
-fn run_doctor_dependent_tools(use_color: bool) {
-    let pass = super::doctor_pass(use_color);
-    let info = super::doctor_info(use_color);
-    let warn = super::doctor_warning(use_color);
-
-    let installed: Vec<_> = DEPENDENT_TOOLS
-        .iter()
-        .filter(|(bin, _)| crate::adapter::binary_on_path(bin))
-        .collect();
-    if installed.is_empty() {
-        return;
-    }
-
-    eprintln!();
-    eprintln!("Dependent-tool versions:");
-    for (bin, update) in installed {
-        let version = tool_version(bin).unwrap_or_else(|| "version unknown".to_string());
-        let how = match update {
-            UpdatePath::SelfApply(_) => "update with",
-            UpdatePath::Reports(_) => "check for updates with",
-        };
-        let floor_warning = match *bin {
-            "codebase-memory-mcp" => cbm_floor_warning(&version),
-            "opencode" => opencode_floor_warning(&version),
-            _ => None,
-        };
-        let marker = if version == "version unknown" {
-            &info
-        } else if floor_warning.is_some() {
-            &warn
-        } else {
-            &pass
-        };
-        eprintln!("{marker} {bin} {version} — {how} `{}`", update.command());
-        if let Some(text) = floor_warning {
-            eprintln!("{warn} {text}");
-        }
     }
 }
 
@@ -1553,6 +1516,7 @@ pub(super) fn run_doctor(
 
     run_doctor_tool_availability(use_color, &config, &features);
     run_doctor_dependent_tools(use_color);
+    run_doctor_hook_command(use_color);
     run_doctor_icm_server(use_color, &config, &config_dir, &active);
     run_doctor_mcp_servers(use_color, &config, &config_dir, &active);
     network::run_doctor_network(use_color, &config);

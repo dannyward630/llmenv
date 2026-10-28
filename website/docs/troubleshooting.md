@@ -209,6 +209,7 @@ When one of them is not found, its scopes do not match.
 llmenv also gives `mcp-proxy` the absolute path of `icm`, because `mcp-proxy` would otherwise do its own `PATH` search.
 The hook commands that llmenv writes into each engine's config also name llmenv by its absolute path (changed in v3.14.0).
 When no absolute `PATH` folder holds llmenv, the hook commands use the bare name `llmenv`, and llmenv logs a warning.
+`llmenv doctor` also reports this fallback, with the fix (added in v3.14.0).
 
 If a program is installed but reported as not found, run `llmenv doctor`.
 It names the relative `PATH` folders that llmenv skips.

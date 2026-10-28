@@ -12,12 +12,13 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::materialize::dir_size::dir_size;
-
 use serde::Serialize;
 
+mod cache;
+use cache::collect_cache;
+
 use crate::cli::statusline::data::{
-    CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData, ThrottleData,
+    CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData, ThrottleData,
 };
 use crate::config::{Config, HashingMode, McpServer, Throttle};
 
@@ -92,7 +93,7 @@ pub fn collect_status_data(
             throttle_conflict,
             config_stale: config_stale
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
-            cache: collect_cache(cache_root, hashing),
+            cache: Some(collect_cache(cache_root, hashing)),
             session_log: collect_session_log(),
             tasks: Some(collect_tasks()),
             unreadable: false,
@@ -387,39 +388,6 @@ fn collect_config_stale(booted: Option<&str>, current: &str) -> Option<bool> {
     }
 }
 
-/// Best-effort prunable-bytes estimate: a dry-run `StaleOnly` prune scan, so
-/// no filesystem mutation ever happens just to report a stat.
-fn collect_cache(cache_root: &Path, hashing: HashingMode) -> Option<CacheData> {
-    let current_version =
-        matches!(hashing, HashingMode::Normal).then(crate::materialize::cache::version_major);
-    let report = match crate::materialize::cache::prune(
-        cache_root,
-        crate::materialize::cache::PruneMode::StaleOnly,
-        hashing,
-        current_version.as_deref(),
-        true, // dry_run: must not delete anything just to report a stat
-    ) {
-        Ok(report) => report,
-        Err(e) => {
-            tracing::debug!("cache stat collection failed (non-fatal): {e}");
-            return None;
-        }
-    };
-    let prunable_bytes = match report
-        .removed
-        .iter()
-        .map(|p| dir_size(p))
-        .sum::<anyhow::Result<u64>>()
-    {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!("cache stat: the prunable size is unknown, so it is not shown: {e:#}");
-            return None;
-        }
-    };
-    Some(CacheData { prunable_bytes })
-}
-
 /// Best-effort session-log line count.
 fn collect_session_log() -> Option<u64> {
     let path = match crate::session_log::file_sink::default_file_path() {
@@ -437,6 +405,7 @@ fn collect_session_log() -> Option<u64> {
 mod tests {
     use super::*;
     use crate::config::{Features, Marketplace, Memory, PluginCollection};
+    use crate::materialize::dir_size::dir_size;
     use proptest::prelude::*;
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
@@ -975,31 +944,6 @@ mod tests {
             prop_assert!(after >= before);
             prop_assert_eq!(after - before, extra_size as u64);
         }
-    }
-
-    #[test]
-    fn collect_cache_missing_cache_root_yields_zero_prunable_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist");
-        let result = collect_cache(&missing, HashingMode::Strict);
-        assert_eq!(result, Some(CacheData { prunable_bytes: 0 }));
-    }
-
-    #[test]
-    fn collect_cache_reports_prunable_bytes_without_deleting() {
-        let dir = tempfile::tempdir().unwrap();
-        // A stale folder (doesn't match the current VERSION_TAG prefix).
-        let stale = dir.path().join("0.0.1-old-deadbeef");
-        std::fs::create_dir_all(&stale).unwrap();
-        std::fs::write(stale.join("file.txt"), b"0123456789").unwrap(); // 10 bytes
-
-        let result = collect_cache(dir.path(), HashingMode::Strict);
-        assert_eq!(result, Some(CacheData { prunable_bytes: 10 }));
-        // dry_run: the stale folder must still be on disk afterward.
-        assert!(
-            stale.exists(),
-            "collect_cache must never delete anything just to report a stat"
-        );
     }
 
     // --- collect_session_log ---
