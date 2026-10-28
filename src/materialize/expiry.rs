@@ -1,11 +1,25 @@
 //! The age test that decides whether a cache or temp entry is old enough to remove (#2954).
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 /// An mtime this far ahead of the clock is a fresh write, not skew. A coarse file-system
 /// timestamp can put a write slightly ahead of the clock read.
 const CLOCK_SKEW_TOLERANCE: Duration = Duration::from_secs(5);
+
+/// The paths whose clock-skew error is already logged in this process. A cache sweep scans a
+/// folder twice, once for its gate and once for the sweep, so one skewed entry would log twice.
+static SKEW_REPORTED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Record that `path` has a clock-skew report. True only the first time in this process (#3077).
+fn first_skew_report(path: &Path) -> bool {
+    SKEW_REPORTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(path.to_path_buf())
+}
 
 /// Check whether `mtime` is older than `older_than` relative to `now`.
 ///
@@ -36,12 +50,14 @@ pub(crate) fn is_expired(
         }
         Err(e) => {
             // Error level: an entry with a future mtime is kept, so the cause must show.
-            tracing::error!(
-                skew_secs = e.duration().as_secs(),
-                "clock skew: {} has an mtime {}s in the future; keeping the entry",
-                path.display(),
-                e.duration().as_secs()
-            );
+            if first_skew_report(path) {
+                tracing::error!(
+                    skew_secs = e.duration().as_secs(),
+                    "clock skew: {} has an mtime {}s in the future; keeping the entry",
+                    path.display(),
+                    e.duration().as_secs()
+                );
+            }
             false
         }
     }
@@ -50,6 +66,14 @@ pub(crate) fn is_expired(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clock_skew_path_is_reported_once_per_process() {
+        // A unique path, because the set is process-wide and other tests share it.
+        let path = Path::new("/llmenv-test/skew-report-once/entry");
+        assert!(first_skew_report(path));
+        assert!(!first_skew_report(path));
+    }
 
     const OLDER_THAN: Duration = Duration::from_secs(60);
 

@@ -49,7 +49,10 @@ impl GcOutput<'_> {
         self.list(&report.removed);
         // #1372: a removal failure does not abort the walk, so the skipped entries are named here.
         for p in &report.failed {
-            eprintln!("{warn} GC: could not process {}", p.display());
+            match report.causes.get(p) {
+                Some(cause) => eprintln!("{warn} GC: could not process {}: {cause}", p.display()),
+                None => eprintln!("{warn} GC: could not process {}", p.display()),
+            }
         }
     }
 }

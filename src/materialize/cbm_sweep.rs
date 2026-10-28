@@ -36,7 +36,10 @@ pub(crate) fn sweep_legacy_indexes(
         // A failed age read is reported even for a unit that is in use, so no error is dropped.
         if let Some((file, e)) = unit.unreadable() {
             tracing::error!("cbm sweep cannot read the age of {}: {e}", file.display());
-            report.failed.extend(unit.files);
+            let cause = format!("cannot read the age of {}: {e}", file.display());
+            for path in unit.files {
+                report.record_failure(path, cause.clone());
+            }
         } else if unit
             .files
             .iter()

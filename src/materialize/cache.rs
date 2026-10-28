@@ -332,7 +332,9 @@ pub(crate) fn prune(
                 // left to a StaleOnly/All pass so the two axes stay orthogonal.
                 if !is_current {
                     false
-                } else if let Some(m) = newest_mtime_or_record(&p, &mut report.failed) {
+                } else if let Some(m) =
+                    newest_mtime_or_record(&p, |path, _| report.failed.push(path))
+                {
                     is_expired(now, m, older_than, &p)
                 } else {
                     continue;
@@ -527,7 +529,7 @@ fn entry_and_type(
 /// The newest mtime under `p`. On failure, the error is logged with its path, `p`
 /// is recorded in `failed`, and `None` is returned, so one unreadable folder does
 /// not stop the rest of the pass (#2859).
-fn newest_mtime_or_record(p: &Path, failed: &mut Vec<PathBuf>) -> Option<SystemTime> {
+fn newest_mtime_or_record(p: &Path, record: impl FnOnce(PathBuf, String)) -> Option<SystemTime> {
     match newest_mtime(p) {
         Ok(m) => Some(m),
         Err(e) => {
@@ -536,7 +538,7 @@ fn newest_mtime_or_record(p: &Path, failed: &mut Vec<PathBuf>) -> Option<SystemT
                  the permissions of that folder, or remove it by hand.",
                 p.display()
             );
-            failed.push(p.to_path_buf());
+            record(p.to_path_buf(), format!("{e:#}"));
             None
         }
     }
@@ -618,7 +620,8 @@ pub fn gc(
             gc_normal_shapes(&p, older_than, &now, &mut report)?;
             continue;
         }
-        let Some(m) = newest_mtime_or_record(&p, &mut report.failed) else {
+        let Some(m) = newest_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
+        else {
             continue;
         };
         let expired = is_expired(now, m, older_than, &p);
@@ -684,7 +687,8 @@ fn gc_normal_shapes(
             report.kept += 1;
             continue;
         }
-        let Some(m) = newest_mtime_or_record(&p, &mut report.failed) else {
+        let Some(m) = newest_mtime_or_record(&p, |path, cause| report.record_failure(path, cause))
+        else {
             continue;
         };
         let expired = is_expired(*now, m, older_than, &p);
