@@ -2,6 +2,7 @@
 //! (#2956).
 
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
 use crate::util::shell_word;
 
@@ -15,28 +16,59 @@ pub(crate) fn hook_command(args: &str) -> String {
     hook_command_in(std::env::var_os("PATH").as_deref(), args)
 }
 
-fn hook_command_in(path_var: Option<&OsStr>, args: &str) -> String {
-    let program = match llmenv_paths::program::find_on_path("llmenv", path_var) {
-        Some(path) if path.to_str().is_some() => shell_word(&path),
-        Some(path) => {
+/// How hook commands name the llmenv program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProgramName {
+    /// The shell-quoted absolute path of llmenv on `PATH`.
+    Absolute(String),
+    /// The bare name `llmenv`. Holds the path found on `PATH` when it is not UTF-8, and `None`
+    /// when no absolute `PATH` folder holds llmenv.
+    Bare(Option<PathBuf>),
+}
+
+impl ProgramName {
+    /// The program text that the hook command lines start with.
+    fn word(&self) -> &str {
+        match self {
+            Self::Absolute(word) => word,
+            Self::Bare(_) => "llmenv",
+        }
+    }
+
+    /// The message that names the bare-name fallback and its fix, or `None` for an absolute path.
+    pub(crate) fn fallback_warning(&self) -> Option<String> {
+        match self {
+            Self::Absolute(_) => None,
             // A lossy conversion would name a file that does not exist, so the bare name is used.
-            tracing::warn!(
+            Self::Bare(Some(path)) => Some(format!(
                 "llmenv is at {}, which is not valid UTF-8, so its hook commands use the bare \
                  name `llmenv`. Fix: install llmenv in a UTF-8 folder on PATH.",
                 path.display()
-            );
-            "llmenv".to_string()
-        }
-        None => {
-            tracing::warn!(
+            )),
+            Self::Bare(None) => Some(
                 "llmenv is not in an absolute PATH folder, so its hook commands use the bare \
                  name `llmenv`, which a relative PATH entry can shadow. Fix: install llmenv in \
                  an absolute PATH folder, such as ~/.cargo/bin."
-            );
-            "llmenv".to_string()
+                    .to_string(),
+            ),
         }
-    };
-    format!("{program} {args}")
+    }
+}
+
+/// Pick how hook commands name llmenv, from the `PATH` value in `path_var`.
+pub(crate) fn program_name(path_var: Option<&OsStr>) -> ProgramName {
+    match llmenv_paths::program::find_on_path("llmenv", path_var) {
+        Some(path) if path.to_str().is_some() => ProgramName::Absolute(shell_word(&path)),
+        found => ProgramName::Bare(found),
+    }
+}
+
+fn hook_command_in(path_var: Option<&OsStr>, args: &str) -> String {
+    let program = program_name(path_var);
+    if let Some(warning) = program.fallback_warning() {
+        tracing::warn!("{warning}");
+    }
+    format!("{} {args}", program.word())
 }
 
 #[cfg(test)]
@@ -88,6 +120,30 @@ mod tests {
     #[test]
     fn falls_back_to_bare_name_when_path_is_unset() {
         assert_eq!(hook_command_in(None, "throttle"), "llmenv throttle");
+    }
+
+    #[test]
+    fn bare_fallback_without_path_names_the_absolute_folder_fix() {
+        let program = program_name(None);
+        assert_eq!(program, ProgramName::Bare(None));
+        let warning = program
+            .fallback_warning()
+            .expect("the bare name has a warning");
+        assert!(warning.contains("absolute PATH folder"), "{warning}");
+        assert!(warning.contains("Fix: install llmenv"), "{warning}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_program_has_no_fallback_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        make_executable(&dir.path().join("llmenv"));
+        let path_var = OsString::from(dir.path());
+
+        let program = program_name(Some(&path_var));
+
+        assert!(matches!(program, ProgramName::Absolute(_)), "{program:?}");
+        assert_eq!(program.fallback_warning(), None);
     }
 
     proptest! {
