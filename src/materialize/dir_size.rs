@@ -48,7 +48,7 @@ fn skip_entry(err: &walkdir::Error, root: &Path) -> anyhow::Result<()> {
         );
     }
     if !is_not_found(err) {
-        tracing::warn!("{err}; that entry is left out of the size estimate");
+        tracing::error!("{err}; that entry is left out of the size estimate");
     }
     Ok(())
 }
