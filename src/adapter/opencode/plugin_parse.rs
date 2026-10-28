@@ -5,6 +5,9 @@ use std::path::Path;
 use super::PluginHooksManifest;
 use crate::adapter::yaml_value_kind_name;
 
+#[cfg(test)]
+mod tests;
+
 /// Parse a plugin hooks manifest (hooks.json or claude-codex-hooks.json) into
 /// [`crate::config::Hook`] structs.
 ///

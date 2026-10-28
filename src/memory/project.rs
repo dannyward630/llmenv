@@ -55,9 +55,7 @@ fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
         return decode_git_stdout(dir, output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status.code() == Some(1)
-        || stderr.to_ascii_lowercase().contains("not a git repository")
-    {
+    if output.status.code() == Some(1) || crate::git::is_not_a_repo_message(&stderr) {
         return Ok(None);
     }
     anyhow::bail!(

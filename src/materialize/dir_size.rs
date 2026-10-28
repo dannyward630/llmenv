@@ -12,8 +12,10 @@ use std::path::Path;
 /// entries are skipped (best-effort estimate, not exact accounting).
 ///
 /// # Errors
-/// Fails when the path cannot be stat-ed or a directory cannot be listed. A zero would look like
-/// a real measurement, so the failure is returned instead (#3038).
+/// Fails when `path` itself cannot be stat-ed or listed. A zero there would look like a real
+/// measurement, so the failure is returned instead (#3038). An entry below `path` that cannot be
+/// read is logged and left out of the total, so one unreadable subtree does not drop the whole
+/// estimate.
 pub(crate) fn dir_size(path: &Path) -> anyhow::Result<u64> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -27,8 +29,41 @@ pub(crate) fn dir_size(path: &Path) -> anyhow::Result<u64> {
     let entries = std::fs::read_dir(path).map_err(|e| {
         anyhow::anyhow!("cannot list {} for the size estimate: {e}", path.display())
     })?;
-    entries
-        .filter_map(|entry| crate::paths::readable_entry(path, "the size estimate", entry))
-        .map(|entry| dir_size(&entry.path()))
-        .sum()
+    let mut total: u64 = 0;
+    for entry in entries.filter_map(|e| crate::paths::readable_entry(path, "the size estimate", e))
+    {
+        match dir_size(&entry.path()) {
+            Ok(bytes) => total = total.saturating_add(bytes),
+            Err(e) => tracing::warn!("{e:#}; that entry is left out of the size estimate"),
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(all(test, unix))]
+#[expect(
+    clippy::expect_used,
+    reason = "a test fails loudly when its fixture cannot be set up"
+)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn an_unreadable_subdirectory_is_left_out_and_its_siblings_still_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("readable"), [0u8; 10]).expect("write fixture");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).expect("create locked dir");
+        std::fs::write(locked.join("hidden"), [0u8; 99]).expect("write hidden fixture");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the directory");
+
+        let total = dir_size(dir.path());
+
+        // Restore access so the tempdir can be removed, whatever the assertion said.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock the directory");
+        assert_eq!(total.expect("the root is readable"), 10);
+    }
 }

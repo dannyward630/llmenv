@@ -8,24 +8,34 @@ use std::time::{Duration, SystemTime};
 const CLOCK_SKEW_TOLERANCE: Duration = Duration::from_secs(5);
 
 /// Check whether `mtime` is older than `older_than` relative to `now`.
-/// An mtime in the future is kept and logged. A clock that moved backward must not
-/// delete live data, and the `state/tmp` sweep keeps such an entry too (#2860).
 ///
-/// `now` is read once before a walk, so a write made during the walk can be ahead of it.
-/// The clock is read again before a future mtime is called skew (#2954).
+/// An mtime in the future is kept. It stays kept until the clock passes it, and then its age is
+/// measured normally. A clock that moved backward must not delete live data, and the `state/tmp`
+/// sweep keeps such an entry too (#2860).
+///
+/// `now` is read once before a walk, so a write made during the walk can be ahead of it. When
+/// `now` is behind the mtime, the wall clock is read again before the mtime is called skew (#2954).
 pub(crate) fn is_expired(
     now: SystemTime,
     mtime: SystemTime,
     older_than: Duration,
     path: &Path,
 ) -> bool {
-    if let Ok(elapsed) = now.duration_since(mtime) {
-        return elapsed > older_than;
-    }
-    match SystemTime::now().duration_since(mtime) {
+    let age = now
+        .duration_since(mtime)
+        .or_else(|_| SystemTime::now().duration_since(mtime));
+    match age {
         Ok(elapsed) => elapsed > older_than,
-        Err(e) if e.duration() > CLOCK_SKEW_TOLERANCE => {
-            // Error level: an entry with a future mtime is never collected, so the cause must show.
+        Err(e) if e.duration() <= CLOCK_SKEW_TOLERANCE => {
+            tracing::debug!(
+                "{} has an mtime {}ms ahead of the clock, within tolerance, so it is kept",
+                path.display(),
+                e.duration().as_millis()
+            );
+            false
+        }
+        Err(e) => {
+            // Error level: an entry with a future mtime is kept, so the cause must show.
             tracing::error!(
                 skew_secs = e.duration().as_secs(),
                 "clock skew: {} has an mtime {}s in the future; keeping the entry",
@@ -34,6 +44,53 @@ pub(crate) fn is_expired(
             );
             false
         }
-        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OLDER_THAN: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn an_entry_older_than_the_threshold_is_expired() {
+        let now = SystemTime::now();
+        assert!(is_expired(
+            now,
+            now - Duration::from_secs(61),
+            OLDER_THAN,
+            Path::new("e")
+        ));
+    }
+
+    #[test]
+    fn an_entry_exactly_at_the_threshold_is_kept() {
+        let now = SystemTime::now();
+        assert!(!is_expired(
+            now,
+            now - OLDER_THAN,
+            OLDER_THAN,
+            Path::new("e")
+        ));
+    }
+
+    #[test]
+    fn a_future_mtime_beyond_the_tolerance_is_kept() {
+        let now = SystemTime::now();
+        let future = now + Duration::from_secs(3600);
+        assert!(!is_expired(now, future, Duration::ZERO, Path::new("e")));
+    }
+
+    #[test]
+    fn a_future_mtime_within_the_tolerance_is_kept() {
+        let now = SystemTime::now();
+        let slightly_ahead = now + Duration::from_secs(1);
+        assert!(!is_expired(
+            now,
+            slightly_ahead,
+            Duration::ZERO,
+            Path::new("e")
+        ));
     }
 }

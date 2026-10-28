@@ -13,7 +13,10 @@ pub(crate) fn remote_transport_type_str(transport: McpTransport) -> &'static str
         McpTransport::Sse => "sse",
         McpTransport::Http => "http",
         McpTransport::Stdio => {
-            unreachable!("a stdio MCP server resolves to ResolvedKind::Stdio, not a remote one")
+            unreachable!(
+                "a stdio MCP server must resolve to ResolvedKind::Stdio, not a remote one. \
+                 Fix: correct the resolver in crate::mcp::resolve."
+            )
         }
     }
 }

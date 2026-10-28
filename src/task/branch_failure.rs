@@ -5,7 +5,7 @@
 /// normal. Anything else, such as "dubious ownership" or a kill by signal, hides the branch
 /// for a reason the user can fix.
 pub(super) fn branch_failure_is_unexpected(code: Option<i32>, stderr: &str) -> bool {
-    code != Some(1) && !stderr.to_ascii_lowercase().contains("not a git repository")
+    code != Some(1) && !crate::git::is_not_a_repo_message(stderr)
 }
 
 #[cfg(test)]

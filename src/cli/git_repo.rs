@@ -17,11 +17,7 @@ pub(super) fn is_git_repo(dir: &Path) -> anyhow::Result<bool> {
     if output.status.success() {
         return Ok(true);
     }
-    // Matched without case, as git may print the message capitalised (#3040).
-    if String::from_utf8_lossy(&output.stderr)
-        .to_ascii_lowercase()
-        .contains("not a git repository")
-    {
+    if git::is_not_a_repo_message(&String::from_utf8_lossy(&output.stderr)) {
         return Ok(false);
     }
     anyhow::bail!(
