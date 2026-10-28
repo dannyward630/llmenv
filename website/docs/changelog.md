@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Render bundle env vars (`capabilities.env`) to the top-level `env` key in `crush.json`. [feat:crush]
 - Extend `LLMENV_TRACE_TIMING` with `[LLMENV_SPAWN]` lines for child processes, `[LLMENV_LEDGER]` lines for recall ledger locking, `[LLMENV_MATERIALIZE]` file counts per adapter, per-widget statusline timing, session-start sub-phases, and one `llmenv-trace` marker each for `export` and `regenerate`. Markers carry `"v": 1`. Set `LLMENV_TRACE_FILE` to append every trace line as JSON Lines. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace). [#3009, #3010, #3011, #3012, #3013, #3015, #3016, #3017, #3019, #3020]
 - Emit a `[LLMENV_DETACHED]` trace line when each detached job (consolidation, ICM store, session-log record, CBM index) exits. The line carries job kind, wall time, CPU time (macOS), MCP call count, and exit status. See [Trace telemetry](https://phaedrus1992.github.io/llmenv/docs/trace#llmenvdetached). [#3014]
+- Add `LLMENV_SECURITY_BIN` to point the macOS keychain read at another `security` binary, for tests. A relative or empty value is an error. Unset keeps `/usr/bin/security`. [feat:auth] [#3030]
 
 ### Changed
 
@@ -41,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
+- Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
 
 ### Fixed
 
@@ -54,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fail the cache size estimate when a path cannot be stat-ed or a directory cannot be listed, instead of reporting zero bytes. [fix:materialize] [#3038]
 - Match git's "not a git repository" message without case in the task tracker, the memory project check, and the CLI git-repo check. [fix:task] [#3040]
 - Stop `llmenv clean` from logging clock skew for a cache entry written during the GC run. The skew log now names the entry path. [fix:materialize] [#2954]
+- Compute the peak widget window from the zone database, so a countdown across a DST change counts the real hours. The old rule was one hour off on that day. A zone that cannot be read shows `unknown` and logs an error. [refactor:statusline] [#3063]
 
 ### Security
 
