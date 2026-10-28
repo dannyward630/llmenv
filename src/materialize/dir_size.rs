@@ -19,8 +19,11 @@ use std::path::Path;
 pub(crate) fn dir_size(path: &Path) -> anyhow::Result<u64> {
     let mut total: u64 = 0;
     // Not following links keeps a symlink sized by its own length, and stops the walk from
-    // leaving the tree.
-    for step in walkdir::WalkDir::new(path).follow_links(false) {
+    // leaving the tree. The root link is not followed either, because walkdir follows it by default.
+    for step in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .follow_root_links(false)
+    {
         match step {
             Ok(entry) if entry.file_type().is_dir() => {}
             Ok(entry) => match entry.metadata() {
@@ -80,6 +83,21 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
             .expect("unlock the directory");
         assert_eq!(total.expect("the root is readable"), 10);
+    }
+
+    #[test]
+    fn a_root_symlink_counts_its_own_length_and_its_target_is_not_walked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).expect("create target dir");
+        std::fs::write(target.join("big"), [0u8; 99]).expect("write target fixture");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let link_len = std::fs::symlink_metadata(&link).expect("stat link").len();
+
+        let total = dir_size(&link).expect("the link is readable");
+
+        assert_eq!(total, link_len);
     }
 
     #[test]
