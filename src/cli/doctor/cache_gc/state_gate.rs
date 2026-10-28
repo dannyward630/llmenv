@@ -10,32 +10,49 @@ use crate::materialize::tmp_sweep;
 /// remove only entries older than `retention`, so `false` means the in-use list is not needed.
 /// An entry that cannot be read counts as possibly stale.
 pub(super) fn state_may_have_stale_entries(state_dir: &Path, retention: Duration) -> bool {
-    let tmp_may_be_stale = match tmp_sweep::stale_summary_in(&state_dir.join("tmp"), retention, &[])
-    {
+    let tmp = state_dir.join("tmp");
+    let tmp_may_be_stale = match tmp_sweep::stale_summary_in(&tmp, retention, &[]) {
         Ok(summary) => summary.count > 0 || summary.unreadable > 0,
-        Err(_) => true,
+        Err(e) => {
+            tracing::error!(
+                "state GC cannot scan {}, so lsof runs: {e:#}",
+                tmp.display()
+            );
+            true
+        }
     };
     tmp_may_be_stale || cbm_has_entry_older_than(&state_dir.join("codebase-memory"), retention)
 }
 
 /// Whether `dir` holds an entry last written at or before `now - retention`. A database is
 /// removed only when the newest file of its unit is that old, so every removable unit has such
-/// an entry.
+/// an entry. An unreadable entry counts as old, and it is logged.
 fn cbm_has_entry_older_than(dir: &Path, retention: Duration) -> bool {
     let Some(cutoff) = SystemTime::now().checked_sub(retention) else {
+        tracing::error!("state GC cannot compute the cutoff, so lsof runs");
         return true;
     };
     let mut entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            tracing::error!("state GC cannot read {}, so lsof runs: {e}", dir.display());
+            return true;
+        }
     };
     entries.any(|entry| {
-        match entry
+        let modified = entry
             .and_then(|e| e.metadata())
-            .and_then(|meta| meta.modified())
-        {
+            .and_then(|meta| meta.modified());
+        match modified {
             Ok(modified) => modified <= cutoff,
-            Err(_) => true,
+            Err(e) => {
+                tracing::error!(
+                    "state GC cannot read an entry of {}, so lsof runs: {e}",
+                    dir.display()
+                );
+                true
+            }
         }
     })
 }
