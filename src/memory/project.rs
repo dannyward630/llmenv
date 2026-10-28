@@ -55,7 +55,10 @@ fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
         return decode_git_stdout(dir, output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status.code() == Some(1) || crate::git::is_not_a_repo_message(&stderr) {
+    // `git config --get` exits 1 when the key is absent, which is a normal answer. Other git
+    // commands use exit 1 for a real failure, so only a config lookup counts as absent (#3053).
+    let absent_key = args.first() == Some(&"config") && output.status.code() == Some(1);
+    if absent_key || crate::git::is_not_a_repo_message(&stderr) {
         return Ok(None);
     }
     anyhow::bail!(
