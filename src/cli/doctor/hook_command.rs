@@ -2,20 +2,13 @@
 //! folder that holds llmenv, the hook commands use the bare name, and a relative `PATH` entry can
 //! shadow that name.
 
-use std::ffi::OsStr;
-
 use crate::adapter::hook_program::program_name;
-
-/// The warning for `path_var`, or `None` when the hook commands name llmenv by an absolute path.
-fn hook_command_warning(path_var: Option<&OsStr>) -> Option<String> {
-    program_name(path_var).fallback_warning()
-}
 
 /// Print the hook-command check for the current `PATH`.
 pub(super) fn run_doctor_hook_command(use_color: bool) {
     let pass = super::super::doctor_pass(use_color);
     let warn = super::super::doctor_warning(use_color);
-    match hook_command_warning(std::env::var_os("PATH").as_deref()) {
+    match program_name(std::env::var_os("PATH").as_deref()).fallback_warning() {
         Some(message) => eprintln!("{warn} {message}"),
         None => eprintln!("{pass} Hook commands name llmenv by an absolute PATH folder"),
     }
@@ -32,7 +25,9 @@ mod tests {
 
     #[test]
     fn warns_with_the_fix_when_path_is_unset() {
-        let warning = hook_command_warning(None).expect("the bare name is warned about");
+        let warning = program_name(None)
+            .fallback_warning()
+            .expect("the bare name is warned about");
         assert!(warning.contains("Fix: install llmenv"), "{warning}");
     }
 
@@ -47,13 +42,13 @@ mod tests {
             .expect("chmod fake llmenv");
         let path_var = OsString::from(dir.path());
 
-        assert_eq!(hook_command_warning(Some(&path_var)), None);
+        assert_eq!(program_name(Some(&path_var)).fallback_warning(), None);
     }
 
     #[cfg(unix)]
     #[test]
     fn warns_when_llmenv_is_only_in_a_relative_path_folder() {
         let path_var = OsString::from(".");
-        assert!(hook_command_warning(Some(&path_var)).is_some());
+        assert!(program_name(Some(&path_var)).fallback_warning().is_some());
     }
 }
