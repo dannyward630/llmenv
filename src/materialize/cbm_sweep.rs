@@ -33,15 +33,16 @@ pub(crate) fn sweep_legacy_indexes(
         return Ok(report);
     };
     for unit in units {
-        if unit
+        // A failed age read is reported even for a unit that is in use, so no error is dropped.
+        if let Some((file, e)) = unit.unreadable() {
+            tracing::error!("cbm sweep cannot read the age of {}: {e}", file.display());
+            report.failed.extend(unit.files);
+        } else if unit
             .files
             .iter()
             .any(|f| in_use.iter().any(|used| used == f))
         {
             report.kept += unit.files.len();
-        } else if let Some((file, e)) = unit.unreadable() {
-            tracing::error!("cbm sweep cannot read the age of {}: {e}", file.display());
-            report.failed.extend(unit.files);
         } else if unit.is_expired() {
             for file in &unit.files {
                 gc_remove_link(file, &mut report);

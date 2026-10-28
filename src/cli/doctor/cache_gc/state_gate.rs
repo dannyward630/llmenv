@@ -34,7 +34,8 @@ fn cbm_may_have_stale_units(dir: &Path, retention: Duration) -> bool {
         Ok(Some(units)) => !units.iter().all(Unit::is_fresh),
         Err(e) => {
             tracing::error!(
-                "state GC cannot scan {}, so lsof runs: {e:#}",
+                "state GC cannot scan {}, so lsof runs: {e:#}. Fix: make the folder readable, then \
+                 run the GC again",
                 dir.display()
             );
             true
