@@ -3,6 +3,9 @@
 //! of stdin.
 
 use super::data::StatusData;
+mod cache;
+mod humanize;
+use cache::render_cache;
 use std::collections::BTreeMap;
 
 #[must_use]
@@ -80,31 +83,6 @@ fn render_icm(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> S
     format
         .replace("{memories}", &icm.memories.to_string())
         .replace("{concepts}", &icm.concepts.to_string())
-}
-
-fn render_cache(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    let Some(cache) = &data.cache else {
-        return String::new();
-    };
-    let humanized = humanize_bytes(cache.prunable_bytes);
-    let format = cfg
-        .and_then(|c| c.format.as_deref())
-        .unwrap_or("{prunable}");
-    format
-        .replace("{prunable}", &humanized)
-        .replace("{prunable_raw}", &cache.prunable_bytes.to_string())
-}
-
-fn humanize_bytes(bytes: u64) -> String {
-    const MB: u64 = 1024 * 1024;
-    const KB: u64 = 1024;
-    if bytes >= MB {
-        format!("{} MB", bytes / MB)
-    } else if bytes >= KB {
-        format!("{} KB", bytes / KB)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 fn render_config_stale(
@@ -215,6 +193,7 @@ fn render_tasks(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) ->
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::cache::UNKNOWN_MARKER;
     use super::*;
     use crate::cli::statusline::data::{
         CacheData, CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData,
@@ -272,7 +251,7 @@ mod tests {
     fn renders_cache_prunable_bytes_humanized() {
         let data = StatusData {
             cache: Some(CacheData {
-                prunable_bytes: 15_728_640,
+                prunable_bytes: Some(15_728_640),
             }),
             ..Default::default()
         };
@@ -364,7 +343,7 @@ mod tests {
     fn renders_cache_prunable_bytes_at_kb_and_sub_kb() {
         let data = StatusData {
             cache: Some(CacheData {
-                prunable_bytes: 2048,
+                prunable_bytes: Some(2048),
             }),
             ..Default::default()
         };
@@ -375,13 +354,35 @@ mod tests {
 
         let data = StatusData {
             cache: Some(CacheData {
-                prunable_bytes: 512,
+                prunable_bytes: Some(512),
             }),
             ..Default::default()
         };
         assert_eq!(
             render_llmenv_widget("cache", &data, None, &icons(), false).unwrap(),
             "512 B"
+        );
+    }
+
+    #[test]
+    fn renders_unknown_marker_when_cache_size_is_unreadable() {
+        let data = StatusData {
+            cache: Some(CacheData {
+                prunable_bytes: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_llmenv_widget("cache", &data, None, &icons(), false).unwrap(),
+            UNKNOWN_MARKER
+        );
+        let raw = llmenv_config::WidgetConfig {
+            format: Some("{prunable_raw}".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_llmenv_widget("cache", &data, Some(&raw), &icons(), false).unwrap(),
+            UNKNOWN_MARKER
         );
     }
 
@@ -484,7 +485,7 @@ mod tests {
     fn render_cache_honors_custom_format() {
         let data = StatusData {
             cache: Some(CacheData {
-                prunable_bytes: 2048,
+                prunable_bytes: Some(2048),
             }),
             ..Default::default()
         };
@@ -685,7 +686,7 @@ mod tests {
                 concepts: 47,
             }),
             cache: Some(CacheData {
-                prunable_bytes: 15_728_640,
+                prunable_bytes: Some(15_728_640),
             }),
             config_stale: Some(true),
             throttle: Some(ThrottleData {
@@ -764,20 +765,5 @@ mod tests {
             }
         }
 
-        /// Boundary behavior at 1024 / 1024^2 across the full `u64` space —
-        /// previously only unit-tested at fixed values.
-        #[test]
-        fn humanize_bytes_respects_unit_thresholds(bytes in any::<u64>()) {
-            const KB: u64 = 1024;
-            const MB: u64 = 1024 * 1024;
-            let out = humanize_bytes(bytes);
-            if bytes >= MB {
-                prop_assert_eq!(out, format!("{} MB", bytes / MB));
-            } else if bytes >= KB {
-                prop_assert_eq!(out, format!("{} KB", bytes / KB));
-            } else {
-                prop_assert_eq!(out, format!("{bytes} B"));
-            }
-        }
     }
 }

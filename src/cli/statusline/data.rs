@@ -58,9 +58,11 @@ pub struct ThrottleData {
     pub cooldown_secs: u64,
 }
 
+/// Prunable cache size. `prunable_bytes` is `None` when the size could not be
+/// read, so the status line shows an unknown marker rather than a zero.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CacheData {
-    pub prunable_bytes: u64,
+    pub prunable_bytes: Option<u64>,
 }
 
 /// Task-tracker progress, scoped to sessions open for the current project
@@ -145,7 +147,7 @@ mod tests {
         assert_eq!(data.plugins.unwrap().total, 12);
         assert_eq!(data.icm.unwrap().memories, 142);
         assert_eq!(data.config_stale, Some(false));
-        assert_eq!(data.cache.unwrap().prunable_bytes, 15_728_640);
+        assert_eq!(data.cache.unwrap().prunable_bytes, Some(15_728_640));
         assert_eq!(data.session_log, Some(8));
         assert!(data.throttle.is_none());
     }
