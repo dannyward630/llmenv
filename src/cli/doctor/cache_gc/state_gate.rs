@@ -9,8 +9,13 @@ use crate::materialize::tmp_sweep;
 
 /// Whether a sweep of `state/tmp` or `state/codebase-memory` could remove an entry. Both sweeps
 /// remove only entries older than `retention`, so `false` means the in-use list is not needed.
+/// `cbm_live` says the codebase-memory folder is in use by config, which the sweep skips.
 /// An entry that cannot be read counts as possibly stale.
-pub(super) fn state_may_have_stale_entries(state_dir: &Path, retention: Duration) -> bool {
+pub(super) fn state_may_have_stale_entries(
+    state_dir: &Path,
+    retention: Duration,
+    cbm_live: bool,
+) -> bool {
     let tmp = state_dir.join("tmp");
     let tmp_may_be_stale = match tmp_sweep::stale_summary_in(&tmp, retention, &[]) {
         Ok(summary) => summary.count > 0 || summary.unreadable > 0,
@@ -22,7 +27,10 @@ pub(super) fn state_may_have_stale_entries(state_dir: &Path, retention: Duration
             true
         }
     };
-    tmp_may_be_stale || cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention)
+    // A codebase-memory folder that a features.codebase_memory index_path uses is live, and the
+    // sweep never removes it, so it needs no in-use list (#3075).
+    tmp_may_be_stale
+        || (!cbm_live && cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention))
 }
 
 /// Whether the codebase-memory sweep could act on `dir`: a unit past `retention`, or a unit whose
@@ -71,14 +79,25 @@ mod tests {
         std::fs::create_dir(state.path().join("codebase-memory")).unwrap();
         std::fs::write(state.path().join("codebase-memory").join("index.db"), b"x").unwrap();
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7));
+        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
     }
 
     #[test]
     fn a_state_folder_with_no_tmp_and_no_index_needs_no_in_use_list() {
         let state = tempfile::tempdir().unwrap();
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7));
+        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
+    }
+
+    #[test]
+    fn a_live_codebase_memory_index_needs_no_in_use_list() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir(state.path().join("codebase-memory")).unwrap();
+        let db = state.path().join("codebase-memory").join("index.db");
+        std::fs::write(&db, b"x").unwrap();
+        age(&db);
+
+        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, true));
     }
 
     #[test]
@@ -89,7 +108,7 @@ mod tests {
         std::fs::write(&db, b"x").unwrap();
         age(&db);
 
-        assert!(state_may_have_stale_entries(state.path(), DAY * 7));
+        assert!(state_may_have_stale_entries(state.path(), DAY * 7, false));
     }
 
     #[test]
@@ -103,7 +122,7 @@ mod tests {
         std::fs::write(&wal, b"x").unwrap();
         age(&wal);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7));
+        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
     }
 
     #[test]
@@ -115,7 +134,7 @@ mod tests {
         std::fs::write(&log, b"x").unwrap();
         age(&log);
 
-        assert!(!state_may_have_stale_entries(state.path(), DAY * 7));
+        assert!(!state_may_have_stale_entries(state.path(), DAY * 7, false));
     }
 
     #[cfg(unix)]
@@ -127,7 +146,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let needs_lsof = state_may_have_stale_entries(state.path(), DAY * 7);
+        let needs_lsof = state_may_have_stale_entries(state.path(), DAY * 7, false);
 
         // Restore the mode first, so the temporary folder can be removed.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -142,6 +161,6 @@ mod tests {
         std::fs::write(&old, b"x").unwrap();
         age(&old);
 
-        assert!(state_may_have_stale_entries(state.path(), DAY * 7));
+        assert!(state_may_have_stale_entries(state.path(), DAY * 7, false));
     }
 }
