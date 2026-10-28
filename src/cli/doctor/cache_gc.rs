@@ -59,6 +59,7 @@ mod index_use;
 mod session_rotation;
 mod state_gate;
 pub(in crate::cli) use credentials::forget_credentials_for;
+use credentials::report_credential_drops;
 use index_use::{CacheUse, bundles_dir, cache_use};
 use session_rotation::prune_session_log;
 use state_gate::state_may_have_stale_entries;
@@ -115,16 +116,13 @@ fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOu
     match cache::gc(cache_dir, retention, config.cache.hashing, out.dry_run) {
         Ok(report) => {
             out.report("", &report);
-            if !out.dry_run {
-                let forgotten = forget_credentials_for(&report.removed);
-                if forgotten > 0 {
-                    eprintln!(
-                        "{} GC: dropped {forgotten} orphaned OAuth credential entries",
-                        out.pass
-                    );
-                }
-            }
-            report.failed.len()
+            // A dry run deletes nothing, so it drops no credentials and has none to fail (#3073).
+            let credential_failures = if out.dry_run {
+                0
+            } else {
+                report_credential_drops(&report.removed, out)
+            };
+            report.failed.len() + credential_failures
         }
         Err(e) => {
             eprintln!("{} GC failed: {e:#}", out.warn);
