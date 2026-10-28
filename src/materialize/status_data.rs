@@ -12,6 +12,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::materialize::dir_size::dir_size;
+
 use serde::Serialize;
 
 use crate::cli::statusline::data::{
@@ -403,45 +405,19 @@ fn collect_cache(cache_root: &Path, hashing: HashingMode) -> Option<CacheData> {
             return None;
         }
     };
-    let prunable_bytes: u64 = report.removed.iter().map(|p| dir_size(p)).sum();
+    let prunable_bytes = match report
+        .removed
+        .iter()
+        .map(|p| dir_size(p))
+        .sum::<anyhow::Result<u64>>()
+    {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("cache stat: the prunable size is unknown, so it is not shown: {e:#}");
+            return None;
+        }
+    };
     Some(CacheData { prunable_bytes })
-}
-
-/// Recursively sum the on-disk size of every entry under `path`.
-///
-/// `prune`'s `removed` list holds directory (or symlink) paths, not files —
-/// stat'ing the directory entry itself would report a few KiB regardless of
-/// the tree's actual contents, so this walks in and sums real file sizes.
-/// Symlinks are sized by their own on-disk length rather than followed,
-/// matching `prune`'s own care not to traverse through them. Unreadable
-/// entries are skipped (best-effort estimate, not exact accounting).
-pub(crate) fn dir_size(path: &Path) -> u64 {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        // A missing path (an absent cache root, or an entry removed during the walk) has no size.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
-        Err(e) => {
-            tracing::error!("cannot stat {} for the size estimate: {e}", path.display());
-            return 0;
-        }
-    };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(e) => {
-            tracing::error!(
-                "cannot list {} for the size estimate, so it counts as its own length: {e}",
-                path.display()
-            );
-            return meta.len();
-        }
-    };
-    entries
-        .filter_map(|entry| crate::paths::readable_entry(path, "the size estimate", entry))
-        .map(|entry| dir_size(&entry.path()))
-        .sum()
 }
 
 /// Best-effort session-log line count.
@@ -937,13 +913,22 @@ mod tests {
     // --- collect_cache / dir_size ---
 
     #[test]
+    fn dir_size_fails_on_a_stat_error_instead_of_reporting_zero() {
+        // A child of a regular file fails with ENOTDIR, which is not a missing path (#3038).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").expect("write fixture file");
+        assert!(dir_size(&file.join("child")).is_err());
+    }
+
+    #[test]
     fn dir_size_sums_nested_files_recursively() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"12345").unwrap(); // 5 bytes
         let nested = dir.path().join("nested");
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(nested.join("b.txt"), b"1234567890").unwrap(); // 10 bytes
-        assert_eq!(dir_size(dir.path()), 15);
+        assert_eq!(dir_size(dir.path()).expect("dir size"), 15);
     }
 
     /// Writes one file per size in `sizes`, named `<prefix><index>.bin`, each
@@ -972,7 +957,7 @@ mod tests {
                 .chain(nested_sizes.iter())
                 .map(|s| *s as u64)
                 .sum();
-            prop_assert_eq!(dir_size(dir.path()), expected);
+            prop_assert_eq!(dir_size(dir.path()).expect("dir size"), expected);
         }
 
         /// Adding a file must monotonically increase the reported size by
@@ -984,9 +969,9 @@ mod tests {
         ) {
             let dir = tempfile::tempdir().unwrap();
             write_sized_files(dir.path(), "f", &initial_sizes);
-            let before = dir_size(dir.path());
+            let before = dir_size(dir.path()).expect("dir size");
             std::fs::write(dir.path().join("extra.bin"), vec![0u8; extra_size]).unwrap();
-            let after = dir_size(dir.path());
+            let after = dir_size(dir.path()).expect("dir size");
             prop_assert!(after >= before);
             prop_assert_eq!(after - before, extra_size as u64);
         }

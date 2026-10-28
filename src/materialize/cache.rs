@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+pub(crate) use crate::materialize::expiry::is_expired;
 use tracing;
 
 use anyhow::Context as _;
@@ -329,7 +331,7 @@ pub(crate) fn prune(
                 if !is_current {
                     false
                 } else if let Some(m) = newest_mtime_or_record(&p, &mut report.failed) {
-                    is_expired(now, m, older_than)
+                    is_expired(now, m, older_than, &p)
                 } else {
                     continue;
                 }
@@ -478,25 +480,6 @@ fn remove_link(p: &Path, dry_run: bool, report: &mut PruneReport) {
         }
     }
 }
-
-/// Check whether `mtime` is older than `older_than` relative to `now`.
-/// An mtime in the future is kept and logged. A clock that moved backward must not
-/// delete live data, and the `state/tmp` sweep keeps such an entry too (#2860).
-pub(crate) fn is_expired(now: SystemTime, mtime: SystemTime, older_than: Duration) -> bool {
-    match now.duration_since(mtime) {
-        Ok(elapsed) => elapsed > older_than,
-        Err(e) => {
-            // Error level: an entry with a future mtime is never collected, so the cause must show.
-            tracing::error!(
-                skew_secs = e.duration().as_secs(),
-                "clock skew: mtime {}s in future; keeping the entry",
-                e.duration().as_secs()
-            );
-            false
-        }
-    }
-}
-
 /// Whether the folder `name` belongs to the current generation for `hashing`.
 /// A non-UTF-8 name is compared as bytes, so under `Loose` it is still current (#2835).
 fn is_current_name(
@@ -636,7 +619,7 @@ pub fn gc(
         let Some(m) = newest_mtime_or_record(&p, &mut report.failed) else {
             continue;
         };
-        let expired = is_expired(now, m, older_than);
+        let expired = is_expired(now, m, older_than, &p);
         if expired {
             gc_remove_dir(&p, &mut report);
         } else {
@@ -702,7 +685,7 @@ fn gc_normal_shapes(
         let Some(m) = newest_mtime_or_record(&p, &mut report.failed) else {
             continue;
         };
-        let expired = is_expired(*now, m, older_than);
+        let expired = is_expired(*now, m, older_than, &p);
         if expired {
             gc_remove_dir(&p, report);
         } else {
@@ -1338,11 +1321,12 @@ mod tests {
     fn is_expired_keeps_a_future_mtime() {
         let now = SystemTime::now();
         let future = now + Duration::from_secs(3600);
-        assert!(!is_expired(now, future, Duration::ZERO));
+        assert!(!is_expired(now, future, Duration::ZERO, Path::new("entry")));
         assert!(is_expired(
             now,
             now - Duration::from_secs(10),
-            Duration::from_secs(1)
+            Duration::from_secs(1),
+            Path::new("entry")
         ));
     }
 

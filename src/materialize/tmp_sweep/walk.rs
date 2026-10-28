@@ -85,7 +85,7 @@ pub(super) fn judge_entry(
     };
     // A future mtime means the clock moved. Keep the entry, because a removal on a bad
     // clock is not reversible.
-    if modified > now || !is_expired(now, modified, older_than) {
+    if modified > now || !is_expired(now, modified, older_than, path) {
         scan.kept += 1;
     } else {
         scan.stale.push(Stale {
