@@ -72,7 +72,7 @@ walkdir = "=2.5.0"
 sha2 = "=0.11.0"
 hex = "=0.4.3"
 humantime = "=2.4.0"
-jiff = { version = "=0.2.37", default-features = false, features = ["std", "tz-system"] }
+jiff = { version = "=0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 anstyle = "=1.0.14"
 globset = { workspace = true }
 schemars = "=1.2.2"
@@ -90,6 +90,11 @@ rustix = { version = "=1.1.5", features = ["fs", "process", "system", "time"] }
 tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
 dialoguer = "=0.12.0"
+
+[features]
+# Test seam for #3030. It lets a measurement point the keychain read and delete at a stub
+# `security` binary through LLMENV_SECURITY_BIN. Never enable it in a release build.
+keychain-stub = []
 
 [dev-dependencies]
 assert_cmd = "=2.2.2"

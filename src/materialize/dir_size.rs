@@ -17,27 +17,45 @@ use std::path::Path;
 /// read is logged and left out of the total, so one unreadable subtree does not drop the whole
 /// estimate.
 pub(crate) fn dir_size(path: &Path) -> anyhow::Result<u64> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        // A missing path (an absent cache root, or an entry removed during the walk) has no size.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => anyhow::bail!("cannot stat {} for the size estimate: {e}", path.display()),
-    };
-    if !meta.is_dir() {
-        return Ok(meta.len());
-    }
-    let entries = std::fs::read_dir(path).map_err(|e| {
-        anyhow::anyhow!("cannot list {} for the size estimate: {e}", path.display())
-    })?;
     let mut total: u64 = 0;
-    for entry in entries.filter_map(|e| crate::paths::readable_entry(path, "the size estimate", e))
+    // Not following links keeps a symlink sized by its own length, and stops the walk from
+    // leaving the tree. The root link is not followed either, because walkdir follows it by default.
+    for step in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .follow_root_links(false)
     {
-        match dir_size(&entry.path()) {
-            Ok(bytes) => total = total.saturating_add(bytes),
-            Err(e) => tracing::warn!("{e:#}; that entry is left out of the size estimate"),
+        match step {
+            Ok(entry) if entry.file_type().is_dir() => {}
+            Ok(entry) => match entry.metadata() {
+                Ok(meta) => total = total.saturating_add(meta.len()),
+                Err(e) => skip_entry(&e, path)?,
+            },
+            // A missing root has no size. A missing entry below it was removed during the walk.
+            Err(e) if e.depth() == 0 && is_not_found(&e) => return Ok(0),
+            Err(e) => skip_entry(&e, path)?,
         }
     }
     Ok(total)
+}
+
+/// Fails for the root, because a zero there would look like a real measurement (#3038). Logs and
+/// skips any entry below it, so one unreadable subtree does not drop the whole estimate.
+fn skip_entry(err: &walkdir::Error, root: &Path) -> anyhow::Result<()> {
+    if err.depth() == 0 {
+        anyhow::bail!(
+            "cannot read {} for the size estimate: {err}",
+            root.display()
+        );
+    }
+    if !is_not_found(err) {
+        tracing::error!("{err}; that entry is left out of the size estimate");
+    }
+    Ok(())
+}
+
+fn is_not_found(err: &walkdir::Error) -> bool {
+    err.io_error()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
 #[cfg(all(test, unix))]
@@ -65,5 +83,35 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
             .expect("unlock the directory");
         assert_eq!(total.expect("the root is readable"), 10);
+    }
+
+    #[test]
+    fn a_root_symlink_counts_its_own_length_and_its_target_is_not_walked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).expect("create target dir");
+        std::fs::write(target.join("big"), [0u8; 99]).expect("write target fixture");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let link_len = std::fs::symlink_metadata(&link).expect("stat link").len();
+
+        let total = dir_size(&link).expect("the link is readable");
+
+        assert_eq!(total, link_len);
+    }
+
+    #[test]
+    fn a_symlink_counts_its_own_length_and_its_target_is_not_walked_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).expect("create target dir");
+        std::fs::write(target.join("big"), [0u8; 99]).expect("write target fixture");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let link_len = std::fs::symlink_metadata(&link).expect("stat link").len();
+
+        let total = dir_size(dir.path()).expect("the root is readable");
+
+        assert_eq!(total, 99 + link_len);
     }
 }

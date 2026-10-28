@@ -75,7 +75,7 @@ With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the 
 
 `llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
-That check uses `lsof`.
+That check uses `lsof`, and llmenv runs it only when an entry is old enough to remove.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
 (added in v3.13.0) At session start, llmenv adds a one-line hint when `state/tmp` holds entries older than the retention.
@@ -1480,7 +1480,8 @@ Notes:
 - `peak` is computed entirely from the local clock (Anthropic's peak window is
   weekdays 05:00–11:00 America/Los_Angeles) — Claude Code sends no peak data on
   stdin. `{countdown}` counts down to the window boundary (peak ending, or the
-  next peak starting).
+  next peak starting). When the zone database cannot be read, the widget shows
+  `unknown` and logs an error.
 - `pr` is colored by `{review_state}` when the engine sends one: `approved`
   green, `changes_requested` red, `pending`/`review_required` yellow. When a PR
   URL is present and color is on, `pr` (and the `branch` widget) render as an

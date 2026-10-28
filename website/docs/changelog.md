@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
+- Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
 
 ### Fixed
 
@@ -54,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Fail the cache size estimate when a path cannot be stat-ed or a directory cannot be listed, instead of reporting zero bytes. [fix:materialize] [#3038]
 - Match git's "not a git repository" message without case in the task tracker, the memory project check, and the CLI git-repo check. [fix:task] [#3040]
 - Stop `llmenv clean` from logging clock skew for a cache entry written during the GC run. The skew log now names the entry path. [fix:materialize] [#2954]
+- Compute the peak widget window from the zone database, so a countdown across a DST change counts the real hours. The old rule was one hour off on that day. A zone that cannot be read shows `unknown` and logs an error. [refactor:statusline] [#3063]
 
 ### Security
 
