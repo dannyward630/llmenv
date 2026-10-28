@@ -183,7 +183,7 @@ fn pace_and_target(
 
 /// Window durations in seconds for the pace calculation.
 pub(super) const FIVE_HOUR_SECS: i64 = 5 * 3600;
-pub(super) const SEVEN_DAY_SECS: i64 = 7 * 86_400;
+const SEVEN_DAY_SECS: i64 = 7 * 86_400;
 
 #[cfg(test)]
 #[expect(
