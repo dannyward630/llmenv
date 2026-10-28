@@ -266,9 +266,17 @@ async function endSession(sessionID) {
   if (!s || s.ended) return;
   s.ended = true;
   const out = await runHooks("SessionEnd", sessionID, {});
-  // The session is over, so no request can carry the texts still queued. Log those now. The
-  // errors already logged where they occurred, so they are not logged again.
-  for (const text of [...(out.block ? [out.block] : []), ...s.once]) console.error(text);
+  // The session is over, so no request can carry the texts still queued. Log those now, with the
+  // SessionEnd hook's own context and errors. None of them has a request left to reach (#3037).
+  // The errors queued earlier were logged where they occurred, so they are not logged again.
+  for (const text of [
+    ...out.context,
+    ...(out.block ? [out.block] : []),
+    ...out.errors,
+    ...s.once,
+  ]) {
+    console.error(text);
+  }
   sessions.delete(sessionID);
 }
 
