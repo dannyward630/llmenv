@@ -15,6 +15,11 @@ use crate::config::{Marketplace, MarketplaceSource};
 use crate::git;
 use crate::paths::expand_tilde;
 
+mod manifest;
+pub(crate) use manifest::{
+    MarketplacePluginEntry, read_marketplace_name, read_marketplace_plugins,
+};
+
 /// Typed errors from marketplace sync operations.
 #[derive(Debug, Error)]
 pub enum SyncError {
@@ -348,133 +353,6 @@ fn plugin_payload_path(cache_dir: &Path, marketplace: &str, plugin: &str) -> Pat
         .join(plugin)
 }
 
-/// A plugin entry parsed from a marketplace's `.claude-plugin/marketplace.json`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MarketplacePluginEntry {
-    pub(crate) name: String,
-    pub(crate) source: String,
-    /// For a `git-subdir` source: the directory of the clone that holds the plugin (#2441).
-    subdir: Option<String>,
-}
-
-/// Parse plugin entries from a marketplace clone's `.claude-plugin/marketplace.json`.
-/// Returns an empty vec when the file is absent (bundles without a manifest are valid).
-///
-/// # Errors
-/// Returns an error when the file exists but cannot be read or parsed.
-pub(crate) fn read_marketplace_plugins(
-    marketplace_dir: &Path,
-) -> Result<Vec<MarketplacePluginEntry>> {
-    let manifest_path = marketplace_dir
-        .join(".claude-plugin")
-        .join("marketplace.json");
-    // #893: a single read that distinguishes NotFound (→ empty) from other I/O
-    // errors (→ propagate), rather than an exists() stat that masked every stat
-    // failure (e.g. EACCES) as "no manifest". The marketplace is a cloned repository, so the
-    // read is capped and refuses a FIFO (#2945).
-    let Some(content) = crate::paths::bounded::asset_text_optional(&manifest_path)? else {
-        return Ok(Vec::new());
-    };
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("parsing {}", manifest_path.display()))?;
-    let plugins = json
-        .get("plugins")
-        .and_then(|p| p.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|entry| match parse_plugin_entry(entry) {
-                    Ok(parsed) => parsed,
-                    // One bad entry must not hide the other plugins of the marketplace.
-                    Err(e) => {
-                        eprintln!("warning: {e:#} — skipping entry");
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok(plugins)
-}
-
-/// Parse one `plugins[]` entry of a marketplace manifest. `Ok(None)` skips an entry that cannot
-/// be used, with a warning on stderr. An `Err` is a malformed source (github, git-subdir, or a
-/// pin), and the caller skips the entry with the error as the warning.
-fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePluginEntry>> {
-    let name = match entry.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
-        None => {
-            eprintln!(
-                "warning: marketplace entry skipped: missing or non-string 'name' \
-                 field (entry = {:?})",
-                entry
-            );
-            return Ok(None);
-        }
-    };
-    let raw = match entry.get("source") {
-        Some(r) => r,
-        None => {
-            eprintln!(
-                "warning: marketplace entry '{}': missing 'source' field — \
-                 skipping entry",
-                name
-            );
-            return Ok(None);
-        }
-    };
-    let mut subdir = None;
-    let source = if let Some(s) = raw.as_str() {
-        s.to_string()
-    } else if raw.get("source").and_then(|v| v.as_str()) == Some("npm") {
-        // #1014: an npm-source object ({"source": "npm", "package": ...,
-        // "version": ...}) has no URL to clone — Claude Code's own
-        // `/plugin install` resolves it directly from the npm registry.
-        // Encode it as a source string `is_external_plugin_source`
-        // recognizes as non-external (nothing for llmenv to clone),
-        // matching the "./" -prefix sentinel this field already uses
-        // for local-path sources.
-        match raw.get("package").and_then(|v| v.as_str()) {
-            Some(pkg) => match raw.get("version").and_then(|v| v.as_str()) {
-                Some(version) => format!("npm:{pkg}@{version}"),
-                None => format!("npm:{pkg}"),
-            },
-            None => {
-                eprintln!(
-                    "warning: marketplace entry '{}': npm-source object has no \
-                     string 'package' field (source = {:?}) — skipping entry",
-                    name, raw
-                );
-                return Ok(None);
-            }
-        }
-    } else if let Some(kind) = unsupported_kind(raw) {
-        eprintln!(
-            "warning: marketplace entry '{name}': source kind '{kind}' is not supported — \
-             skipping entry"
-        );
-        return Ok(None);
-    } else if raw.get("source").and_then(|v| v.as_str()) == Some("git-subdir") {
-        let (source, path) = git_subdir_source(&name, raw)?;
-        subdir = Some(path);
-        source
-    } else if let Some(url) = raw.get("url").and_then(|v| v.as_str()) {
-        pin_source(&name, url, raw)?
-    } else if let Some(github) = github_repo_source(&name, raw)? {
-        github
-    } else {
-        eprintln!(
-            "warning: marketplace entry '{name}': object-form source has no string 'url' field \
-             and no github 'repo' field (source = {raw:?}) — skipping entry"
-        );
-        return Ok(None);
-    };
-    Ok(Some(MarketplacePluginEntry {
-        name,
-        source,
-        subdir,
-    }))
-}
-
 /// The `https://github.com/<repo>.git` URL for an `owner/name` repo.
 ///
 /// # Errors
@@ -510,7 +388,7 @@ fn is_commit_sha(text: &str) -> bool {
 ///
 /// # Errors
 /// `sha` is not a full commit id, or `ref` is empty, has a `#`, or is unsafe for git.
-fn pin_source(name: &str, base: &str, raw: &serde_json::Value) -> Result<String> {
+pub(super) fn pin_source(name: &str, base: &str, raw: &serde_json::Value) -> Result<String> {
     // A pin that is present but not a string would otherwise read as no pin, and the plugin
     // would float on the default branch.
     for key in ["sha", "ref"] {
@@ -542,7 +420,7 @@ fn pin_source(name: &str, base: &str, raw: &serde_json::Value) -> Result<String>
 }
 
 /// The kind of an object source that llmenv cannot fetch: `archive` and `command` (#2441).
-fn unsupported_kind(raw: &serde_json::Value) -> Option<&str> {
+pub(super) fn unsupported_kind(raw: &serde_json::Value) -> Option<&str> {
     raw.get("source")
         .and_then(|v| v.as_str())
         .filter(|kind| matches!(*kind, "archive" | "command"))
@@ -554,7 +432,7 @@ fn unsupported_kind(raw: &serde_json::Value) -> Option<&str> {
 ///
 /// # Errors
 /// Errors when `repo` is not `owner/name`, or the pin is not valid (see [`pin_source`]).
-fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<String>> {
+pub(super) fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<String>> {
     if raw.get("source").and_then(|v| v.as_str()) != Some("github") {
         return Ok(None);
     }
@@ -570,7 +448,7 @@ fn github_repo_source(name: &str, raw: &serde_json::Value) -> Result<Option<Stri
 /// # Errors
 /// `url` or `path` is missing, the shorthand is malformed, `path` is not a relative path inside
 /// the repo, or the pin is not valid.
-fn git_subdir_source(name: &str, raw: &serde_json::Value) -> Result<(String, String)> {
+pub(super) fn git_subdir_source(name: &str, raw: &serde_json::Value) -> Result<(String, String)> {
     let url = raw.get("url").and_then(|v| v.as_str()).with_context(|| {
         format!("marketplace entry '{name}': git-subdir source has no string \"url\"")
     })?;
