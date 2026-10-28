@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Match git's "not a git repository" message without case in the task tracker, the memory project check, and the CLI git-repo check. [fix:task] [#3040]
 - Stop `llmenv clean` from logging clock skew for a cache entry written during the GC run. The skew log now names the entry path. [fix:materialize] [#2954]
 - Compute the peak widget window from the zone database, so a countdown across a DST change counts the real hours. The old rule was one hour off on that day. A zone that cannot be read shows `unknown` and logs an error. [refactor:statusline] [#3063]
+- Stop `llmenv doctor` from reporting a failed codebase-memory GC when SQLite removes a `-wal` or `-shm` file during the scan. The false failure also forced an `lsof` run. [fix:cache-gc] [#3078]
+- Report an index database whose age cannot be read, even when a server has it in use. Before, that failure was dropped silently. [fix:cache-gc] [#3078]
 
 ### Security
 
