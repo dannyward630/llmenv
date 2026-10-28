@@ -102,16 +102,17 @@ pub(crate) fn forget(_config_dir: &Path) -> anyhow::Result<bool> {
 #[cfg(any(target_os = "macos", test))]
 const SECURITY_BIN: &str = "/usr/bin/security";
 
-/// Overrides the `security` path. A test or a measurement points it at a stub, so the keychain
-/// path runs without the real login keychain (#3030).
-#[cfg(any(target_os = "macos", test))]
+/// Overrides the `security` path. Only a `keychain-stub` build reads it, so a measurement can
+/// point the read and delete at a stub (#3030). The write path uses the Security framework and
+/// ignores it.
+#[cfg(any(test, all(target_os = "macos", feature = "keychain-stub")))]
 const SECURITY_BIN_ENV: &str = "LLMENV_SECURITY_BIN";
 
 /// Picks the `security` binary: the override when set, else [`SECURITY_BIN`].
 ///
 /// # Errors
 /// Returns an error when the override is empty or is not an absolute path.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(test, all(target_os = "macos", feature = "keychain-stub")))]
 fn resolve_security_bin(override_path: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
     match override_path {
         None => Ok(std::path::PathBuf::from(SECURITY_BIN)),
@@ -126,11 +127,17 @@ fn resolve_security_bin(override_path: Option<&str>) -> anyhow::Result<std::path
     }
 }
 
+/// The `security` binary for the read and delete. A release build always uses [`SECURITY_BIN`].
+#[cfg(all(target_os = "macos", not(feature = "keychain-stub")))]
+fn security_bin() -> anyhow::Result<std::path::PathBuf> {
+    Ok(std::path::PathBuf::from(SECURITY_BIN))
+}
+
 /// Reads the environment override, then picks the `security` binary.
 ///
 /// # Errors
 /// Returns an error when the variable is not UTF-8 or the override is not absolute.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "keychain-stub"))]
 fn security_bin() -> anyhow::Result<std::path::PathBuf> {
     resolve_security_bin(crate::env_var::utf8_var(SECURITY_BIN_ENV)?.as_deref())
 }

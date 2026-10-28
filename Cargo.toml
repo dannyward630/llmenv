@@ -91,6 +91,11 @@ tempfile = "=3.27.0"
 pulldown-cmark = { workspace = true }
 dialoguer = "=0.12.0"
 
+[features]
+# Test seam for #3030. It lets a measurement point the keychain read and delete at a stub
+# `security` binary through LLMENV_SECURITY_BIN. Never enable it in a release build.
+keychain-stub = []
+
 [dev-dependencies]
 assert_cmd = "=2.2.2"
 insta = { version = "=1.48.0", features = ["yaml"] }
