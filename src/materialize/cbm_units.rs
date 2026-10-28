@@ -77,7 +77,7 @@ pub(crate) fn scan_units(dir: &Path, older_than: Duration) -> anyhow::Result<Opt
         let entry = entry.with_context(|| {
             format!(
                 "cannot read an entry of {}, so no index database was removed. Fix: check the \
-                 permissions of the folder",
+                 disk or mount that holds the folder, then run the GC again",
                 dir.display()
             )
         })?;
@@ -88,42 +88,135 @@ pub(crate) fn scan_units(dir: &Path, older_than: Duration) -> anyhow::Result<Opt
     let now = SystemTime::now();
     let units = databases
         .into_values()
-        .map(|files| {
-            let age = match newest_of(&files) {
-                Ok(newest) if is_expired(now, newest, older_than, dir) => Age::Expired,
-                Ok(_) => Age::Fresh,
-                Err((file, e)) => Age::Unreadable(file, e),
-            };
-            Unit { files, age }
-        })
+        .filter_map(|files| unit_of(files, now, older_than, dir))
         .collect();
     Ok(Some(units))
 }
 
-/// The newest mtime of `files`, read without following a symlink.
-fn newest_of(files: &[PathBuf]) -> Result<SystemTime, (PathBuf, std::io::Error)> {
-    let mut newest = SystemTime::UNIX_EPOCH;
-    for file in files {
-        let modified = std::fs::symlink_metadata(file)
-            .and_then(|meta| meta.modified())
-            .map_err(|e| (file.clone(), e))?;
-        newest = newest.max(modified);
+/// Judge one unit. `None` when every file of the unit has already gone.
+fn unit_of(files: Vec<PathBuf>, now: SystemTime, older_than: Duration, dir: &Path) -> Option<Unit> {
+    let present = match present_mtimes(&files) {
+        Ok(present) => present,
+        Err((file, e)) => {
+            return Some(Unit {
+                files,
+                age: Age::Unreadable(file, e),
+            });
+        }
+    };
+    if present.is_empty() {
+        return None;
     }
-    Ok(newest)
+    let newest = present
+        .iter()
+        .fold(SystemTime::UNIX_EPOCH, |newest, (_, modified)| {
+            newest.max(*modified)
+        });
+    let age = if is_expired(now, newest, older_than, dir) {
+        Age::Expired
+    } else {
+        Age::Fresh
+    };
+    let files = present.into_iter().map(|(file, _)| file).collect();
+    Some(Unit { files, age })
+}
+
+/// The mtime of each file that still exists, read without following a symlink. A file that is
+/// already gone is left out: SQLite can remove a `-wal` between the directory read and this stat.
+fn present_mtimes(
+    files: &[PathBuf],
+) -> Result<Vec<(PathBuf, SystemTime)>, (PathBuf, std::io::Error)> {
+    let mut present = Vec::with_capacity(files.len());
+    for file in files {
+        match std::fs::symlink_metadata(file).and_then(|meta| meta.modified()) {
+            Ok(modified) => present.push((file.clone(), modified)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err((file.clone(), e)),
+        }
+    }
+    Ok(present)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::database_of;
+    use std::collections::BTreeSet;
+    use std::ffi::OsStr;
+
+    use super::*;
 
     #[cfg(unix)]
     #[test]
     fn a_non_utf8_database_name_is_judged() {
         use std::os::unix::ffi::OsStrExt as _;
-        let name = std::ffi::OsStr::from_bytes(b"repo-\xff.db-shm");
+        let name = OsStr::from_bytes(b"repo-\xff.db-shm");
         let base = database_of(name).unwrap();
         assert_eq!(base, b"repo-\xff");
-        assert!(database_of(std::ffi::OsStr::new("index.log")).is_none());
+        assert!(database_of(OsStr::new("index.log")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_of_strips_exactly_the_three_database_suffixes_for_any_bytes() {
+        use proptest::prelude::*;
+        use std::os::unix::ffi::OsStrExt as _;
+        const ENDINGS: [&[u8]; 4] = [b".db", b".db-wal", b".db-shm", b".log"];
+        proptest!(|(base in proptest::collection::vec(any::<u8>(), 0..24), ending in 0usize..4)| {
+            let name = [base.as_slice(), ENDINGS[ending]].concat();
+            let got = database_of(OsStr::from_bytes(&name));
+            if ending < 3 {
+                prop_assert_eq!(got, Some(base));
+            } else {
+                prop_assert!(got.is_none());
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn units_hold_each_database_file_once_and_only_database_files() {
+        use proptest::prelude::*;
+        const NAMES: [&str; 8] = [
+            "a.db", "a.db-wal", "a.db-shm", "b.db", "b.db-wal", "a.log", "c.db.db", "d",
+        ];
+        proptest!(ProptestConfig::with_cases(24), |(picks in proptest::collection::vec(0usize..NAMES.len(), 0..12))| {
+            let dir = tempfile::tempdir().unwrap();
+            let written: BTreeSet<&str> = picks.iter().map(|i| NAMES[*i]).collect();
+            for name in &written {
+                std::fs::write(dir.path().join(name), "x").unwrap();
+            }
+            let units = scan_units(dir.path(), Duration::from_secs(3600)).unwrap().unwrap();
+
+            let mut grouped: Vec<String> = units
+                .iter()
+                .flat_map(|unit| unit.files.iter())
+                .map(|file| file.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            grouped.sort();
+            let expected: Vec<String> = written
+                .iter()
+                .filter(|name| database_of(OsStr::new(name)).is_some())
+                .map(|name| (*name).to_owned())
+                .collect();
+            prop_assert_eq!(grouped, expected);
+            for unit in &units {
+                let bases: BTreeSet<Vec<u8>> = unit
+                    .files
+                    .iter()
+                    .map(|file| database_of(file.file_name().unwrap()).unwrap())
+                    .collect();
+                prop_assert_eq!(bases.len(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn a_file_that_is_already_gone_is_left_out_of_the_judgement() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("a.db-wal");
+
+        let present = present_mtimes(std::slice::from_ref(&gone)).unwrap();
+
+        assert!(present.is_empty());
     }
 }
