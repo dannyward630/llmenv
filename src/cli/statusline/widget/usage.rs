@@ -57,19 +57,14 @@ pub(super) fn render_usage_widget(
 /// Humanize the seconds from `now` until `resets_at`: `"3h04m"` past an hour,
 /// `"23m"` under. A reset already in the past clamps to `"0m"`.
 pub(super) fn humanize_until(resets_at: i64, now: i64) -> String {
-    let secs = resets_at.saturating_sub(now).max(0);
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    if h > 0 {
-        format!("{h}h{m:02}m")
-    } else {
-        format!("{m}m")
-    }
+    super::super::peak::humanize(resets_at.saturating_sub(now))
 }
 
 /// The `{reset}` text. The default is the countdown from [`humanize_until`].
 /// `display: clock_24h` and `display: clock_12h` show the local clock time at
-/// reset instead. A window longer than a day adds the weekday.
+/// reset instead. A window longer than a day adds the weekday. When the system
+/// time zone or the reset time cannot be read, the countdown is shown and a
+/// warning is logged, so the label is never a clock time in the wrong zone.
 fn reset_label(
     resets_at: i64,
     now: i64,
@@ -81,11 +76,24 @@ fn reset_label(
         Some("clock_12h") => ClockStyle::TwelveHour,
         _ => return humanize_until(resets_at, now),
     };
-    let tz = jiff::tz::TimeZone::system();
-    format_reset_clock(resets_at, &tz, style, window_secs > ONE_DAY_SECS).unwrap_or_else(|| {
-        tracing::warn!("usage reset time {resets_at} is out of range, so the reset label is empty");
-        String::new()
-    })
+    let tz = match jiff::tz::TimeZone::try_system() {
+        Ok(tz) => tz,
+        Err(e) => {
+            tracing::warn!(
+                "usage reset: cannot read the system time zone, so the countdown is shown: {e}"
+            );
+            return humanize_until(resets_at, now);
+        }
+    };
+    match format_reset_clock(resets_at, &tz, style, window_secs > ONE_DAY_SECS) {
+        Some(label) => label,
+        None => {
+            tracing::warn!(
+                "usage reset time {resets_at} is out of range, so the countdown is shown"
+            );
+            humanize_until(resets_at, now)
+        }
+    }
 }
 
 /// Render a Claude.ai usage window (`five_hour` / `seven_day`). Empty when the

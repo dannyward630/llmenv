@@ -44,6 +44,7 @@ pub fn format_reset_clock(
 )]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     /// Epoch seconds for an RFC 3339 UTC literal. The literals are fixed in
     /// the tests, so a parse failure is a test bug.
@@ -96,5 +97,42 @@ mod tests {
             format_reset_clock(i64::MAX, &TimeZone::UTC, ClockStyle::TwelveHour, true),
             None
         );
+    }
+
+    proptest! {
+        /// Any epoch gives a lowercase label, and `None` exactly when jiff cannot represent it.
+        #[test]
+        fn label_has_the_expected_shape(
+            resets_at in any::<i64>(),
+            twelve_hour in any::<bool>(),
+            with_weekday in any::<bool>(),
+        ) {
+            let style = if twelve_hour {
+                ClockStyle::TwelveHour
+            } else {
+                ClockStyle::TwentyFourHour
+            };
+            let label = format_reset_clock(resets_at, &TimeZone::UTC, style, with_weekday);
+            prop_assert_eq!(label.is_some(), Timestamp::from_second(resets_at).is_ok());
+            if let Some(label) = label {
+                prop_assert_eq!(label.clone(), label.to_lowercase());
+                let clock = if with_weekday {
+                    let (day, clock) = label.split_once(' ').expect("weekday then clock");
+                    prop_assert!(["mon", "tue", "wed", "thu", "fri", "sat", "sun"].contains(&day));
+                    clock
+                } else {
+                    label.as_str()
+                };
+                let time = if twelve_hour {
+                    let (time, meridiem) = clock.split_at(clock.len() - 2);
+                    prop_assert!(meridiem == "am" || meridiem == "pm");
+                    time
+                } else {
+                    clock
+                };
+                prop_assert!(time.len() == 4 || time.len() == 5, "{label}");
+                prop_assert!(time.bytes().all(|b| b.is_ascii_digit() || b == b':'), "{label}");
+            }
+        }
     }
 }

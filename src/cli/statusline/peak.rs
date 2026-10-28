@@ -49,7 +49,7 @@ pub fn render_peak(cfg: Option<&llmenv_config::WidgetConfig>) -> String {
         .to_string()
 }
 
-fn humanize(secs: i64) -> String {
+pub(super) fn humanize(secs: i64) -> String {
     let secs = secs.max(0);
     let hours = secs / 3600;
     let mins = (secs % 3600) / 60;
