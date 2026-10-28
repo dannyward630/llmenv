@@ -16,8 +16,8 @@ use std::path::Path;
 /// measurement, so the failure is returned instead (#3038). An entry below `path` that cannot be
 /// read is logged and left out of the total, so one unreadable subtree does not drop the whole
 /// estimate.
-pub(crate) fn dir_size(path: &Path) -> anyhow::Result<u64> {
-    let mut total: u64 = 0;
+pub(crate) fn dir_size(path: &Path) -> anyhow::Result<DirSize> {
+    let mut size = DirSize::default();
     // Not following links keeps a symlink sized by its own length, and stops the walk from
     // leaving the tree. The root link is not followed either, because walkdir follows it by default.
     for step in walkdir::WalkDir::new(path)
@@ -27,15 +27,41 @@ pub(crate) fn dir_size(path: &Path) -> anyhow::Result<u64> {
         match step {
             Ok(entry) if entry.file_type().is_dir() => {}
             Ok(entry) => match entry.metadata() {
-                Ok(meta) => total = total.saturating_add(meta.len()),
-                Err(e) => skip_entry(&e, path)?,
+                Ok(meta) => size.bytes = size.bytes.saturating_add(meta.len()),
+                Err(e) => {
+                    skip_entry(&e, path)?;
+                    size.skipped += 1;
+                }
             },
-            // A missing root has no size. A missing entry below it was removed during the walk.
-            Err(e) if e.depth() == 0 && is_not_found(&e) => return Ok(0),
-            Err(e) => skip_entry(&e, path)?,
+            // A missing root has no size. A missing entry below it was removed during the walk,
+            // so it is left out and counted, the same as an unreadable one (#3069).
+            Err(e) if e.depth() == 0 && is_not_found(&e) => return Ok(DirSize::default()),
+            Err(e) => {
+                skip_entry(&e, path)?;
+                size.skipped += 1;
+            }
         }
     }
-    Ok(total)
+    Ok(size)
+}
+
+/// The size of a tree, and how many of its entries were left out of the total (#3069).
+///
+/// A non-zero `skipped` means `bytes` is a floor, not an exact figure. Callers show it as one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirSize {
+    pub(crate) bytes: u64,
+    pub(crate) skipped: u64,
+}
+
+impl DirSize {
+    /// Add two sizes. The result is partial when either input is partial.
+    pub(crate) fn combine(self, other: DirSize) -> DirSize {
+        DirSize {
+            bytes: self.bytes.saturating_add(other.bytes),
+            skipped: self.skipped.saturating_add(other.skipped),
+        }
+    }
 }
 
 /// Fails for the root, because a zero there would look like a real measurement (#3038). Logs and
@@ -82,7 +108,12 @@ mod tests {
         // Restore access so the tempdir can be removed, whatever the assertion said.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
             .expect("unlock the directory");
-        assert_eq!(total.expect("the root is readable"), 10);
+        let size = total.expect("the root is readable");
+        assert_eq!(size.bytes, 10);
+        assert_eq!(
+            size.skipped, 1,
+            "the locked subdirectory is counted as skipped"
+        );
     }
 
     #[test]
@@ -95,7 +126,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).expect("create symlink");
         let link_len = std::fs::symlink_metadata(&link).expect("stat link").len();
 
-        let total = dir_size(&link).expect("the link is readable");
+        let total = dir_size(&link).expect("the link is readable").bytes;
 
         assert_eq!(total, link_len);
     }
@@ -110,7 +141,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).expect("create symlink");
         let link_len = std::fs::symlink_metadata(&link).expect("stat link").len();
 
-        let total = dir_size(dir.path()).expect("the root is readable");
+        let total = dir_size(dir.path()).expect("the root is readable").bytes;
 
         assert_eq!(total, 99 + link_len);
     }

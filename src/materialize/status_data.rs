@@ -897,7 +897,7 @@ mod tests {
         let nested = dir.path().join("nested");
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(nested.join("b.txt"), b"1234567890").unwrap(); // 10 bytes
-        assert_eq!(dir_size(dir.path()).expect("dir size"), 15);
+        assert_eq!(dir_size(dir.path()).expect("dir size").bytes, 15);
     }
 
     /// Writes one file per size in `sizes`, named `<prefix><index>.bin`, each
@@ -926,7 +926,7 @@ mod tests {
                 .chain(nested_sizes.iter())
                 .map(|s| *s as u64)
                 .sum();
-            prop_assert_eq!(dir_size(dir.path()).expect("dir size"), expected);
+            prop_assert_eq!(dir_size(dir.path()).expect("dir size").bytes, expected);
         }
 
         /// Adding a file must monotonically increase the reported size by
@@ -938,9 +938,9 @@ mod tests {
         ) {
             let dir = tempfile::tempdir().unwrap();
             write_sized_files(dir.path(), "f", &initial_sizes);
-            let before = dir_size(dir.path()).expect("dir size");
+            let before = dir_size(dir.path()).expect("dir size").bytes;
             std::fs::write(dir.path().join("extra.bin"), vec![0u8; extra_size]).unwrap();
-            let after = dir_size(dir.path()).expect("dir size");
+            let after = dir_size(dir.path()).expect("dir size").bytes;
             prop_assert!(after >= before);
             prop_assert_eq!(after - before, extra_size as u64);
         }

@@ -60,9 +60,14 @@ pub struct ThrottleData {
 
 /// Prunable cache size. `prunable_bytes` is `None` when the size could not be
 /// read, so the status line shows an unknown marker rather than a zero.
+/// `prunable_partial` is true when some entry was left out, so the total is a
+/// floor and the status line shows it as "at least" (#3069). Older status data
+/// has no such field, and it reads as an exact figure.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CacheData {
     pub prunable_bytes: Option<u64>,
+    #[serde(default)]
+    pub prunable_partial: bool,
 }
 
 /// Task-tracker progress, scoped to sessions open for the current project

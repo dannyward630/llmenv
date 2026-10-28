@@ -8,9 +8,17 @@ pub(super) fn render_cache(data: &StatusData, cfg: Option<&llmenv_config::Widget
         return String::new();
     };
     // `None` means the size could not be read. The marker keeps the field visible.
-    let humanized = cache
-        .prunable_bytes
-        .map_or_else(|| UNKNOWN_MARKER.to_string(), humanize_bytes);
+    // A partial total is a floor, so "at least" keeps it from reading as exact (#3069).
+    let humanized = cache.prunable_bytes.map_or_else(
+        || UNKNOWN_MARKER.to_string(),
+        |bytes| {
+            if cache.prunable_partial {
+                format!("at least {}", humanize_bytes(bytes))
+            } else {
+                humanize_bytes(bytes)
+            }
+        },
+    );
     let raw = cache
         .prunable_bytes
         .map_or_else(|| UNKNOWN_MARKER.to_string(), |bytes| bytes.to_string());
