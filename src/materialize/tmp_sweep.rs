@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::materialize::cache::{GcReport, gc_remove_dir, gc_remove_link};
+use crate::materialize::dir_size::dir_size;
 use crate::materialize::open_files::open_paths;
-use crate::materialize::status_data::dir_size;
 
 mod claude_root;
 
@@ -96,7 +96,11 @@ pub fn stale_summary_in(
     let scan = scan(tmp_root, older_than, in_use)?;
     Ok(StaleSummary {
         count: scan.stale.len(),
-        bytes: scan.stale.iter().map(|s| dir_size(&s.path)).sum(),
+        bytes: scan
+            .stale
+            .iter()
+            .map(|s| dir_size(&s.path))
+            .sum::<anyhow::Result<u64>>()?,
         unreadable: scan.failed.len(),
     })
 }

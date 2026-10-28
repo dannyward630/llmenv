@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 mod clean;
 mod config_guard;
 mod export_trace;
+mod git_repo;
 mod guard;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
@@ -977,27 +978,6 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Whether `dir` is inside a git repository.
-///
-/// # Errors
-/// git cannot start, or `git rev-parse` fails for a reason other than "not a git repository",
-/// such as dubious ownership. That failure must not read as "no repo" (#2710).
-fn is_git_repo(dir: &Path) -> anyhow::Result<bool> {
-    let output = git::local_query(dir, &["rev-parse", "--git-dir"])
-        .with_context(|| format!("failed to run git in {}", dir.display()))?;
-    if output.status.success() {
-        return Ok(true);
-    }
-    if String::from_utf8_lossy(&output.stderr).contains("not a git repository") {
-        return Ok(false);
-    }
-    anyhow::bail!(
-        "git could not check {}: {}",
-        dir.display(),
-        git::git_failure_detail(&output.stderr, &output.stdout, output.status)
-    )
 }
 
 fn check_git_remote(dir: &Path) -> anyhow::Result<String> {
@@ -5185,7 +5165,7 @@ mod tests {
         assert_eq!(json["statusLine"]["type"], "command");
         assert_eq!(
             json["statusLine"]["command"],
-            "llmenv statusline --color always"
+            crate::adapter::hook_program::hook_command("statusline --color always")
         );
     }
 
@@ -6281,7 +6261,7 @@ mod git_remote_tests {
     #[test]
     fn a_directory_outside_git_is_not_a_repo() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(!super::is_git_repo(dir.path()).expect("git runs"));
+        assert!(!super::git_repo::is_git_repo(dir.path()).expect("git runs"));
     }
 
     #[test]
@@ -6293,7 +6273,7 @@ mod git_remote_tests {
             .status()
             .expect("run git init");
         assert!(init.success());
-        assert!(super::is_git_repo(dir.path()).expect("git runs"));
+        assert!(super::git_repo::is_git_repo(dir.path()).expect("git runs"));
     }
 
     #[test]

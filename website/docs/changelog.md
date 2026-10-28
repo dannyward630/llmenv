@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stop reading the keychain on every shell prompt when the credential is expired. A dead read is held back for five minutes, and a dead folder credential is no longer written over the cache. [fix:auth] [#3008]
 - Run `lsof` in the once-a-day stale `state/tmp` check only when an entry is a candidate. When no entry is stale, the SessionStart hook no longer waits 0.4 to 2.7 s. [fix:materialize] [#3031]
 - Block an opencode `failClosed` hook that exits with any code other than 0 or 2, or dies on a signal. Such a hook used to let the call through. A block from a SessionStart or PostToolUse hook now reaches the agent, hook errors print where they occur, and a malformed hook table is named on every request. [fix:opencode] [#2979]
+- Write hook commands with llmenv's absolute PATH location, so a repository that holds its own `llmenv` file cannot run in its place. A bare `llmenv` is used only when no absolute PATH folder holds it. [fix:hook] [#2956] See [the troubleshooting page](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-program-is-reported-as-not-found).
+- Panic instead of writing a stdio server as a remote `http` server, if a stdio value ever reaches the remote renderer. A wrong `type` no longer reaches a config. [fix:adapter] [#2992]
+- Fail the cache size estimate when a path cannot be stat-ed or a directory cannot be listed, instead of reporting zero bytes. [fix:materialize] [#3038]
+- Match git's "not a git repository" message without case in the task tracker, the memory project check, and the CLI git-repo check. [fix:task] [#3040]
+- Stop `llmenv clean` from logging clock skew for a cache entry written during the GC run. The skew log now names the entry path. [fix:materialize] [#2954]
 
 ### Security
 

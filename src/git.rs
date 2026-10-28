@@ -24,3 +24,10 @@ pub(crate) fn local_query(
         .stderr(std::process::Stdio::piped());
     crate::process::run_traced("git:local-query", cmd, LOCAL_QUERY_TIMEOUT)
 }
+
+/// Whether git's stderr says the directory is outside a repository.
+///
+/// Git may capitalise the message, so the match ignores case (#3040).
+pub(crate) fn is_not_a_repo_message(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("not a git repository")
+}

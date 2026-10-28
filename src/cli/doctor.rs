@@ -1091,7 +1091,7 @@ pub(super) fn run_doctor(
     }
 
     // The remote is read from the config only. No network call is made.
-    let in_git_repo = super::is_git_repo(&config_dir).unwrap_or_else(|e| {
+    let in_git_repo = super::git_repo::is_git_repo(&config_dir).unwrap_or_else(|e| {
         eprintln!("{warn} Git repository check failed: {e:#}");
         false
     });

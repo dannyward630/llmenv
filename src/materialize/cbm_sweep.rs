@@ -69,7 +69,7 @@ pub(crate) fn sweep_legacy_indexes(
             continue;
         }
         match newest_of(&files) {
-            Ok(newest) if is_expired(now, newest, older_than) => {
+            Ok(newest) if is_expired(now, newest, older_than, dir) => {
                 for file in &files {
                     gc_remove_link(file, &mut report);
                 }

@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use super::LLMENV_OWNED_SETTINGS_KEYS;
+use crate::adapter::hook_program::hook_command;
 
 /// Merge user-elected seeded keys into `out/settings.json` after the adapter
 /// has already written the file (#172). Runs on every render, not just new
@@ -211,7 +212,7 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
         // (never a TTY), so the default `auto` color resolution would
         // silently disable every `style:` widget override — the seeded
         // command must opt in explicitly rather than rely on TTY detection.
-        serde_json::json!({ "type": "command", "command": "llmenv statusline --color always" }),
+        serde_json::json!({ "type": "command", "command": hook_command("statusline --color always") }),
     );
     apply_seeded_settings(out, &seeded)
 }
