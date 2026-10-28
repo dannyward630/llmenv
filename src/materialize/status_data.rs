@@ -15,7 +15,11 @@ use std::path::Path;
 use serde::Serialize;
 
 mod cache;
+mod icm;
 use cache::collect_cache;
+use icm::collect_icm;
+#[cfg(test)]
+use icm::{extract_stat_line, parse_icm_stats};
 
 use crate::cli::statusline::data::{
     CountData, IcmData, ScopesData, SessionProgress, StatusData, TasksData, ThrottleData,
@@ -187,61 +191,6 @@ fn collect_mcps(
     }
 }
 
-/// This collector runs on hot paths (materialize, `llmenv export`, session
-/// start) — not an interactive CLI invocation where a user is watching and
-/// waiting is fine. A slow/unreachable ICM backend must not stall one of
-/// those paths, so this uses the same short timeout the hook-run MCP calls
-/// use rather than the 10s interactive-CLI timeout `memory::stats_json` uses.
-const ICM_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Best-effort live ICM query. Returns `None` when no memory backend is
-/// active for the current scope, the MCP call fails or times out, or the
-/// response can't be parsed — every one of those is an expected, non-error
-/// condition (most sessions have no ICM backend configured at all).
-fn collect_icm() -> Option<IcmData> {
-    let raw = match crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT) {
-        Ok(raw) => raw,
-        Err(e) => {
-            // Common/expected when no ICM backend is configured for this
-            // scope; debug (not warn) since it isn't necessarily a
-            // misconfiguration.
-            tracing::debug!("icm stat collection unavailable (non-fatal): {e}");
-            return None;
-        }
-    };
-    parse_icm_stats(&raw)
-}
-
-/// Pure text-extraction half of `collect_icm`, split out so it's testable
-/// without a live ICM MCP backend.
-///
-/// The `icm_memory_stats` MCP tool has no structured-output mode — it always
-/// returns a human-formatted text block (`"Memories: 2880\nTopics: 155\n..."`),
-/// never JSON. `memories` is required; `concepts` (sourced from the tool's
-/// "Topics" line — its closest analogous count) defaults to 0 when the line
-/// is absent, so an older/trimmed stats response still yields a usable count.
-fn parse_icm_stats(raw: &str) -> Option<IcmData> {
-    Some(IcmData {
-        memories: extract_stat_line(raw, "Memories")?,
-        concepts: extract_stat_line(raw, "Topics").unwrap_or(0),
-    })
-}
-
-/// Extract the `u64` value from a `"<label>: <n>"` line, e.g. `"Memories:
-/// 2880"` for `label = "Memories"`. Whitespace-tolerant around the colon;
-/// `None` if no line matches or the value doesn't parse.
-fn extract_stat_line(raw: &str, label: &str) -> Option<u64> {
-    raw.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix(label)?
-            .trim_start()
-            .strip_prefix(':')?
-            .trim()
-            .parse()
-            .ok()
-    })
-}
-
 /// Task-tracker progress, scoped to the sessions open for the current project (mandatory-sessions
 /// design). `session` is `None` when zero sessions are open for this project (the widget renders
 /// empty); `Some` carries the summed `(done, total)` across every session open for this project.
@@ -393,7 +342,10 @@ fn collect_session_log() -> Option<u64> {
     let path = match crate::session_log::file_sink::default_file_path() {
         Ok(path) => path,
         Err(e) => {
-            tracing::debug!("session log stat collection failed (non-fatal): {e}");
+            tracing::warn!(
+                "session log stat collection failed, so the line count is empty: {e}. Fix: check \
+                 that the session log folder is readable."
+            );
             return None;
         }
     };
