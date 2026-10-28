@@ -15,6 +15,7 @@ mod config_guard;
 mod export_trace;
 mod git_repo;
 mod guard;
+mod init_settings;
 mod login;
 use login::{import_auth_from_file, run_login, run_login_capture};
 mod plugin_payloads;
@@ -2860,7 +2861,7 @@ This directory contains your llmenv configuration.
         let adapter_root = PathBuf::from(paths::expand_tilde(&config.cache.cache_dir)?)
             .join(ClaudeCodeAdapter.name());
         run_init_auth_prompt(&adapter_root)?;
-        run_init_settings_prompt(&config_path)?;
+        init_settings::run_init_settings_prompt(&config_path)?;
     }
 
     Ok(())
@@ -2905,84 +2906,6 @@ fn run_init_auth_prompt(adapter_root: &Path) -> anyhow::Result<()> {
             eprintln!("Skipping auth setup. Run `llmenv login` when ready.");
         }
     }
-    Ok(())
-}
-
-/// Interactive settings import for `llmenv init` (#172).
-///
-/// Reads `~/.claude/settings.json`, presents the non-owned keys as a checkbox
-/// list, and stores selected keys in `config.yaml` under `init.seeded_settings`.
-fn run_init_settings_prompt(config_path: &Path) -> anyhow::Result<()> {
-    use crate::adapter::claude_code::LLMENV_OWNED_SETTINGS_KEYS;
-    use dialoguer::MultiSelect;
-
-    let global_settings = PathBuf::from(paths::expand_tilde("~/.claude")?).join("settings.json");
-    // #918: NotFound → no settings to import (silent); a permission error
-    // surfaces a warning instead of an exists() stat masking it as absent.
-    let bytes = match std::fs::read(&global_settings) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            eprintln!(
-                "warning: could not read {} — skipping settings import: {e}",
-                global_settings.display()
-            );
-            return Ok(());
-        }
-    };
-    let doc: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!(
-                "warning: {} is not valid JSON — skipping settings import: {e}",
-                global_settings.display()
-            );
-            return Ok(());
-        }
-    };
-    let Some(obj) = doc.as_object() else {
-        return Ok(());
-    };
-    let candidates: Vec<(&String, &serde_json::Value)> = obj
-        .iter()
-        .filter(|(k, _)| !LLMENV_OWNED_SETTINGS_KEYS.contains(&k.as_str()))
-        .collect();
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
-    let labels: Vec<String> = candidates
-        .iter()
-        .map(|(k, v)| format!("{k} = {v}"))
-        .collect();
-    let chosen = MultiSelect::new()
-        .with_prompt(
-            "Select settings from ~/.claude/settings.json to seed into new folders \
-             (space to toggle, enter to confirm)",
-        )
-        .items(&labels)
-        .interact_opt()
-        .map_err(|e| anyhow::anyhow!("settings prompt failed: {e}"))?;
-
-    let Some(indices) = chosen else {
-        return Ok(());
-    };
-    if indices.is_empty() {
-        return Ok(());
-    }
-    let count = indices.len();
-
-    // Load the current config, merge selected keys, write back.
-    let mut config = Config::load(config_path)?;
-    for idx in indices {
-        let (key, val) = candidates[idx];
-        config.init.seeded_settings.insert(key.clone(), val.clone());
-    }
-    let yaml =
-        serde_yaml::to_string(&config).map_err(|e| anyhow::anyhow!("serializing config: {e}"))?;
-    paths::write_user_file_atomic(config_path, yaml.as_bytes())
-        .with_context(|| format!("writing config {}", config_path.display()))?;
-    eprintln!("✓ {count} setting(s) added to init.seeded_settings in config.yaml");
     Ok(())
 }
 
