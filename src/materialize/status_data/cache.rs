@@ -26,10 +26,22 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
     ) {
         Ok(report) => report,
         Err(e) => {
-            tracing::debug!("cache stat collection failed (non-fatal): {e}");
+            tracing::warn!(
+                "cache stat: cannot scan {} for prunable entries, so the size shows as unknown: {e:#}",
+                cache_root.display()
+            );
             return unknown;
         }
     };
+    // An entry the scan could not read would make the total too small, so the total is unknown.
+    if let Some(first) = report.failed.first() {
+        tracing::warn!(
+            "cache stat: {} entries could not be read (first: {}), so the size shows as unknown",
+            report.failed.len(),
+            first.display()
+        );
+        return unknown;
+    }
     let prunable_bytes = match report
         .removed
         .iter()
