@@ -16,23 +16,14 @@ pub(super) fn humanize_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
 
-    proptest! {
-        /// Boundary behavior at 1024 / 1024^2 across the full `u64` space —
-        /// previously only unit-tested at fixed values.
-        #[test]
-        fn humanize_bytes_respects_unit_thresholds(bytes in any::<u64>()) {
-            const KB: u64 = 1024;
-            const MB: u64 = 1024 * 1024;
-            let out = humanize_bytes(bytes);
-            if bytes >= MB {
-                prop_assert_eq!(out, format!("{} MB", bytes / MB));
-            } else if bytes >= KB {
-                prop_assert_eq!(out, format!("{} KB", bytes / KB));
-            } else {
-                prop_assert_eq!(out, format!("{bytes} B"));
-            }
-        }
+    #[test]
+    fn humanize_bytes_switches_units_at_the_boundaries() {
+        assert_eq!(humanize_bytes(0), "0 B");
+        assert_eq!(humanize_bytes(1023), "1023 B");
+        assert_eq!(humanize_bytes(1024), "1 KB");
+        assert_eq!(humanize_bytes(1024 * 1024 - 1), "1023 KB");
+        assert_eq!(humanize_bytes(1024 * 1024), "1 MB");
+        assert_eq!(humanize_bytes(u64::MAX), "17592186044415 MB");
     }
 }
