@@ -1,5 +1,6 @@
 pub mod cache;
 pub(crate) mod cbm_sweep;
+pub(crate) mod cbm_units;
 mod dir_size;
 mod expiry;
 pub(crate) mod inherit;

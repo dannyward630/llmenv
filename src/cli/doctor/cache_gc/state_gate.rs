@@ -2,8 +2,9 @@
 //! when a sweep might need it (#3039).
 
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
+use crate::materialize::cbm_units::{Unit, scan_units};
 use crate::materialize::tmp_sweep;
 
 /// Whether a sweep of `state/tmp` or `state/codebase-memory` could remove an entry. Both sweeps
@@ -21,40 +22,24 @@ pub(super) fn state_may_have_stale_entries(state_dir: &Path, retention: Duration
             true
         }
     };
-    tmp_may_be_stale || cbm_has_entry_older_than(&state_dir.join("codebase-memory"), retention)
+    tmp_may_be_stale || cbm_may_have_stale_units(&state_dir.join("codebase-memory"), retention)
 }
 
-/// Whether `dir` holds an entry last written at or before `now - retention`. A database is
-/// removed only when the newest file of its unit is that old, so every removable unit has such
-/// an entry. An unreadable entry counts as old, and it is logged.
-fn cbm_has_entry_older_than(dir: &Path, retention: Duration) -> bool {
-    let Some(cutoff) = SystemTime::now().checked_sub(retention) else {
-        tracing::error!("state GC cannot compute the cutoff, so lsof runs");
-        return true;
-    };
-    let mut entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+/// Whether the codebase-memory sweep could act on `dir`: a unit past `retention`, or a unit whose
+/// age cannot be read. It uses the sweep's own scan, so the gate and the sweep agree (#3072).
+/// A unit that cannot be scanned counts as possibly stale, and it is logged.
+fn cbm_may_have_stale_units(dir: &Path, retention: Duration) -> bool {
+    match scan_units(dir, retention) {
+        Ok(None) => false,
+        Ok(Some(units)) => !units.iter().all(Unit::is_fresh),
         Err(e) => {
-            tracing::error!("state GC cannot read {}, so lsof runs: {e}", dir.display());
-            return true;
+            tracing::error!(
+                "state GC cannot scan {}, so lsof runs: {e:#}",
+                dir.display()
+            );
+            true
         }
-    };
-    entries.any(|entry| {
-        let modified = entry
-            .and_then(|e| e.metadata())
-            .and_then(|meta| meta.modified());
-        match modified {
-            Ok(modified) => modified <= cutoff,
-            Err(e) => {
-                tracing::error!(
-                    "state GC cannot read an entry of {}, so lsof runs: {e}",
-                    dir.display()
-                );
-                true
-            }
-        }
-    })
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +89,48 @@ mod tests {
         age(&db);
 
         assert!(state_may_have_stale_entries(state.path(), DAY * 7));
+    }
+
+    #[test]
+    fn an_old_side_file_beside_a_fresh_database_needs_no_in_use_list() {
+        // A database and its side files are one unit, judged by the newest file.
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("codebase-memory");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("index.db"), b"x").unwrap();
+        let wal = dir.join("index.db-wal");
+        std::fs::write(&wal, b"x").unwrap();
+        age(&wal);
+
+        assert!(!state_may_have_stale_entries(state.path(), DAY * 7));
+    }
+
+    #[test]
+    fn an_old_index_log_needs_no_in_use_list_because_no_sweep_removes_it() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("codebase-memory");
+        std::fs::create_dir(&dir).unwrap();
+        let log = dir.join("index.log");
+        std::fs::write(&log, b"x").unwrap();
+        age(&log);
+
+        assert!(!state_may_have_stale_entries(state.path(), DAY * 7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_codebase_memory_folder_needs_the_in_use_list() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path().join("codebase-memory");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let needs_lsof = state_may_have_stale_entries(state.path(), DAY * 7);
+
+        // Restore the mode first, so the temporary folder can be removed.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(needs_lsof);
     }
 
     #[test]
