@@ -7,7 +7,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jiff::Timestamp;
-use jiff::civil::{Date, Weekday};
+use jiff::civil::Weekday;
 use jiff::tz::TimeZone;
 
 /// The zone whose wall clock sets the peak window.
@@ -21,20 +21,22 @@ pub struct PeakInfo {
     pub countdown_secs: i64,
 }
 
-fn now_unix() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    )
-    .unwrap_or(i64::MAX)
+/// The wall clock as seconds since the epoch.
+///
+/// # Errors
+/// Fails when the clock is before 1970, or when the seconds do not fit in an `i64`. A zero
+/// here would place "now" in 1970 and report a wrong window with no sign of it.
+fn now_unix() -> anyhow::Result<i64> {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| anyhow::anyhow!("the system clock is before 1970: {e}"))?;
+    Ok(i64::try_from(since_epoch.as_secs())?)
 }
 
 /// Render the `peak` widget: `△ peak 3h03m` in peak, `▽ off-peak 2h` otherwise.
 /// `{symbol}` / `{label}` / `{countdown}` are the format placeholders.
 pub fn render_peak(cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    let peak = match is_peak_time(now_unix()) {
+    let peak = match now_unix().and_then(is_peak_time) {
         Ok(peak) => peak,
         Err(e) => {
             tracing::error!("peak widget: cannot compute the window for {PEAK_ZONE}: {e:#}");
@@ -96,22 +98,17 @@ fn is_peak_time(now_unix: i64) -> anyhow::Result<PeakInfo> {
         civil.date().at(5, 0, 0, 0).to_zoned(tz)?
     } else {
         // After peak today, or on a weekend: the next peak starts at 05:00 on a weekday.
-        next_weekday(civil.date())?.at(5, 0, 0, 0).to_zoned(tz)?
+        let mut next = civil.date().tomorrow()?;
+        while matches!(next.weekday(), Weekday::Saturday | Weekday::Sunday) {
+            next = next.tomorrow()?;
+        }
+        next.at(5, 0, 0, 0).to_zoned(tz)?
     };
 
     Ok(PeakInfo {
         is_peak,
         countdown_secs: boundary.timestamp().as_second() - now_unix,
     })
-}
-
-/// The first Monday to Friday after `day`.
-fn next_weekday(day: Date) -> anyhow::Result<Date> {
-    let mut next = day.tomorrow()?;
-    while matches!(next.weekday(), Weekday::Saturday | Weekday::Sunday) {
-        next = next.tomorrow()?;
-    }
-    Ok(next)
 }
 
 #[cfg(test)]
