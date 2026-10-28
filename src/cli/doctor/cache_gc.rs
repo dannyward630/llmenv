@@ -139,11 +139,13 @@ fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOu
 /// The in-use list comes from one lsof call, which the two sweeps share. lsof can take up to a
 /// minute on a hung mount, so the call runs only when a sweep may remove something (#3039).
 fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) -> usize {
-    let in_use = if state_may_have_stale_entries(state_dir, retention) {
-        crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"))
-    } else {
-        Ok(Vec::new())
-    };
+    // With nothing old enough to remove, the tmp and index sweeps are skipped. A sweep that ran
+    // now could see an entry that crossed the cutoff after this check, and remove it without
+    // the in-use list.
+    if !state_may_have_stale_entries(state_dir, retention) {
+        return prune_session_log(state_dir, retention, out);
+    }
+    let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
     let in_use = in_use.as_ref().map(Vec::as_slice).map_err(String::as_str);
     sweep_state_tmp(state_dir, retention, in_use, out)
         + prune_session_log(state_dir, retention, out)
