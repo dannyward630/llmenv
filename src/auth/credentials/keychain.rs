@@ -102,27 +102,10 @@ fn parse_keychain_blob(service: &str, raw: &str) -> anyhow::Result<super::Creden
         .ok_or_else(|| bad_item_error(service, "the JSON has no OAuth credential object"))
 }
 
-/// Read the exit status of `security delete-generic-password`. Exit 44 (errSecItemNotFound) is
-/// the only "nothing to delete" answer. Any other failure is an error, so a locked keychain does
-/// not look like a clean run (#3068).
 #[cfg(any(target_os = "macos", test))]
-fn forget_outcome(
-    service: &str,
-    status: &std::process::ExitStatus,
-    stderr: &str,
-) -> anyhow::Result<bool> {
-    if status.success() {
-        return Ok(true);
-    }
-    if status.code() == Some(SECURITY_ITEM_NOT_FOUND_EXIT_CODE) {
-        return Ok(false);
-    }
-    Err(anyhow::anyhow!(
-        "deleting keychain item {service} failed (status {status}): {}. Fix: unlock the login \
-         keychain (`security unlock-keychain`) and run the command again.",
-        stderr.trim()
-    ))
-}
+mod outcome;
+#[cfg(any(target_os = "macos", test))]
+use outcome::forget_outcome;
 
 /// Drop the keychain credential belonging to a config dir that no longer exists.
 ///
@@ -462,6 +445,14 @@ mod tests {
         assert!(
             err.contains("User interaction is not allowed."),
             "stderr missing: {err}"
+        );
+        let silent = forget_outcome("svc-x", &exit_status(36), "")
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            !silent.contains(": ."),
+            "an empty stderr left a dangling detail: {silent}"
         );
     }
 
