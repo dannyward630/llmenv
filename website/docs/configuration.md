@@ -1518,7 +1518,7 @@ All nine honor `format:`.
 | `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `) |
 | `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` |
 | `mcps` | `MCP {total}` | `MCP 12` | `total`, `errors` |
-| `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
+| `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` (`concepts` shows `?` when the ICM stats have no Topics line, added in v3.14.0) |
 | `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes). Both show `?` when the size cannot be read (added in v3.14.0) |
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}` | `umans: 45s` | `raw` (`"<backend>: <cooldown_secs>s"`), `cooldown_secs`, `reason` (the backend name) |
