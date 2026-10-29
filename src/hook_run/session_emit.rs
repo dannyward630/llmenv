@@ -3,6 +3,8 @@
 
 use tracing::warn;
 
+use llmenv_config::LogLevel;
+
 use crate::config::SessionLog;
 use crate::session_log::event::{EventScope, SessionLogEvent};
 
@@ -21,13 +23,16 @@ pub(super) fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id
             crate::session_log::FileSink::new(p).append(&ev.to_jsonl());
         }
     }
-    if cfg.transcript_wants(level)
-        && ev.scope == EventScope::AgentSession
-        && let Some(sid) = session_id
-    {
+    if let Some(sid) = session_id.filter(|_| wants_transcript(cfg, ev.scope, level)) {
         // Detached: process-group-detached and outlives us regardless.
         let _detached_child = crate::session_log::detached::spawn_record(sid, &ev);
     }
+}
+
+/// Whether the transcript sink takes an event: only an agent-session event, at a level the sink
+/// keeps. A process-level event has no transcript session to attach to.
+fn wants_transcript(cfg: &SessionLog, scope: EventScope, level: LogLevel) -> bool {
+    cfg.transcript_wants(level) && scope == EventScope::AgentSession
 }
 
 /// The file-sink path: the configured path, else `default`. A failed default
@@ -51,6 +56,45 @@ fn resolve_file_sink_path(
 mod tests {
     use super::*;
     use llmenv_config::{FileSinkConfig, LogLevel};
+
+    fn transcript_cfg(enabled: bool) -> SessionLog {
+        SessionLog {
+            file: None,
+            transcript: Some(llmenv_config::TranscriptSinkConfig {
+                enabled,
+                level: LogLevel::Info,
+                retention_days: None,
+            }),
+            max_content_bytes: None,
+        }
+    }
+
+    #[test]
+    fn an_agent_session_event_at_a_kept_level_goes_to_the_transcript() {
+        assert!(wants_transcript(
+            &transcript_cfg(true),
+            EventScope::AgentSession,
+            LogLevel::Info
+        ));
+    }
+
+    #[test]
+    fn a_process_event_never_goes_to_the_transcript() {
+        assert!(!wants_transcript(
+            &transcript_cfg(true),
+            EventScope::Process,
+            LogLevel::Info
+        ));
+    }
+
+    #[test]
+    fn a_disabled_transcript_sink_takes_no_event() {
+        assert!(!wants_transcript(
+            &transcript_cfg(false),
+            EventScope::AgentSession,
+            LogLevel::Info
+        ));
+    }
 
     #[test]
     fn file_sink_without_path_warns_with_fix_when_default_fails() {
