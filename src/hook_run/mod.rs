@@ -46,6 +46,7 @@ mod relevance;
 pub(crate) mod repeat_detect;
 mod respawn;
 mod resume_cache;
+mod session_emit;
 mod session_ledger;
 mod session_notices;
 pub(crate) mod session_state;
@@ -64,6 +65,7 @@ pub(crate) mod task_tools;
 pub(crate) mod transcript;
 mod transcript_link;
 use respawn::respawn_job;
+use session_emit::emit_session_log;
 use stop_reminder::resolve_stop_reminder;
 mod global_topics;
 mod web_fetch;
@@ -2021,34 +2023,6 @@ async fn handle_session_log(
         emit_session_log(scope_session_event(ctx), cfg, session_id.as_deref());
     }
     session_id
-}
-
-/// Append `ev` to the configured sinks: the JSONL file (if enabled and
-/// `ev.log_level() <= file.level`, written synchronously) and, for
-/// agent-session-scoped events, the ICM transcript (if enabled and
-/// `ev.log_level() <= transcript.level` — dispatched via a detached child, see
-/// `session_log::detached`, so this never blocks on the network). Fail-soft.
-fn emit_session_log(ev: SessionLogEvent, cfg: &SessionLog, session_id: Option<&str>) {
-    let max = cfg.max_content_bytes.unwrap_or(16_384);
-    let ev = ev.truncated(max);
-    let level = ev.log_level();
-    if cfg.file_wants(level) {
-        let path = cfg.file_path().map(std::path::PathBuf::from).or_else(|| {
-            crate::session_log::default_file_path()
-                .inspect_err(|e| debug!("session_log: file sink disabled, no path resolved: {e}"))
-                .ok()
-        });
-        if let Some(p) = path {
-            crate::session_log::FileSink::new(p).append(&ev.to_jsonl());
-        }
-    }
-    if cfg.transcript_wants(level)
-        && ev.scope == EventScope::AgentSession
-        && let Some(sid) = session_id
-    {
-        // Detached: process-group-detached and outlives us regardless.
-        let _detached_child = crate::session_log::detached::spawn_record(sid, &ev);
-    }
 }
 
 /// Shared defaults for every agent-session-scoped `SessionLogEvent`: current

@@ -5,7 +5,9 @@
 use super::data::StatusData;
 mod cache;
 mod humanize;
+mod icm;
 use cache::render_cache;
+use icm::render_icm;
 use std::collections::BTreeMap;
 
 #[must_use]
@@ -97,18 +99,6 @@ fn render_mcps(
         .replace("{total}", &mcps.total.to_string())
         .replace("{errors}", &mcps.errors.to_string())
         .replace("{stale_icon}", &stale_suffix(tags_drifted, icons))
-}
-
-fn render_icm(data: &StatusData, cfg: Option<&llmenv_config::WidgetConfig>) -> String {
-    let Some(icm) = &data.icm else {
-        return String::new();
-    };
-    let format = cfg
-        .and_then(|c| c.format.as_deref())
-        .unwrap_or("🧠 {memories}");
-    format
-        .replace("{memories}", &icm.memories.to_string())
-        .replace("{concepts}", &icm.concepts.to_string())
 }
 
 fn render_config_stale(
@@ -273,7 +263,7 @@ mod tests {
         let data = StatusData {
             icm: Some(IcmData {
                 memories: 142,
-                concepts: 47,
+                concepts: Some(47),
             }),
             ..Default::default()
         };
@@ -565,23 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn render_icm_honors_custom_format() {
-        let data = StatusData {
-            icm: Some(IcmData {
-                memories: 10,
-                concepts: 4,
-            }),
-            ..Default::default()
-        };
-        let cfg = llmenv_config::WidgetConfig {
-            format: Some("{memories}c{concepts}".to_string()),
-            ..Default::default()
-        };
-        let out = render_llmenv_widget("icm", &data, Some(&cfg), &icons(), false, false).unwrap();
-        assert_eq!(out, "10c4");
-    }
-
-    #[test]
     fn render_cache_honors_custom_format() {
         let data = StatusData {
             cache: Some(CacheData {
@@ -794,7 +767,7 @@ mod tests {
             }),
             icm: Some(IcmData {
                 memories: 142,
-                concepts: 47,
+                concepts: Some(47),
             }),
             cache: Some(CacheData {
                 prunable_bytes: Some(15_728_640),
