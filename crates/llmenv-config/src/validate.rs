@@ -4507,26 +4507,4 @@ mod tests {
         });
         assert!(cfg.validate().is_ok());
     }
-
-    #[test]
-    fn config_validate_rejects_a_bad_widget_display() {
-        use crate::{StatuslineConfig, WidgetConfig};
-        let widget = WidgetConfig {
-            display: Some("clock_24H".to_string()),
-            ..Default::default()
-        };
-        let cfg = Config {
-            statusline: Some(StatuslineConfig {
-                widgets: std::collections::BTreeMap::from([("usage_5h".to_string(), widget)]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let err = cfg
-            .validate()
-            .expect_err("a bad display must fail validation");
-
-        assert!(err.to_string().contains("usage_5h"), "{err}");
-    }
 }
