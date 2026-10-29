@@ -716,9 +716,8 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
     // A timeout is final, and a missing binary fails the retry too.
     let out = match run() {
         Err(e) if !matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::NotFound) => {
-            // A retry is normal recovery, so the first failure is debug only. A second failure
-            // is logged at error level below (#3036).
-            tracing::debug!("gh pr view failed, so it is retried once: {e}");
+            // The first failure is logged here, so a retry that works still leaves a trace (#3036).
+            tracing::warn!("gh pr view failed, so it is retried once: {e}");
             std::thread::sleep(Duration::from_millis(20));
             run().inspect_err(|second| {
                 tracing::error!(
