@@ -35,7 +35,11 @@ pub(crate) fn dir_size(path: &Path) -> anyhow::Result<DirSize> {
             },
             // A missing root has no size. A missing entry below it was removed during the walk,
             // so it is left out and counted, the same as an unreadable one (#3069).
-            Err(e) if e.depth() == 0 && is_not_found(&e) => return Ok(DirSize::default()),
+            Err(e) if e.depth() == 0 && is_not_found(&e) => {
+                // An absent root is normal before first use, so it is logged at debug, not warn.
+                tracing::debug!("{} does not exist, so its size is zero", path.display());
+                return Ok(DirSize::default());
+            }
             Err(e) => {
                 skip_entry(&e, path)?;
                 size.skipped += 1;
@@ -74,7 +78,9 @@ fn skip_entry(err: &walkdir::Error, root: &Path) -> anyhow::Result<()> {
         );
     }
     if !is_not_found(err) {
-        tracing::error!("{err}; that entry is left out of the size estimate");
+        // The status line renders on every prompt, and `skipped` already marks the total as a
+        // floor, so the entry is logged at debug to keep each render quiet.
+        tracing::debug!("{err}; that entry is left out of the size estimate");
     }
     Ok(())
 }
@@ -92,6 +98,36 @@ fn is_not_found(err: &walkdir::Error) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    proptest::proptest! {
+        #[test]
+        fn combine_is_commutative_associative_and_has_a_zero_identity(
+            (a, b, c) in (
+                (proptest::prelude::any::<u64>(), 0u64..1000),
+                (proptest::prelude::any::<u64>(), 0u64..1000),
+                (proptest::prelude::any::<u64>(), 0u64..1000),
+            ),
+        ) {
+            let size = |(bytes, skipped): (u64, u64)| DirSize { bytes, skipped };
+            let (a, b, c) = (size(a), size(b), size(c));
+            proptest::prop_assert_eq!(a.combine(b), b.combine(a));
+            proptest::prop_assert_eq!(a.combine(b).combine(c), a.combine(b.combine(c)));
+            proptest::prop_assert_eq!(a.combine(DirSize::default()), a);
+        }
+    }
+
+    #[test]
+    fn a_missing_root_is_zero_and_is_logged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent");
+        let mut got = None;
+        let logs = crate::test_log_capture::capture_logs(|| got = Some(dir_size(&missing)));
+        let size = got
+            .expect("dir_size ran")
+            .expect("a missing root is not an error");
+        assert_eq!(size, DirSize::default());
+        assert!(logs.contains("does not exist"), "{logs}");
+    }
 
     #[test]
     fn an_unreadable_subdirectory_is_left_out_and_its_siblings_still_count() {

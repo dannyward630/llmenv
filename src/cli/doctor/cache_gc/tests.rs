@@ -1,7 +1,8 @@
 use std::fs::File;
 use std::time::{Duration, SystemTime};
 
-use super::{GcOutput, sweep_cache, sweep_state};
+use super::cache_sweep::{sweep_cache, sweep_cache_root};
+use super::{GcOutput, sweep_state};
 use crate::config::Config;
 
 const DAY: Duration = Duration::from_secs(86_400);
@@ -135,6 +136,24 @@ fn the_cache_sweep_keeps_a_fresh_entry() {
     let failures = sweep_cache(cache.path(), &Config::default(), DAY * 7, OUT);
     assert!(entry.exists(), "a fresh cache entry was removed");
     assert_eq!(failures, 0);
+}
+
+#[test]
+fn a_symlink_cache_root_is_refused_and_a_dangling_one_is_too() {
+    let base = tempfile::tempdir().unwrap();
+    let target = base.path().join("real");
+    std::fs::create_dir(&target).unwrap();
+    let live = base.path().join("live-link");
+    std::os::unix::fs::symlink(&target, &live).unwrap();
+    let dangling = base.path().join("dangling-link");
+    std::os::unix::fs::symlink(base.path().join("absent"), &dangling).unwrap();
+    for link in [&live, &dangling] {
+        let failures = sweep_cache_root(link, &Config::default(), DAY * 7, OUT);
+        assert_eq!(
+            failures, 1,
+            "a symlink root must count as a failure: {link:?}"
+        );
+    }
 }
 
 #[test]

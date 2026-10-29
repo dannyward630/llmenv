@@ -31,7 +31,12 @@ fn effective_from_read(
                 .or_else(|| value.as_bool().map(|b| b.to_string()))
                 .or_else(|| value.as_i64().map(|n| n.to_string()))
         }
-        Err(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                "cannot read {key}: {e:#}. Fix: set {key} to a valid UTF-8 value, then run again."
+            );
+            None
+        }
     }
 }
 
@@ -43,6 +48,23 @@ mod tests {
 
     fn native_env(yaml: &str) -> serde_yaml::Value {
         serde_yaml::from_str(yaml).expect("valid yaml")
+    }
+
+    #[test]
+    fn a_read_error_is_logged_with_the_variable_and_the_fix() {
+        let read = Err(anyhow::anyhow!("not valid UTF-8"));
+        let mut got = None;
+
+        let logs = crate::test_log_capture::capture_logs(|| {
+            got = Some(effective_from_read(read, None, "BASH_MAX_OUTPUT_LENGTH"));
+        });
+
+        assert_eq!(got, Some(None));
+        assert!(
+            logs.contains("cannot read BASH_MAX_OUTPUT_LENGTH"),
+            "{logs}"
+        );
+        assert!(logs.contains("Fix: set BASH_MAX_OUTPUT_LENGTH"), "{logs}");
     }
 
     #[test]
