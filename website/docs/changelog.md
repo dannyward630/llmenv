@@ -198,6 +198,18 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Log the first failed `gh pr view` attempt, and name the fix when the lookup fails or times out. [fix:statusline] [#3036]
 - Keep the template comments in `config.yaml` when `llmenv init` seeds settings. [fix:init] [#2964]
 - Refuse a plugin whose marketplace name differs from the name in its manifest, and name the fix. [fix:plugins] [#3048]
+- Warn when the session-log file sink cannot resolve a path, and name the fix. Before, it dropped events with only a debug line. [fix:session-log] [#3095]
+- Judge a `state/tmp` entry with a future mtime by the clock-skew check, so its skew is logged. [fix:tmp-sweep] [#3096]
+- Warn in `llmenv doctor` when a marketplace manifest declares another name, and name the fix. The cache GC removes a marketplace clone that no config entry names. [fix:doctor] [#3084]
+- Show an unknown concept count, not zero, in the `icm` statusline widget when the ICM stats have no Topics line. [fix:status] [#3088]
+- Log a missing cache directory and an unreadable size entry at debug, instead of at error on every status render. [fix:materialize] [#3088]
+- Log the bundles folder error when no bundle needs it. [fix:doctor] [#3088]
+- Show the reason from `security` when a keychain credential delete fails. [fix:auth] [#3088]
+- Name the file when `settings.json` cannot be parsed for the statusLine or installMethod seed, instead of skipping it. A null `statusLine` is kept, and the log says so. [fix:seed] [#3088]
+- Log a non-UTF-8 environment variable read error with its fix. Show the OpenCode plugin's kill and stdin errors in the hook result. [fix:hardening] [#3088]
+- Refuse a symlinked cache directory in `llmenv clean`, and name the real folder. [fix:statusline] [#3089]
+- Show an error for an unreadable `.git` in the statusline, instead of the branch of an enclosing repository. [fix:statusline] [#3089]
+- Scrub credentials and control bytes from `gh` errors in the statusline log. [fix:statusline] [#3089]
 
 ### Security
 

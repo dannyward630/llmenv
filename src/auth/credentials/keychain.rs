@@ -102,22 +102,10 @@ fn parse_keychain_blob(service: &str, raw: &[u8]) -> anyhow::Result<super::Crede
         .ok_or_else(|| bad_item_error(service, "the JSON has no OAuth credential object"))
 }
 
-/// Read the exit status of `security delete-generic-password`. Exit 44 (errSecItemNotFound) is
-/// the only "nothing to delete" answer. Any other failure is an error, so a locked keychain does
-/// not look like a clean run (#3068).
 #[cfg(any(target_os = "macos", test))]
-fn forget_outcome(service: &str, status: &std::process::ExitStatus) -> anyhow::Result<bool> {
-    if status.success() {
-        return Ok(true);
-    }
-    if status.code() == Some(SECURITY_ITEM_NOT_FOUND_EXIT_CODE) {
-        return Ok(false);
-    }
-    Err(anyhow::anyhow!(
-        "deleting keychain item {service} failed (status {status}). Fix: unlock the login keychain \
-         (`security unlock-keychain`) and run the command again."
-    ))
-}
+mod outcome;
+#[cfg(any(target_os = "macos", test))]
+use outcome::forget_outcome;
 
 /// Drop the keychain credential belonging to a config dir that no longer exists.
 ///
@@ -131,14 +119,15 @@ fn forget_outcome(service: &str, status: &std::process::ExitStatus) -> anyhow::R
 pub(crate) fn forget(config_dir: &Path) -> anyhow::Result<bool> {
     let service = super::keychain_service(config_dir);
     let account = keychain_account()?;
-    // stderr is discarded (#1092). The exit status carries the answer: 44 is "not found",
-    // and `forget_outcome` maps every other failure to an error.
+    // The exit status carries the answer: 44 is "not found", and `forget_outcome` maps every other
+    // failure to an error. stderr is shown in that error, but never matched, because `security`
+    // localizes its text (#1092).
     let mut cmd = std::process::Command::new(security_bin()?);
     cmd.args(["delete-generic-password", "-s", &service, "-a", &account])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
     let out = run_security(cmd, FORGET_TIMEOUT, "delete-generic-password", &service)?;
-    forget_outcome(&service, &out.status)
+    forget_outcome(&service, &out.status, &String::from_utf8_lossy(&out.stderr))
 }
 
 /// Drop the keychain credential belonging to a config dir that no longer exists.
@@ -381,7 +370,11 @@ mod tests {
     #[test]
     #[expect(clippy::panic, reason = "test code: the worker must panic")]
     fn a_worker_that_panics_is_not_reported_as_a_timeout() {
-        let lost = with_deadline(Duration::from_secs(5), || -> u8 { panic!("worker failed") });
+        // The panic hook prints a backtrace before the sender drops. On a loaded machine that
+        // can take longer than a short deadline, so the deadline must not race it.
+        let lost = with_deadline(Duration::from_secs(60), || -> u8 {
+            panic!("worker failed")
+        });
         assert_eq!(lost, Err(NoAnswer::WorkerLost));
     }
 
@@ -440,19 +433,37 @@ mod tests {
 
     #[test]
     fn forget_exit_zero_is_deleted_and_exit_44_is_not_found() {
-        assert!(forget_outcome("svc-x", &exit_status(0)).unwrap());
-        assert!(!forget_outcome("svc-x", &exit_status(SECURITY_ITEM_NOT_FOUND_EXIT_CODE)).unwrap());
+        assert!(forget_outcome("svc-x", &exit_status(0), "").unwrap());
+        assert!(
+            !forget_outcome("svc-x", &exit_status(SECURITY_ITEM_NOT_FOUND_EXIT_CODE), "").unwrap()
+        );
     }
 
     #[test]
     fn forget_other_exit_codes_are_errors_naming_the_item_and_the_unlock_fix() {
-        let err = forget_outcome("svc-x", &exit_status(36))
+        let err = forget_outcome(
+            "svc-x",
+            &exit_status(36),
+            "User interaction is not allowed.",
+        )
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+        assert!(
+            err.contains("svc-x") && err.contains("unlock-keychain"),
+            "{err}"
+        );
+        assert!(
+            err.contains("User interaction is not allowed."),
+            "stderr missing: {err}"
+        );
+        let silent = forget_outcome("svc-x", &exit_status(36), "")
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(
-            err.contains("svc-x") && err.contains("unlock-keychain"),
-            "{err}"
+            !silent.contains(": ."),
+            "an empty stderr left a dangling detail: {silent}"
         );
     }
 

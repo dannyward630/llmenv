@@ -16,6 +16,8 @@ mod hook_command;
 use hook_command::run_doctor_hook_command;
 mod cleartext;
 mod instruction_size;
+mod marketplace_names;
+use marketplace_names::{report_declared_names, unused_marketplaces};
 mod marketplace_pins;
 mod mcp_text;
 mod network;
@@ -329,24 +331,6 @@ fn cached_version_folders(adapter_cache: &Path) -> anyhow::Result<Option<Vec<Str
         });
     }
     Ok(Some(versions))
-}
-
-/// Returns marketplace names defined in `config` that no plugin collection references.
-fn unused_marketplaces(config: &Config) -> Vec<&str> {
-    use crate::config::split_plugin_ref;
-    let referenced: HashSet<&str> = config
-        .plugin_collection
-        .iter()
-        .flat_map(|c| c.plugins.iter())
-        .filter_map(|p| split_plugin_ref(p))
-        .map(|(m, _)| m)
-        .collect();
-    config
-        .marketplace
-        .iter()
-        .filter(|m| !referenced.contains(m.name.as_str()))
-        .map(|m| m.name.as_str())
-        .collect()
 }
 
 /// True if a network scope's `match` sets no field. The matcher needs at least one of
@@ -1821,6 +1805,7 @@ pub(super) fn run_doctor(
     }
 
     marketplace_pins::report_pinned_marketplaces(&config, &cache_dir, &warn);
+    report_declared_names(&config, &cache_dir, &warn);
 
     report_credential_cache(&cache_dir, &pass, &info, &warn);
 

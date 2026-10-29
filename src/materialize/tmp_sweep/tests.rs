@@ -323,3 +323,23 @@ fn the_summary_of_a_missing_tmp_root_is_empty() {
         }
     );
 }
+
+#[test]
+fn a_future_mtime_entry_is_kept_and_its_clock_skew_is_logged() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("future.txt");
+    fs::write(&file, b"f").unwrap();
+    File::open(&file)
+        .unwrap()
+        .set_modified(SystemTime::now() + DAY)
+        .unwrap();
+
+    let mut scan = super::Scan::default();
+    let logs = crate::test_log_capture::capture_logs(|| {
+        super::judge_entry(&file, false, DAY * 7, SystemTime::now(), &mut scan);
+    });
+
+    assert!(scan.stale.is_empty(), "a future mtime must not be stale");
+    assert_eq!(scan.kept, 1);
+    assert!(logs.contains("clock skew"), "skew not logged: {logs}");
+}

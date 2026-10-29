@@ -177,9 +177,9 @@ fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime,
             return;
         }
     };
-    // A future mtime means the clock moved. Keep the entry, because a removal on a bad
-    // clock is not reversible.
-    if modified > now || !is_expired(now, modified, older_than, path) {
+    // `is_expired` keeps a future mtime and logs the skew. A removal on a bad clock is not
+    // reversible, so the entry must reach that check.
+    if !is_expired(now, modified, older_than, path) {
         scan.kept += 1;
     } else {
         scan.stale.push(Stale {
