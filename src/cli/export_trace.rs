@@ -291,7 +291,9 @@ pub(crate) fn run_export_core(
 
     // Store tag/bundle mappings for SessionStart hook retrieval
     if let Err(e) = crate::icm::store_tag_memory(&use_active, &bundles_for_icm) {
-        tracing::debug!("failed to store ICM tag memory (non-fatal): {e}");
+        tracing::warn!(
+            "failed to store ICM tag memory, so bundle recall may miss this tag: {e}. Fix: check the ICM backend with `llmenv doctor`."
+        );
     }
 
     // Auto-prune: TTL-based memory retention pass after materialization (#270)

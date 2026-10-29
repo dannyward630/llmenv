@@ -68,7 +68,10 @@ fn main() {
         .is_some_and(|f| f.enabled)
         .then(|| {
             let path = session_log_file_path(resolved.file_path())?;
-            Some(FileLogLayer::new(FileSink::new(path)).with_filter(EnvFilter::from_default_env()))
+            Some(
+                FileLogLayer::new(FileSink::new(path))
+                    .with_filter(stderr_filter(std::env::var("RUST_LOG").ok().as_deref())),
+            )
         })
         .flatten();
 

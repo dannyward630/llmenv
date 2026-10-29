@@ -1955,7 +1955,9 @@ async fn handle_session_log(
                 let log_path = cfg.file_path().map(std::path::PathBuf::from).or_else(|| {
                     crate::session_log::default_file_path()
                         .inspect_err(|e| {
-                            tracing::debug!("session_log reaper: cannot resolve default path: {e}")
+                            tracing::warn!(
+                "session_log reaper: cannot resolve the default path, so retention is skipped: {e}. Fix: set HOME or the session log path."
+            )
                         })
                         .ok()
                 });

@@ -1646,7 +1646,9 @@ fn materialize_from_manifest(
 
     // Store resolved throttle (top-level + bundle) for hook retrieval.
     if let Err(e) = crate::throttle::store_active_throttle(manifest.throttle.as_ref()) {
-        tracing::debug!("failed to store throttle state (non-fatal): {e}");
+        tracing::warn!(
+            "failed to store throttle state, so hooks read a stale throttle: {e}. Fix: check that the state folder is writable."
+        );
     }
 
     // Apply compression if requested: strip trailing whitespace and collapse triple blank lines.
@@ -4189,8 +4191,8 @@ fn run_sync(dry_run: bool) -> anyhow::Result<()> {
             .output()
             .context("failed to run git status")?;
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("git status failed: {stderr}");
+            let detail = llmenv_git::git_failure_detail(&out.stderr, &out.stdout, out.status);
+            anyhow::bail!("git status failed: {detail}");
         }
         let output = String::from_utf8_lossy(&out.stdout);
         if output.trim().is_empty() {

@@ -49,7 +49,9 @@ fn inject_cached_auth_if_available(adapter_root: &Path, cache_path: &Path) -> Au
     inject_cached_credentials(adapter_root, cache_path);
     match crate::auth::choose_auth_for_inheritance(adapter_root) {
         Err(e) => {
-            tracing::debug!("auth cache lookup failed (non-fatal): {e}");
+            tracing::warn!(
+                "auth cache lookup failed, so the session starts with no auth status: {e}. Fix: check the auth cache folder."
+            );
             AuthStatus::default()
         }
         Ok(None) => AuthStatus::default(),

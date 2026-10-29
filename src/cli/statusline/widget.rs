@@ -765,7 +765,9 @@ fn parse_gh_pr_view(stdout: &[u8]) -> Option<PrInfo> {
     let parsed: GhPrView = match serde_json::from_slice(stdout) {
         Ok(parsed) => parsed,
         Err(e) => {
-            tracing::debug!("gh pr view: unparseable JSON (non-fatal): {e}");
+            tracing::warn!(
+                "gh pr view printed JSON that does not parse, so the PR is unknown: {e}. Fix: run `gh pr view` by hand in this folder."
+            );
             return None;
         }
     };

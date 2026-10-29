@@ -66,7 +66,7 @@ fn git_output(dir: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
          directory is readable and owned by you.",
         dir.display(),
         output.status,
-        stderr.trim()
+        llmenv_git::git_failure_detail(&output.stderr, &output.stdout, output.status)
     )
 }
 
