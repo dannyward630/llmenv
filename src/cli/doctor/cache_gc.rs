@@ -86,6 +86,17 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
         return 0;
     };
     let mut failures = match std::fs::metadata(cache_dir) {
+        // The sweep would judge the link's target and remove entries under it, so a symlink root
+        // is refused, and the user names the real folder (#3089).
+        Ok(_) if is_symlink_root(cache_dir) => {
+            eprintln!(
+                "{} GC of the cache skipped: cache directory {} is a symlink. Fix: set \
+                 cache.cache_dir to the real folder.",
+                out.warn,
+                cache_dir.display()
+            );
+            1
+        }
         Ok(meta) if meta.permissions().readonly() => {
             eprintln!(
                 "{} GC of the cache skipped: cache directory is read-only",
@@ -115,6 +126,11 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
         }
     }
     failures
+}
+
+/// True when `cache_dir` is itself a symlink. `symlink_metadata` reads the link, not its target.
+fn is_symlink_root(cache_dir: &Path) -> bool {
+    std::fs::symlink_metadata(cache_dir).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Sweep the folders under `state_dir`: `state/tmp`, the session-log rotations, and the old
@@ -227,7 +243,7 @@ mod tests {
     use std::fs::File;
     use std::time::{Duration, SystemTime};
 
-    use super::{GcOutput, sweep_cache, sweep_state};
+    use super::{GcOutput, is_symlink_root, sweep_cache, sweep_state};
     use crate::config::Config;
 
     const DAY: Duration = Duration::from_secs(86_400);
@@ -361,6 +377,18 @@ mod tests {
         let failures = sweep_cache(cache.path(), &Config::default(), DAY * 7, OUT);
         assert!(entry.exists(), "a fresh cache entry was removed");
         assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn a_symlink_cache_root_is_recognized_and_a_real_folder_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(is_symlink_root(&link), "a symlink root must be refused");
+        assert!(!is_symlink_root(&real), "a real folder must be swept");
+        assert!(!is_symlink_root(&dir.path().join("absent")));
     }
 
     #[test]
