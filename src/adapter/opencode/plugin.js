@@ -210,7 +210,10 @@ function spawnHook(command, timeoutMs, payload) {
     const timer = setTimeout(() => {
       try {
         process.kill(-child.pid, "SIGKILL");
-      } catch {
+      } catch (e) {
+        // ESRCH: the group already exited, so only the child is left to kill. Any other error is
+        // kept in stderr, so the timeout result shows why the group survived.
+        if (e.code !== "ESRCH") stderr += `\nllmenv: cannot kill process group ${child.pid}: ${e.message}`;
         child.kill("SIGKILL");
       }
       // A child that holds the pipes open would keep `close` from firing, so the timer ends the wait.
@@ -225,8 +228,11 @@ function spawnHook(command, timeoutMs, payload) {
     child.stdout.on("data", (d) => (stdout += d.toString()));
     child.stderr.on("data", (d) => (stderr += d.toString()));
     child.on("close", (code) => finish({ code, timedOut: false, stdout: stdout.trim(), stderr: stderr.trim() }));
-    // A hook that does not read stdin closes the pipe; that is not an error.
-    child.stdin.on("error", () => {});
+    // A hook that does not read stdin closes the pipe, which is EPIPE and not an error. Any other
+    // error is kept in stderr, so the hook result shows why its input was lost.
+    child.stdin.on("error", (e) => {
+      if (e.code !== "EPIPE") stderr += `\nllmenv: cannot write the hook input: ${e.message}`;
+    });
     child.stdin.end(JSON.stringify(payload));
   });
 }
