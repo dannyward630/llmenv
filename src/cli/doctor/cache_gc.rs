@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::materialize::cache::GcReport;
-use crate::materialize::{cache, tmp_sweep};
+use crate::materialize::tmp_sweep;
 use crate::paths;
 
 /// How the sweeps print their result, and whether they remove anything.
@@ -57,12 +57,13 @@ impl GcOutput<'_> {
     }
 }
 
+mod cache_sweep;
 mod credentials;
 mod index_use;
 mod session_rotation;
 mod state_gate;
+use cache_sweep::sweep_cache;
 pub(in crate::cli) use credentials::forget_credentials_for;
-use credentials::report_credential_drops;
 #[cfg(test)]
 use index_use::cache_use;
 use index_use::{CacheUse, cbm_use};
@@ -114,26 +115,6 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
         }
     }
     failures
-}
-
-/// Sweep the hashed cache under `cache_dir`. Returns the count of failed entries.
-fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) -> usize {
-    match cache::gc(cache_dir, retention, config.cache.hashing, out.dry_run) {
-        Ok(report) => {
-            out.report("", &report);
-            // A dry run deletes nothing, so it drops no credentials and has none to fail (#3073).
-            let credential_failures = if out.dry_run {
-                0
-            } else {
-                report_credential_drops(&report.removed, out)
-            };
-            report.failed.len() + credential_failures
-        }
-        Err(e) => {
-            eprintln!("{} GC failed: {e:#}", out.warn);
-            1
-        }
-    }
 }
 
 /// Sweep the folders under `state_dir`: `state/tmp`, the session-log rotations, and the old

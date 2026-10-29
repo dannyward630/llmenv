@@ -39,7 +39,7 @@ pub enum SyncError {
 
 /// Where all marketplace clones live, under the llmenv cache dir.
 #[must_use]
-fn marketplace_cache_root(cache_dir: &Path) -> PathBuf {
+pub(crate) fn marketplace_cache_root(cache_dir: &Path) -> PathBuf {
     cache_dir.join("marketplaces")
 }
 
