@@ -316,13 +316,8 @@ pub(crate) fn write_first_class_skills(
         // Track relative paths (relative to `out`) in the owned set.
         // strip_prefix is infallible here: copy_dir_owner_only writes under
         // `dest` which is `out/skills/<name>`, so every returned path starts
-        // with `out`. The debug_assert guards this invariant in test builds.
+        // A path outside `out` fails in every build here, not only in release.
         for abs_path in written {
-            debug_assert!(
-                abs_path.starts_with(out),
-                "copy_dir_owner_only returned a path outside `out`: {}",
-                abs_path.display()
-            );
             let rel = abs_path.strip_prefix(out).map_err(|_| {
                 anyhow::anyhow!(
                     "internal error: written path '{}' is not under output dir '{}'",
