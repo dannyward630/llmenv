@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::paths;
 
 /// The folder of the bundles.
-pub(super) fn bundles_dir() -> anyhow::Result<PathBuf> {
+fn bundles_dir() -> anyhow::Result<PathBuf> {
     Ok(paths::config_dir()?.join("bundles"))
 }
 
