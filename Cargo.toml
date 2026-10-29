@@ -25,7 +25,7 @@ toml = "=1.1.6"
 thiserror = "=2.0.21"
 tracing = "=0.1.44"
 proptest = "=1.11.0"
-pulldown-cmark = "=0.13.4"
+pulldown-cmark = "=0.13.5"
 tempfile = "=3.27.0"
 globset = "=0.4.20"
 walkdir = "=2.5.0"
@@ -107,7 +107,7 @@ directories = "=6.0.0"
 sha2 = { workspace = true }
 hex = "=0.4.3"
 humantime = { workspace = true }
-jiff = { version = "=0.2.37", default-features = false, features = ["std"] }
+jiff = { version = "=0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 anstyle = { workspace = true }
 glob = "=0.3.4"
 globset = { workspace = true }
@@ -131,6 +131,11 @@ hmac = "=0.13.0"
 # exempt orchestration functions (real filesystem/network I/O end to end)
 # that mutation testing can't productively cover without heavy DI.
 mutants = "=0.0.4"
+
+[features]
+# Test seam for #3030. It lets a measurement point the keychain read and delete at a stub
+# `security` binary through LLMENV_SECURITY_BIN. Never enable it in a release build.
+keychain-stub = []
 
 [dev-dependencies]
 assert_cmd = "=2.2.2"

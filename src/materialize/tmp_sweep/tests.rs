@@ -276,6 +276,7 @@ fn the_summary_counts_and_sizes_the_stale_entries_and_removes_nothing() {
         StaleSummary {
             count: 1,
             bytes: 500,
+            bytes_partial: false,
             unreadable: 0
         }
     );
@@ -299,6 +300,7 @@ fn the_summary_skips_a_claude_code_root_and_an_entry_in_use() {
         StaleSummary {
             count: 0,
             bytes: 0,
+            bytes_partial: false,
             unreadable: 0
         }
     );
@@ -316,6 +318,7 @@ fn the_summary_of_a_missing_tmp_root_is_empty() {
         StaleSummary {
             count: 0,
             bytes: 0,
+            bytes_partial: false,
             unreadable: 0
         }
     );

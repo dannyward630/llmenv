@@ -47,6 +47,38 @@ pub(super) fn sync_plugin_payloads(
                     return None;
                 }
             };
+            // Claude Code names the marketplace from the manifest, not from the config key, so a
+            // mismatch means the plugin never loads. Refuse it here, with the fix (#3048).
+            let declared = match crate::plugins::cache::read_marketplace_name(&mkt_path) {
+                Ok(declared) => declared,
+                Err(e) => {
+                    tracing::warn!(
+                        "cannot read the name of marketplace '{}': {e:#}",
+                        p.marketplace
+                    );
+                    note_unloaded_plugin(
+                        &p.plugin,
+                        &p.marketplace,
+                        "its marketplace manifest is unreadable",
+                    );
+                    return None;
+                }
+            };
+            if let Some(declared) = declared.filter(|name| *name != p.marketplace) {
+                tracing::error!(
+                    "marketplace '{}' declares name '{declared}' in its manifest, so Claude Code \
+                     registers it as '{declared}' and plugin '{}' does not load. Fix: rename the \
+                     marketplace to '{declared}' in config.yaml, and use '{declared}:<plugin>'.",
+                    p.marketplace,
+                    p.plugin
+                );
+                note_unloaded_plugin(
+                    &p.plugin,
+                    &p.marketplace,
+                    "its marketplace name differs from the manifest name",
+                );
+                return None;
+            }
             let Some(entry) = entries.iter().find(|e| e.name == p.plugin) else {
                 tracing::warn!(
                     "plugin '{}' not found in marketplace '{}' manifest — verify plugin name, \
@@ -94,7 +126,7 @@ pub(super) fn sync_plugin_payloads(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test code")]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
     #[test]
     fn sync_plugin_payloads_drops_a_plugin_missing_from_its_manifest() {
@@ -119,6 +151,34 @@ mod tests {
         assert!(
             kept.is_empty(),
             "a plugin absent from its manifest must be dropped: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_whose_marketplace_name_differs_from_its_manifest_is_dropped() {
+        // Claude Code registers the marketplace under the manifest name, so the config name
+        // loads nothing. The plugin is dropped, with the fix in the log (#3048).
+        let cache = tempfile::tempdir().expect("tempdir");
+        let mkt = crate::plugins::cache::marketplace_path(cache.path(), "config-name");
+        std::fs::create_dir_all(mkt.join(".claude-plugin")).expect("create manifest dir");
+        std::fs::write(
+            mkt.join(".claude-plugin").join("marketplace.json"),
+            r#"{"name": "manifest-name", "plugins": [{"name": "p", "source": "./p"}]}"#,
+        )
+        .expect("write manifest");
+        let plugins = vec![crate::plugins::resolve::ResolvedPlugin {
+            marketplace: "config-name".to_string(),
+            plugin: "p".to_string(),
+            collection: "c".to_string(),
+            install_path: None,
+            git_commit_sha: None,
+        }];
+
+        let kept = super::sync_plugin_payloads(cache.path(), plugins);
+
+        assert!(
+            kept.is_empty(),
+            "a mismatched marketplace must not load: {kept:?}"
         );
     }
 }

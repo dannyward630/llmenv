@@ -154,7 +154,9 @@ fn capture_login_credentials(
     // The login dir is a temp dir about to be removed; on macOS its keychain
     // item would outlive it, so drop it now that the blob is cached.
     if let Err(e) = credentials::forget(login_dir) {
-        tracing::debug!("could not drop the login dir's credential entry: {e}");
+        tracing::error!(
+            "could not drop the login dir credential entry: {e}. Fix: run `llmenv clean`, or delete the keychain item by hand."
+        );
     }
     Ok(())
 }

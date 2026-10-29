@@ -15,7 +15,13 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+mod cache;
+mod icm;
 use crate::config::{Config, HashingMode, McpServer, Throttle};
+use cache::collect_cache;
+use icm::collect_icm;
+#[cfg(test)]
+use icm::{extract_stat_line, parse_icm_stats};
 
 // `Serialize` is derived alongside `Deserialize` on every type in this module
 // (not just `StatusData`) so this module — the writer side — can construct
@@ -70,9 +76,16 @@ pub struct ThrottleData {
     pub cooldown_secs: u64,
 }
 
+/// Prunable cache size. `prunable_bytes` is `None` when the size could not be
+/// read, so the status line shows an unknown marker rather than a zero.
+/// `prunable_partial` is true when some entry was left out, so the total is a
+/// floor and the status line shows it as "at least" (#3069). Older status data
+/// has no such field, and it reads as an exact figure.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct CacheData {
-    pub prunable_bytes: u64,
+    pub prunable_bytes: Option<u64>,
+    #[serde(default)]
+    pub prunable_partial: bool,
 }
 
 /// Task-tracker progress, scoped to sessions open for the current project
@@ -199,7 +212,7 @@ pub fn collect_status_data(
             throttle_conflict,
             config_stale: config_stale
                 .and_then(|inputs| collect_config_stale(inputs.booted_hash, inputs.current_hash)),
-            cache: collect_cache(cache_root, hashing),
+            cache: Some(collect_cache(cache_root, hashing)),
             session_log: collect_session_log(),
             tasks: Some(collect_tasks()),
             unreadable: false,
@@ -303,61 +316,6 @@ fn collect_mcps(
             errors: 1,
         }),
     }
-}
-
-/// This collector runs on hot paths (materialize, `llmenv export`, session
-/// start) — not an interactive CLI invocation where a user is watching and
-/// waiting is fine. A slow/unreachable ICM backend must not stall one of
-/// those paths, so this uses the same short timeout the hook-run MCP calls
-/// use rather than the 10s interactive-CLI timeout `memory::stats_json` uses.
-const ICM_STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Best-effort live ICM query. Returns `None` when no memory backend is
-/// active for the current scope, the MCP call fails or times out, or the
-/// response can't be parsed — every one of those is an expected, non-error
-/// condition (most sessions have no ICM backend configured at all).
-fn collect_icm() -> Option<IcmData> {
-    let raw = match crate::memory::stats_json_with_timeout(ICM_STATS_TIMEOUT) {
-        Ok(raw) => raw,
-        Err(e) => {
-            // Common/expected when no ICM backend is configured for this
-            // scope; debug (not warn) since it isn't necessarily a
-            // misconfiguration.
-            tracing::debug!("icm stat collection unavailable (non-fatal): {e}");
-            return None;
-        }
-    };
-    parse_icm_stats(&raw)
-}
-
-/// Pure text-extraction half of `collect_icm`, split out so it's testable
-/// without a live ICM MCP backend.
-///
-/// The `icm_memory_stats` MCP tool has no structured-output mode — it always
-/// returns a human-formatted text block (`"Memories: 2880\nTopics: 155\n..."`),
-/// never JSON. `memories` is required; `concepts` (sourced from the tool's
-/// "Topics" line — its closest analogous count) defaults to 0 when the line
-/// is absent, so an older/trimmed stats response still yields a usable count.
-fn parse_icm_stats(raw: &str) -> Option<IcmData> {
-    Some(IcmData {
-        memories: extract_stat_line(raw, "Memories")?,
-        concepts: extract_stat_line(raw, "Topics").unwrap_or(0),
-    })
-}
-
-/// Extract the `u64` value from a `"<label>: <n>"` line, e.g. `"Memories:
-/// 2880"` for `label = "Memories"`. Whitespace-tolerant around the colon;
-/// `None` if no line matches or the value doesn't parse.
-fn extract_stat_line(raw: &str, label: &str) -> Option<u64> {
-    raw.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix(label)?
-            .trim_start()
-            .strip_prefix(':')?
-            .trim()
-            .parse()
-            .ok()
-    })
 }
 
 /// Task-tracker progress, scoped to the sessions open for the current project (mandatory-sessions
@@ -506,71 +464,15 @@ fn collect_config_stale(booted: Option<&str>, current: &str) -> Option<bool> {
     }
 }
 
-/// Best-effort prunable-bytes estimate: a dry-run `StaleOnly` prune scan, so
-/// no filesystem mutation ever happens just to report a stat.
-fn collect_cache(cache_root: &Path, hashing: HashingMode) -> Option<CacheData> {
-    let current_version =
-        matches!(hashing, HashingMode::Normal).then(crate::materialize::cache::version_major);
-    let report = match crate::materialize::cache::prune(
-        cache_root,
-        crate::materialize::cache::PruneMode::StaleOnly,
-        hashing,
-        current_version.as_deref(),
-        true, // dry_run: must not delete anything just to report a stat
-    ) {
-        Ok(report) => report,
-        Err(e) => {
-            tracing::debug!("cache stat collection failed (non-fatal): {e}");
-            return None;
-        }
-    };
-    let prunable_bytes: u64 = report.removed.iter().map(|p| dir_size(p)).sum();
-    Some(CacheData { prunable_bytes })
-}
-
-/// Recursively sum the on-disk size of every entry under `path`.
-///
-/// `prune`'s `removed` list holds directory (or symlink) paths, not files —
-/// stat'ing the directory entry itself would report a few KiB regardless of
-/// the tree's actual contents, so this walks in and sums real file sizes.
-/// Symlinks are sized by their own on-disk length rather than followed,
-/// matching `prune`'s own care not to traverse through them. Unreadable
-/// entries are skipped (best-effort estimate, not exact accounting).
-pub(crate) fn dir_size(path: &Path) -> u64 {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        // A missing path (an absent cache root, or an entry removed during the walk) has no size.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
-        Err(e) => {
-            tracing::error!("cannot stat {} for the size estimate: {e}", path.display());
-            return 0;
-        }
-    };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(e) => {
-            tracing::error!(
-                "cannot list {} for the size estimate, so it counts as its own length: {e}",
-                path.display()
-            );
-            return meta.len();
-        }
-    };
-    entries
-        .filter_map(|entry| crate::paths::readable_entry(path, "the size estimate", entry))
-        .map(|entry| dir_size(&entry.path()))
-        .sum()
-}
-
 /// Best-effort session-log line count.
 fn collect_session_log() -> Option<u64> {
     let path = match crate::session_log::file_sink::default_file_path() {
         Ok(path) => path,
         Err(e) => {
-            tracing::debug!("session log stat collection failed (non-fatal): {e}");
+            tracing::warn!(
+                "session log stat collection failed, so the line count is empty: {e}. Fix: check \
+                 that the session log folder is readable."
+            );
             return None;
         }
     };
@@ -582,6 +484,7 @@ fn collect_session_log() -> Option<u64> {
 mod tests {
     use super::*;
     use crate::config::{Features, Marketplace, Memory, PluginCollection};
+    use crate::materialize::dir_size::dir_size;
     use proptest::prelude::*;
 
     fn tags(ts: &[&str]) -> BTreeSet<String> {
@@ -1058,13 +961,22 @@ mod tests {
     // --- collect_cache / dir_size ---
 
     #[test]
+    fn dir_size_fails_on_a_stat_error_instead_of_reporting_zero() {
+        // A child of a regular file fails with ENOTDIR, which is not a missing path (#3038).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").expect("write fixture file");
+        assert!(dir_size(&file.join("child")).is_err());
+    }
+
+    #[test]
     fn dir_size_sums_nested_files_recursively() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"12345").unwrap(); // 5 bytes
         let nested = dir.path().join("nested");
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(nested.join("b.txt"), b"1234567890").unwrap(); // 10 bytes
-        assert_eq!(dir_size(dir.path()), 15);
+        assert_eq!(dir_size(dir.path()).expect("dir size").bytes, 15);
     }
 
     /// Writes one file per size in `sizes`, named `<prefix><index>.bin`, each
@@ -1093,7 +1005,7 @@ mod tests {
                 .chain(nested_sizes.iter())
                 .map(|s| *s as u64)
                 .sum();
-            prop_assert_eq!(dir_size(dir.path()), expected);
+            prop_assert_eq!(dir_size(dir.path()).expect("dir size").bytes, expected);
         }
 
         /// Adding a file must monotonically increase the reported size by
@@ -1105,37 +1017,12 @@ mod tests {
         ) {
             let dir = tempfile::tempdir().unwrap();
             write_sized_files(dir.path(), "f", &initial_sizes);
-            let before = dir_size(dir.path());
+            let before = dir_size(dir.path()).expect("dir size").bytes;
             std::fs::write(dir.path().join("extra.bin"), vec![0u8; extra_size]).unwrap();
-            let after = dir_size(dir.path());
+            let after = dir_size(dir.path()).expect("dir size").bytes;
             prop_assert!(after >= before);
             prop_assert_eq!(after - before, extra_size as u64);
         }
-    }
-
-    #[test]
-    fn collect_cache_missing_cache_root_yields_zero_prunable_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist");
-        let result = collect_cache(&missing, HashingMode::Strict);
-        assert_eq!(result, Some(CacheData { prunable_bytes: 0 }));
-    }
-
-    #[test]
-    fn collect_cache_reports_prunable_bytes_without_deleting() {
-        let dir = tempfile::tempdir().unwrap();
-        // A stale folder (doesn't match the current VERSION_TAG prefix).
-        let stale = dir.path().join("0.0.1-old-deadbeef");
-        std::fs::create_dir_all(&stale).unwrap();
-        std::fs::write(stale.join("file.txt"), b"0123456789").unwrap(); // 10 bytes
-
-        let result = collect_cache(dir.path(), HashingMode::Strict);
-        assert_eq!(result, Some(CacheData { prunable_bytes: 10 }));
-        // dry_run: the stale folder must still be on disk afterward.
-        assert!(
-            stale.exists(),
-            "collect_cache must never delete anything just to report a stat"
-        );
     }
 
     // --- collect_session_log ---
@@ -1330,7 +1217,7 @@ mod tests {
         assert_eq!(data.plugins.unwrap().total, 12);
         assert_eq!(data.icm.unwrap().memories, 142);
         assert_eq!(data.config_stale, Some(false));
-        assert_eq!(data.cache.unwrap().prunable_bytes, 15_728_640);
+        assert_eq!(data.cache.unwrap().prunable_bytes, Some(15_728_640));
         assert_eq!(data.session_log, Some(8));
         assert!(data.throttle.is_none());
     }

@@ -1,6 +1,7 @@
 pub use llmenv_git::{
     DEFAULT_GIT_PLUGIN_TIMEOUT_SECS, DEFAULT_GIT_TIMEOUT_SECS, GIT_CONFIG_FLAGS, apply_git_timeout,
-    git_failure_detail, has_unpushed_commits, sanitize_git_url, secure_git, working_tree_dirty,
+    git_failure_detail, has_unpushed_commits, is_not_a_repo_message, sanitize_git_url, secure_git,
+    working_tree_dirty,
 };
 
 /// How long a local git query may run, such as `rev-parse` or `symbolic-ref`. A local git answers

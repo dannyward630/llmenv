@@ -102,7 +102,9 @@ pub fn detect_local_addrs() -> Vec<IpAddr> {
             .filter(identifies_a_network)
             .collect(),
         Err(e) => {
-            tracing::debug!("interface enumeration failed: {e}");
+            tracing::warn!(
+                "interface enumeration failed, so cidr scopes do not match: {e}. Fix: check the network interfaces with `ifconfig`."
+            );
             Vec::new()
         }
     }
