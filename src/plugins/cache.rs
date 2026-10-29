@@ -266,7 +266,7 @@ fn sync_git(
     // A hit reuses the existing clone (as-is, or fast-forwarded via `pull`);
     // a pinned refresh forces a fresh re-clone regardless of what's on disk
     // (#496), which is a deliberate cache invalidation — a miss, not a hit.
-    let already_cloned = dest.join(".git").exists();
+    let already_cloned = std::fs::symlink_metadata(dest.join(".git")).is_ok();
     let hit = already_cloned && !(refresh && pinned);
     let extra = format!("name={}", m.name);
 
@@ -328,7 +328,7 @@ fn sync_git(
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
     if let Err(head_error) = &head
-        && dest.join(".git").exists()
+        && std::fs::symlink_metadata(dest.join(".git")).is_ok()
     {
         let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(
@@ -548,7 +548,7 @@ fn sync_external_plugin_with(
         )));
     }
     let dest = plugin_payload_path(cache_dir, marketplace, plugin);
-    if dest.join(".git").exists() {
+    if std::fs::symlink_metadata(dest.join(".git")).is_ok() {
         if refresh {
             if split_source_ref(source).1.is_some() {
                 // #2442: a pinned source is frozen, so a refresh re-clones it. This also applies
@@ -584,7 +584,7 @@ fn sync_external_plugin_with(
     // Clean up on error so the next invocation retries the clone instead of hitting
     // the pull path (fixes #537).
     if let Err(head_error) = &head
-        && dest.join(".git").exists()
+        && std::fs::symlink_metadata(dest.join(".git")).is_ok()
     {
         let note = broken_clone_note(&dest);
         return Err(SyncError::Other(anyhow::anyhow!(

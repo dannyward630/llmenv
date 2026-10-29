@@ -27,14 +27,25 @@ pub(super) fn cache_use(config: &Config, bundles_dir: &Path, dir: &Path) -> Cach
         Ok(raws) => raws,
         Err(cause) => return CacheUse::Unknown(cause),
     };
-    let canonical_dir = std::fs::canonicalize(dir).ok();
+    let canonical_dir = match std::fs::canonicalize(dir) {
+        Ok(canonical) => canonical,
+        Err(e) => return CacheUse::Unknown(format!("cannot resolve {}: {e}", dir.display())),
+    };
     for raw in raws {
         let expanded = match paths::expand_tilde(&raw) {
             Ok(expanded) => PathBuf::from(expanded),
             Err(e) => return CacheUse::Unknown(format!("cannot expand index_path {raw}: {e:#}")),
         };
+        // A path that does not exist cannot be the folder in use. Any other failure to resolve it
+        // is unknown, so the sweep is skipped and not run as if the folder were unused (#3075).
         let same = expanded == dir
-            || (canonical_dir.is_some() && std::fs::canonicalize(&expanded).ok() == canonical_dir);
+            || match std::fs::canonicalize(&expanded) {
+                Ok(canonical) => canonical == canonical_dir,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    return CacheUse::Unknown(format!("cannot resolve index_path {raw}: {e}"));
+                }
+            };
         if same {
             return CacheUse::Live;
         }

@@ -79,7 +79,7 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
         Err(e) => {
             // A second corruption must not overwrite the first aside copy (#2658 review).
             let mut aside = path.with_extension("json.corrupt");
-            if aside.exists() {
+            if std::fs::symlink_metadata(&aside).is_ok() {
                 let nanos = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos());
