@@ -42,15 +42,30 @@ fn declared_name_problems(config: &Config, cache_dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Returns marketplace names defined in `config` that no plugin collection references.
-pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
-    let referenced: HashSet<&str> = config
+/// The marketplace of each plugin reference in every plugin collection. A reference with no
+/// marketplace part is logged and keeps nothing, because sync refuses such a config.
+pub(super) fn referenced_marketplaces(config: &Config) -> HashSet<&str> {
+    config
         .plugin_collection
         .iter()
         .flat_map(|c| c.plugins.iter())
-        .filter_map(|p| split_plugin_ref(p))
-        .map(|(m, _)| m)
-        .collect();
+        .filter_map(|p| match split_plugin_ref(p) {
+            Some((marketplace, _)) => Some(marketplace),
+            None => {
+                tracing::warn!(
+                    "plugin reference '{}' has no marketplace part, so it keeps no clone. Fix: \
+                     write it as <marketplace>:<plugin>.",
+                    display_safe(p)
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// Returns marketplace names defined in `config` that no plugin collection references.
+pub(super) fn unused_marketplaces(config: &Config) -> Vec<&str> {
+    let referenced = referenced_marketplaces(config);
     config
         .marketplace
         .iter()
@@ -84,6 +99,19 @@ mod tests {
         let dir = crate::plugins::cache::marketplace_path(cache_dir, clone).join(".claude-plugin");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("marketplace.json"), body).unwrap();
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_declared_name_is_a_problem_exactly_when_it_differs_from_the_key(
+            key in "[a-z][a-z0-9-]{0,11}",
+            declared in "[a-z][a-z0-9-]{0,11}",
+        ) {
+            let cache = tempfile::tempdir().unwrap();
+            write_manifest(cache.path(), &key, &format!(r#"{{"name": "{declared}"}}"#));
+            let problems = declared_name_problems(&config_with_marketplace(&key), cache.path());
+            proptest::prop_assert_eq!(problems.is_empty(), key == declared);
+        }
     }
 
     #[test]
