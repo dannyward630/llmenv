@@ -52,7 +52,8 @@ fn connect_with_timeout(timeout: Duration) -> anyhow::Result<McpHttpClient> {
     let url = crate::hook_run::memory_url(&config, config_dir, &active)?
         .into_url()
         .map_err(|e| NoBackendForScope(format!("{e:#}")))?;
-    McpHttpClient::new(url, timeout).map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
+    McpHttpClient::new(url, timeout)
+        .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e:#}"))
 }
 
 /// Bridge a synchronous CLI context to an async MCP tool call.

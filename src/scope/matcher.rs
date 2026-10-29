@@ -230,7 +230,7 @@ const MAX_TAGS_PER_SOURCE: usize = 64;
 /// mode as tags.
 pub(crate) fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
     // #1345: these report a tag the *user* wrote never taking effect, so they
-    // have to be `eprintln!`. The default `EnvFilter` is `ERROR`, so a
+    // have to be `eprintln!`. The session-log file layer's `EnvFilter` is `ERROR`, so a
     // `tracing::warn!` here reached neither stderr nor the log file — the tag
     // silently did nothing and no bundle gated on it ever fired.
     let mut valid = Vec::with_capacity(raw.len());
