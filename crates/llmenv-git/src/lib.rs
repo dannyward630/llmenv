@@ -216,7 +216,7 @@ pub fn local_query(dir: &Path, args: &[&str]) -> std::io::Result<std::process::O
         .env("LC_ALL", "C")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    llmenv_util::process::run_with_timeout(cmd, LOCAL_QUERY_TIMEOUT)
+    llmenv_util::process::run_traced("git:local-query", cmd, LOCAL_QUERY_TIMEOUT)
 }
 
 /// Whether git's stderr says the directory is outside a repository.
