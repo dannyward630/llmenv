@@ -2,15 +2,15 @@
 //! name the running llmenv binary. The bare name is used only when that binary's path is not
 //! UTF-8 or the OS cannot report it.
 
-use crate::adapter::hook_program::program_name;
+use crate::adapter::hook_program::{fallback_message, program_name};
 
 /// Print the hook-command check for the running binary.
 pub(super) fn run_doctor_hook_command(use_color: bool) {
     let pass = super::super::doctor_pass(use_color);
     let warn = super::super::doctor_warning(use_color);
-    match program_name(std::env::current_exe()).fallback_warning() {
-        Some(message) => eprintln!("{warn} {message}"),
-        None => eprintln!("{pass} Hook commands name llmenv by the path of the running binary"),
+    match program_name(std::env::current_exe()) {
+        Ok(_) => eprintln!("{pass} Hook commands name llmenv by the path of the running binary"),
+        Err(reason) => eprintln!("{warn} {}", fallback_message(&reason)),
     }
 }
 
@@ -23,16 +23,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn warns_with_the_fix_when_the_binary_path_is_unknown() {
-        let warning = program_name(Err(std::io::Error::other("no path")))
-            .fallback_warning()
-            .expect("the bare name is warned about");
-        assert!(warning.contains("Fix: run llmenv"), "{warning}");
+    fn an_unknown_binary_path_is_reported_with_the_fix() {
+        let reason = program_name(Err(std::io::Error::other("no path")))
+            .expect_err("an unknown path is reported");
+        let message = fallback_message(&reason);
+        assert!(message.contains("Fix: move the llmenv binary"), "{message}");
     }
 
     #[test]
-    fn no_warning_when_the_binary_path_is_known() {
+    fn a_known_binary_path_is_not_reported() {
         let exe = std::path::PathBuf::from("/opt/llmenv/bin/llmenv");
-        assert_eq!(program_name(Ok(exe)).fallback_warning(), None);
+        assert!(program_name(Ok(exe)).is_ok());
     }
 }

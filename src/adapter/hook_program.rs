@@ -9,60 +9,40 @@ use crate::util::shell_word;
 ///
 /// The program is the running llmenv binary, shell-quoted. `PATH` is not searched, so a
 /// project folder on `PATH` cannot be written into an engine config. When the binary's path is
-/// not UTF-8 or the OS cannot report it, the bare name is used and a warning is logged.
+/// not UTF-8 or the OS cannot report it, the bare name is used and an error is logged.
 pub(crate) fn hook_command(args: &str) -> String {
     hook_command_in(std::env::current_exe(), args)
 }
 
-/// How hook commands name the llmenv program.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProgramName {
-    /// The shell-quoted path of the running llmenv binary.
-    Absolute(String),
-    /// The bare name `llmenv`, with the reason the binary's path cannot be used.
-    Bare(String),
-}
-
-impl ProgramName {
-    /// The program text that the hook command lines start with.
-    fn word(&self) -> &str {
-        match self {
-            Self::Absolute(word) => word,
-            Self::Bare(_) => "llmenv",
-        }
-    }
-
-    /// The message that names the bare-name fallback and its fix, or `None` for an absolute path.
-    pub(crate) fn fallback_warning(&self) -> Option<String> {
-        match self {
-            Self::Absolute(_) => None,
-            Self::Bare(reason) => Some(format!(
-                "{reason}, so its hook commands use the bare name `llmenv`. Fix: run llmenv \
-                 from a binary whose path is UTF-8 and reported by the OS."
-            )),
-        }
-    }
-}
-
 /// Pick how hook commands name llmenv, from the running binary's path in `exe`.
-pub(crate) fn program_name(exe: std::io::Result<PathBuf>) -> ProgramName {
+///
+/// `Ok` holds the shell-quoted path. `Err` holds the reason the path cannot be used.
+pub(crate) fn program_name(exe: std::io::Result<PathBuf>) -> Result<String, String> {
     match exe {
-        Ok(path) if path.to_str().is_some() => ProgramName::Absolute(shell_word(&path)),
-        // A lossy conversion would name a file that does not exist, so the bare name is used.
-        Ok(path) => ProgramName::Bare(format!(
+        Ok(path) if path.to_str().is_some() => Ok(shell_word(&path)),
+        // A lossy conversion would name a file that does not exist, so no path is used.
+        Ok(path) => Err(format!(
             "llmenv is at {}, which is not valid UTF-8",
             path.display()
         )),
-        Err(e) => ProgramName::Bare(format!("the path of the running llmenv is unknown ({e})")),
+        Err(e) => Err(format!("the path of the running llmenv is unknown ({e})")),
     }
 }
 
+/// The message for the bare-name fallback. It names the reason and the fix.
+pub(crate) fn fallback_message(reason: &str) -> String {
+    format!(
+        "{reason}, so hook commands use the bare name `llmenv`, which a PATH entry can shadow. \
+         Fix: move the llmenv binary to a UTF-8 path, then regenerate the hook config."
+    )
+}
+
 fn hook_command_in(exe: std::io::Result<PathBuf>, args: &str) -> String {
-    let program = program_name(exe);
-    if let Some(warning) = program.fallback_warning() {
-        tracing::warn!("{warning}");
-    }
-    format!("{} {args}", program.word())
+    let program = program_name(exe).unwrap_or_else(|reason| {
+        tracing::error!("{}", fallback_message(&reason));
+        "llmenv".to_string()
+    });
+    format!("{program} {args}")
 }
 
 #[cfg(test)]
@@ -85,19 +65,16 @@ mod tests {
     }
 
     #[test]
-    fn absolute_program_has_no_fallback_warning() {
+    fn a_known_binary_path_is_used_without_a_fallback() {
         let program = program_name(Ok(PathBuf::from("/opt/llmenv/bin/llmenv")));
-        assert!(matches!(program, ProgramName::Absolute(_)), "{program:?}");
-        assert_eq!(program.fallback_warning(), None);
+        assert_eq!(program, Ok("/opt/llmenv/bin/llmenv".to_string()));
     }
 
     #[test]
-    fn an_unknown_binary_path_falls_back_to_the_bare_name_with_a_warning() {
-        let program = program_name(Err(std::io::Error::other("no such file")));
-        let warning = program
-            .fallback_warning()
-            .expect("the bare name has a warning");
-        assert!(warning.contains("no such file"), "{warning}");
+    fn an_unknown_binary_path_falls_back_to_the_bare_name_with_the_reason() {
+        let reason = program_name(Err(std::io::Error::other("no such file")))
+            .expect_err("an unknown path has a reason");
+        assert!(reason.contains("no such file"), "{reason}");
         assert_eq!(
             hook_command_in(Err(std::io::Error::other("gone")), "throttle"),
             "llmenv throttle"
@@ -106,15 +83,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_non_utf8_binary_path_falls_back_to_the_bare_name_with_a_warning() {
+    fn a_non_utf8_binary_path_falls_back_to_the_bare_name_with_the_reason() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         let exe = PathBuf::from(OsString::from_vec(vec![b'/', 0xff, b'/', b'l']));
-        let program = program_name(Ok(exe));
-        let warning = program
-            .fallback_warning()
-            .expect("the bare name has a warning");
-        assert!(warning.contains("not valid UTF-8"), "{warning}");
+        let reason = program_name(Ok(exe)).expect_err("a non-UTF-8 path has a reason");
+        assert!(reason.contains("not valid UTF-8"), "{reason}");
+    }
+
+    #[test]
+    fn the_fallback_message_names_the_fix() {
+        let message = fallback_message("the path is unknown");
+        assert!(message.contains("Fix: move the llmenv binary"), "{message}");
     }
 
     proptest! {
