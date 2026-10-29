@@ -71,3 +71,15 @@ pub fn validate_permission_string(context: &str, raw: &str) -> Result<(), Valida
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod paren_tests {
+    use super::has_balanced_parens;
+
+    #[test]
+    fn an_escaped_paren_does_not_change_the_depth() {
+        // `\(` is a literal paren, so the rule's own parens still balance (#3053 review).
+        assert!(has_balanced_parens(r"a\(b"));
+        assert!(!has_balanced_parens("a(b"));
+    }
+}
