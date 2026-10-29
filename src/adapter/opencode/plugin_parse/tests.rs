@@ -34,3 +34,59 @@ proptest! {
         let _ = parse_plugin_mcp_entries(&path, "plugin");
     }
 }
+
+/// One generated hook entry: its `type` field and its `command` field.
+fn hook_entry() -> impl Strategy<Value = (Option<&'static str>, Option<String>)> {
+    let kind = prop_oneof![
+        Just(None),
+        Just(Some("command")),
+        Just(Some("http")),
+        Just(Some("prompt")),
+    ];
+    let command = proptest::option::of(prop_oneof![
+        "[a-z ]{0,12}",
+        "[a-z ]{0,6}".prop_map(|s| format!("${{CLAUDE_PLUGIN_ROOT}}/{s}")),
+        "[a-z]{0,4}".prop_map(|s| format!("${{CLAUDE_PLUGIN_ROOT}} ${{CLAUDE_PLUGIN_ROOT}}{s}")),
+    ]);
+    (kind, command)
+}
+
+proptest! {
+    /// Only an entry of type `command` (or no type) with a `command` field gives a hook, and each
+    /// hook has every `${CLAUDE_PLUGIN_ROOT}` replaced by the payload path.
+    #[test]
+    fn parse_plugin_hooks_keeps_only_command_entries_and_resolves_the_root(
+        entries in proptest::collection::vec(hook_entry(), 0..12),
+    ) {
+        let json_entries: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(kind, command)| {
+                let mut entry = serde_json::Map::new();
+                if let Some(kind) = kind {
+                    entry.insert("type".into(), (*kind).into());
+                }
+                if let Some(command) = command {
+                    entry.insert("command".into(), command.clone().into());
+                }
+                serde_json::Value::Object(entry)
+            })
+            .collect();
+        let manifest = serde_json::json!({ "hooks": { "PreToolUse": [{ "hooks": json_entries }] } });
+        let (dir, path) = write_bytes(manifest.to_string().as_bytes());
+        let payload = dir.path().join("payload");
+
+        let hooks = parse_plugin_hooks(&path, &payload, "plugin")
+            .map_err(|e| TestCaseError::fail(format!("{e:#}")))?
+            .ok_or_else(|| TestCaseError::fail("the manifest exists, so the result is Some"))?;
+
+        let expected = entries
+            .iter()
+            .filter(|(kind, command)| matches!(kind, None | Some("command")) && command.is_some())
+            .count();
+        prop_assert_eq!(hooks.len(), expected);
+        for hook in &hooks {
+            let command = hook.handler.command.as_deref().unwrap_or_default();
+            prop_assert!(!command.contains("${CLAUDE_PLUGIN_ROOT}"), "{command}");
+        }
+    }
+}
