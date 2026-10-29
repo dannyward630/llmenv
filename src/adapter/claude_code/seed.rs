@@ -257,18 +257,22 @@ mod status_line_tests {
     #[test]
     fn seed_status_line_migrates_the_bare_llmenv_command() {
         let out = tempfile::tempdir().expect("tempdir");
+        // The marker key is not part of a seeded entry, so it is gone only if the entry was
+        // rewritten. The seeded command depends on PATH, so the test does not compare it.
         let before = format!(
-            r#"{{"statusLine":{{"type":"command","command":"{BARE_SEEDED_STATUS_COMMAND}"}}}}"#
+            r#"{{"statusLine":{{"type":"command","command":"{BARE_SEEDED_STATUS_COMMAND}","marker":1}}}}"#
         );
         std::fs::write(out.path().join("settings.json"), before).expect("write settings");
 
         seed_status_line(out.path()).expect("seed");
 
-        let command = seeded_command(out.path());
-        assert_ne!(
-            command, BARE_SEEDED_STATUS_COMMAND,
-            "the bare command was kept"
+        let bytes = std::fs::read(out.path().join("settings.json")).expect("read settings");
+        let settings: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
+        assert!(
+            settings["statusLine"].get("marker").is_none(),
+            "the bare entry was kept: {settings}"
         );
+        let command = seeded_command(out.path());
         assert!(command.ends_with("statusline --color always"), "{command}");
     }
 
