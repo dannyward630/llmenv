@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
 - Show warnings on stderr by default. `RUST_LOG` still overrides the level. [fix:cli] [#3061]
 - Name the running llmenv binary in hook commands, not the first `llmenv` on `PATH`. A project folder on `PATH` can no longer put its own `llmenv` into an engine config. [fix:hook] [#3081]
-- Log a warning on a hook or statusline path only for a degraded result. A stale MCP session, a first `gh pr view` failure that a retry fixes, and a read-once path that does not exist yet now log at debug level. [#3082]
+- Log a warning on a hook or statusline path only for a degraded result. A stale MCP session, a read-once path that does not exist yet, and a pipeline failure that is already shown on stderr now log at debug level. [#3082]
 
 ### Fixed
 
