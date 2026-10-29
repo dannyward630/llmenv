@@ -107,3 +107,90 @@ pub(crate) fn matches_content_all<'a>(
     }
     matched
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test fails loudly when its fixture cannot be set up"
+)]
+mod tests {
+    use super::matches_content_all;
+    use llmenv_config::{ContentMatch, ContentScope};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    const GLOBS: &[&str] = &["*.rs", "*.md", "a/*", "**/b.rs", "c.*", "*.go"];
+
+    /// The naive form: one full walk per scope, with the depth limit applied to each file.
+    fn naive(scopes: &[ContentScope], cwd: &Path) -> BTreeSet<String> {
+        let files: Vec<(std::path::PathBuf, usize)> = walkdir::WalkDir::new(cwd)
+            .into_iter()
+            .map(|e| e.expect("walk the fixture"))
+            .filter(|e| !e.file_type().is_dir())
+            .map(|e| {
+                (
+                    e.path().strip_prefix(cwd).expect("under cwd").to_path_buf(),
+                    e.depth(),
+                )
+            })
+            .collect();
+        scopes
+            .iter()
+            .filter(|s| {
+                let matcher = globset::Glob::new(&s.r#match.glob)
+                    .expect("a fixture glob is valid")
+                    .compile_matcher();
+                files.iter().any(|(path, depth)| {
+                    s.r#match.depth.is_none_or(|d| *depth <= d) && matcher.is_match(path)
+                })
+            })
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    fn file_path() -> impl Strategy<Value = String> {
+        proptest::collection::vec(prop::sample::select(vec!["a", "b", "c"]), 0..3).prop_flat_map(
+            |dirs| {
+                prop::sample::select(vec!["b.rs", "x.md", "c.txt", "y.rs"])
+                    .prop_map(move |name| [dirs.join("/"), name.to_string()].join("/"))
+            },
+        )
+    }
+
+    proptest! {
+        /// One shared walk with early exit and per-scope depth gives the same scopes as one full
+        /// walk per scope (#703).
+        #[test]
+        fn one_walk_matches_one_walk_per_scope(
+            files in proptest::collection::vec(file_path(), 0..8),
+            specs in proptest::collection::vec(
+                (prop::sample::select(GLOBS), proptest::option::of(1usize..4)),
+                0..6,
+            ),
+        ) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            for file in &files {
+                let path = dir.path().join(file.trim_start_matches('/'));
+                std::fs::create_dir_all(path.parent().expect("a file has a parent"))
+                    .expect("mkdir");
+                std::fs::write(&path, "").expect("write");
+            }
+            let scopes: Vec<ContentScope> = specs
+                .iter()
+                .enumerate()
+                .map(|(i, (glob, depth))| ContentScope {
+                    id: format!("s{i}"),
+                    r#match: ContentMatch { glob: (*glob).to_string(), depth: *depth },
+                    tags: Vec::new(),
+                })
+                .collect();
+
+            let shared: BTreeSet<String> = matches_content_all(&scopes, dir.path())
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            prop_assert_eq!(shared, naive(&scopes, dir.path()));
+        }
+    }
+}
