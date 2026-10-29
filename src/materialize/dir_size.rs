@@ -99,6 +99,23 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    proptest::proptest! {
+        #[test]
+        fn combine_is_commutative_associative_and_has_a_zero_identity(
+            (a, b, c) in (
+                (proptest::prelude::any::<u64>(), 0u64..1000),
+                (proptest::prelude::any::<u64>(), 0u64..1000),
+                (proptest::prelude::any::<u64>(), 0u64..1000),
+            ),
+        ) {
+            let size = |(bytes, skipped): (u64, u64)| DirSize { bytes, skipped };
+            let (a, b, c) = (size(a), size(b), size(c));
+            proptest::prop_assert_eq!(a.combine(b), b.combine(a));
+            proptest::prop_assert_eq!(a.combine(b).combine(c), a.combine(b.combine(c)));
+            proptest::prop_assert_eq!(a.combine(DirSize::default()), a);
+        }
+    }
+
     #[test]
     fn a_missing_root_is_zero_and_is_logged() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -267,6 +267,53 @@ fn is_bare_seeded_status_line(existing: &serde_json::Value) -> bool {
 mod status_line_tests {
     use super::*;
 
+    proptest::proptest! {
+        #[test]
+        fn a_settings_file_parses_exactly_when_it_is_a_json_object(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+        ) {
+            let parsed = parse_settings_object(std::path::Path::new("s.json"), &bytes, "k");
+            let is_object = matches!(
+                serde_json::from_slice::<serde_json::Value>(&bytes),
+                Ok(serde_json::Value::Object(_))
+            );
+            proptest::prop_assert_eq!(parsed.is_ok(), is_object);
+        }
+
+        #[test]
+        fn a_json_object_keeps_every_key_and_value(
+            keys in proptest::collection::btree_map("[a-z]{1,6}", "[a-z0-9 ]{0,8}", 0..6),
+        ) {
+            let text = serde_json::to_vec(&keys).expect("test setup");
+            let parsed = parse_settings_object(std::path::Path::new("s.json"), &text, "k").expect("test setup");
+            proptest::prop_assert_eq!(parsed.len(), keys.len());
+            for (key, value) in &keys {
+                proptest::prop_assert_eq!(parsed[key].as_str(), Some(value.as_str()));
+            }
+        }
+
+        #[test]
+        fn a_user_status_line_and_every_other_key_survive_seeding_byte_for_byte(
+            other in proptest::collection::btree_map("[a-z]{1,6}", "[a-z]{0,6}", 0..4),
+            command in "[a-z]{1,10}",
+        ) {
+            let mut obj = serde_json::Map::new();
+            for (key, value) in &other {
+                obj.insert(key.clone(), serde_json::Value::from(value.clone()));
+            }
+            let user = serde_json::json!({ "type": "command", "command": format!("my-{command}") });
+            obj.insert("statusLine".to_string(), user);
+            let before = serde_json::to_vec(&obj).expect("test setup");
+            let dir = tempfile::tempdir().expect("test setup");
+            let settings = dir.path().join("settings.json");
+            std::fs::write(&settings, &before).expect("test setup");
+
+            seed_status_line(dir.path()).expect("test setup");
+
+            proptest::prop_assert_eq!(std::fs::read(&settings).expect("test setup"), before);
+        }
+    }
+
     #[test]
     fn a_corrupt_settings_file_is_an_error_that_names_the_file_and_the_key() {
         let dir = tempfile::tempdir().expect("tempdir");
