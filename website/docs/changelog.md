@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
 - Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
+- Show warnings on stderr by default. `RUST_LOG` still overrides the level. [fix:cli] [#3061]
 
 ### Fixed
 
@@ -58,6 +59,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Compute the peak widget window from the zone database, so a countdown across a DST change counts the real hours. The old rule was one hour off on that day. A zone that cannot be read shows `unknown` and logs an error. [refactor:statusline] [#3063]
 - Stop `llmenv doctor` from reporting a failed codebase-memory GC when SQLite removes a `-wal` or `-shm` file during the scan. The false failure also forced an `lsof` run. [fix:cache-gc] [#3078]
 - Report an index database whose age cannot be read, even when a server has it in use. Before, that failure was dropped silently. [fix:cache-gc] [#3078]
+- Return an error for an unreadable keychain credential instead of falling back to the file credential, and name the fix. [fix:keychain] [#3067]
+- Report a failed keychain delete as an error, not as "not found". [fix:keychain] [#3068]
+- Show a partial prunable cache size as "at least N" in the status line and the stale-tmp hint. [fix:materialize] [#3058] [#3069]
+- Log a failed ICM or session-log stat at warn, with the fix, instead of at debug. [fix:status] [#3062]
+- Report failed credential drops in the `clean` and `doctor` GC summaries. [fix:gc] [#3073]
+- Skip the codebase-memory folder that `features.codebase_memory` uses in the state GC. [fix:gc] [#3075]
+- Judge a symlink by its own age in the cache GC and the session-log reaper. [fix:gc] [#3076]
+- Name the cause of each failed cache removal, and log a clock-skew entry once per run. [fix:gc] [#3077]
+- Log an unreadable working directory as an error, with the fix. Matching scopes still read as unmatched. [fix:scope] [#3070]
+- Reject a widget `display` value that the widget does not accept, and name the allowed values. [fix:config] [#3059]
+- Treat only an absent `git config` key as "not found", and scrub credentials from git errors. [fix:git] [#3053]
+- Migrate the bare `llmenv statusline` command in existing statusLine settings, and keep other values. [fix:adapter] [#3051]
+- Log the context and errors of the OpenCode SessionEnd hook. [fix:opencode] [#3037]
+- Log the first failed `gh pr view` attempt, and name the fix when the lookup fails or times out. [fix:statusline] [#3036]
+- Keep the template comments in `config.yaml` when `llmenv init` seeds settings. [fix:init] [#2964]
+- Refuse a plugin whose marketplace name differs from the name in its manifest, and name the fix. [fix:plugins] [#3048]
 
 ### Security
 
