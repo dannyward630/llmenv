@@ -105,7 +105,10 @@ fn publish_result(pending: &Path, result: &Path, started: bool) {
             tracing::error!("cannot save the index result to {}: {e}", result.display());
         }
     } else if let Err(e) = std::fs::remove_file(pending) {
-        tracing::debug!("cannot remove {}: {e}", pending.display());
+        tracing::warn!(
+            "cannot remove {}, so a stale pending index result stays: {e}. Fix: remove it by hand.",
+            pending.display()
+        );
     }
 }
 

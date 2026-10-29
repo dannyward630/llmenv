@@ -130,11 +130,22 @@ fn run_prune(
     );
     // Drop each removed folder's platform credential entry, as the gc share does. Folders deleted
     // without it are how orphaned keychain items accumulate (#1057).
+    let mut credentials_failed = 0;
     if !args.dry_run && !folders.removed.is_empty() {
-        let forgotten = cache_gc::forget_credentials_for(&folders.removed);
-        if forgotten > 0 {
-            eprintln!("  dropped {forgotten} orphaned OAuth credential entry(ies)");
+        let drops = cache_gc::forget_credentials_for(&folders.removed);
+        if drops.removed > 0 {
+            eprintln!(
+                "  dropped {} orphaned OAuth credential entry(ies)",
+                drops.removed
+            );
         }
+        if drops.failed > 0 {
+            eprintln!(
+                "  could not drop {} OAuth credential entry(ies); see the error above",
+                drops.failed
+            );
+        }
+        credentials_failed = drops.failed;
     }
     let plugins = if args.plugin_cache {
         remove_plugin_caches(cache_dir, args.dry_run)
@@ -167,6 +178,14 @@ fn run_prune(
         anyhow::bail!(
             "{} plugin cache entry(ies) could not be removed — see the failures above",
             plugins.failed.len()
+        );
+    }
+    // A credential that could not be dropped is left in the keychain, so the command fails too,
+    // as the GC summary already counts it (#3073 review).
+    if credentials_failed > 0 {
+        anyhow::bail!(
+            "{credentials_failed} OAuth credential entry(ies) could not be dropped — see the \
+             errors above"
         );
     }
     Ok(())

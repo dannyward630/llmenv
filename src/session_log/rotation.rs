@@ -172,7 +172,7 @@ pub(crate) fn prune_rotations(
 /// Whether the file at `path` was last written more than `older_than` before `now`.
 fn is_old(path: &Path, now: SystemTime, older_than: Duration) -> std::io::Result<bool> {
     let modified = std::fs::symlink_metadata(path)?.modified()?;
-    Ok(is_expired(now, modified, older_than))
+    Ok(is_expired(now, modified, older_than, path))
 }
 
 /// Remove each candidate under the rotation lock, after a second age check.

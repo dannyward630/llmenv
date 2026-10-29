@@ -6,26 +6,11 @@
 //! older setup that no server reads, so an old one can go. A folder that a configured
 //! `index_path` names is the live cache, and it is never swept.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use anyhow::Context as _;
-
-use crate::materialize::cache::{GcReport, gc_remove_link, is_expired};
-
-/// The file name endings of a codebase-memory-mcp index database and its SQLite side files.
-const DB_SUFFIXES: [&[u8]; 3] = [b".db", b".db-wal", b".db-shm"];
-
-/// The name bytes of the database a file belongs to, or `None` for a file that is not an index
-/// database. The name is compared as bytes, so a non-UTF-8 name is still judged.
-fn database_of(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
-    let bytes = name.as_encoded_bytes();
-    DB_SUFFIXES
-        .iter()
-        .find_map(|suffix| bytes.strip_suffix(*suffix))
-        .map(<[u8]>::to_vec)
-}
+use crate::materialize::cache::{GcReport, gc_remove_link};
+use crate::materialize::cbm_units::scan_units;
 
 /// Remove the index databases in `dir` that were last written more than `older_than` ago. A
 /// database and its `-wal` and `-shm` files are one unit: the newest of them gives the age, and
@@ -44,62 +29,39 @@ pub(crate) fn sweep_legacy_indexes(
     dry_run: bool,
 ) -> anyhow::Result<GcReport> {
     let mut report = GcReport::new(dry_run);
-    let Some(entries) = crate::paths::read_dir_optional(dir)? else {
+    let Some(units) = scan_units(dir, older_than)? else {
         return Ok(report);
     };
-    let mut databases: BTreeMap<Vec<u8>, Vec<PathBuf>> = BTreeMap::new();
-    for entry in entries {
-        // An unread entry can be the `-wal` of a database that is still in use, so no unit can be
-        // judged complete. The sweep stops and removes nothing.
-        let entry = entry.with_context(|| {
-            format!(
-                "cannot read an entry of {}, so no index database was removed. Fix: check the \
-                 permissions of the folder",
-                dir.display()
-            )
-        })?;
-        if let Some(base) = database_of(&entry.file_name()) {
-            databases.entry(base).or_default().push(entry.path());
-        }
-    }
-    let now = SystemTime::now();
-    for files in databases.into_values() {
-        if files.iter().any(|f| in_use.iter().any(|used| used == f)) {
-            report.kept += files.len();
-            continue;
-        }
-        match newest_of(&files) {
-            Ok(newest) if is_expired(now, newest, older_than) => {
-                for file in &files {
-                    gc_remove_link(file, &mut report);
-                }
+    for unit in units {
+        // A failed age read is reported even for a unit that is in use, so no error is dropped.
+        if let Some((file, e)) = unit.unreadable() {
+            tracing::error!("cbm sweep cannot read the age of {}: {e}", file.display());
+            let cause = format!("cannot read the age of {}: {e}", file.display());
+            for path in unit.files {
+                report.record_failure(path, cause.clone());
             }
-            Ok(_) => report.kept += files.len(),
-            Err((file, e)) => {
-                tracing::error!("cbm sweep cannot read the age of {}: {e}", file.display());
-                report.failed.extend(files);
+        } else if unit
+            .files
+            .iter()
+            .any(|f| in_use.iter().any(|used| used == f))
+        {
+            report.kept += unit.files.len();
+        } else if unit.is_expired() {
+            for file in &unit.files {
+                gc_remove_link(file, &mut report);
             }
+        } else {
+            report.kept += unit.files.len();
         }
     }
     Ok(report)
-}
-
-/// The newest mtime of `files`, read without following a symlink.
-fn newest_of(files: &[PathBuf]) -> Result<SystemTime, (PathBuf, std::io::Error)> {
-    let mut newest = SystemTime::UNIX_EPOCH;
-    for file in files {
-        let modified = std::fs::symlink_metadata(file)
-            .and_then(|meta| meta.modified())
-            .map_err(|e| (file.clone(), e))?;
-        newest = newest.max(modified);
-    }
-    Ok(newest)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     fn backdate(path: &Path) {
         let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
@@ -224,16 +186,6 @@ mod tests {
         assert!(report.removed.is_empty(), "{report:?}");
         assert!(db.exists() && wal.exists() && open.exists());
         assert_eq!(report.kept, 3);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_non_utf8_database_name_is_judged() {
-        use std::os::unix::ffi::OsStrExt as _;
-        let name = std::ffi::OsStr::from_bytes(b"repo-\xff.db-shm");
-        let base = database_of(name).unwrap();
-        assert_eq!(base, b"repo-\xff");
-        assert!(database_of(std::ffi::OsStr::new("index.log")).is_none());
     }
 
     #[test]

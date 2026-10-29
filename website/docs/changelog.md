@@ -89,6 +89,31 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Stop reading the keychain on every shell prompt when the credential is expired. A dead read is held back for five minutes, and a dead folder credential is no longer written over the cache. [fix:auth] [#3008]
 - Run `lsof` in the once-a-day stale `state/tmp` check only when an entry is a candidate. When no entry is stale, the SessionStart hook no longer waits 0.4 to 2.7 s. [fix:materialize] [#3031]
 - Block an opencode `failClosed` hook that exits with any code other than 0 or 2, or dies on a signal. Such a hook used to let the call through. A block from a SessionStart or PostToolUse hook now reaches the agent, hook errors print where they occur, and a malformed hook table is named on every request. [fix:opencode] [#2979]
+- Show warnings on stderr by default. `RUST_LOG` still overrides the level. [fix:cli] [#3061]
+- Write hook commands with llmenv's absolute PATH location, so a repository that holds its own `llmenv` file cannot run in its place. A bare `llmenv` is used only when no absolute PATH folder holds it. [fix:hook] [#2956] See [the troubleshooting page](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-program-is-reported-as-not-found).
+- Panic instead of writing a stdio server as a remote `http` server, if a stdio value ever reaches the remote renderer. A wrong `type` no longer reaches a config. [fix:adapter] [#2992]
+- Fail the cache size estimate when a path cannot be stat-ed or a directory cannot be listed, instead of reporting zero bytes. [fix:materialize] [#3038]
+- Match git's "not a git repository" message without case in the task tracker, the memory project check, and the CLI git-repo check. [fix:task] [#3040]
+- Stop `llmenv clean` from logging clock skew for a cache entry written during the GC run. The skew log now names the entry path. [fix:materialize] [#2954]
+- Compute the peak widget window from the zone database, so a countdown across a DST change counts the real hours. The old rule was one hour off on that day. A zone that cannot be read shows `unknown` and logs an error. [refactor:statusline] [#3063]
+- Stop `llmenv doctor` from reporting a failed codebase-memory GC when SQLite removes a `-wal` or `-shm` file during the scan. The false failure also forced an `lsof` run. [fix:cache-gc] [#3078]
+- Report an index database whose age cannot be read, even when a server has it in use. Before, that failure was dropped silently. [fix:cache-gc] [#3078]
+- Return an error for an unreadable keychain credential instead of falling back to the file credential, and name the fix. [fix:keychain] [#3067]
+- Report a failed keychain delete as an error, not as "not found". [fix:keychain] [#3068]
+- Show a partial prunable cache size as "at least N" in the status line and the stale-tmp hint. [fix:materialize] [#3058] [#3069]
+- Log a failed ICM or session-log stat at warn, with the fix, instead of at debug. [fix:status] [#3062]
+- Report failed credential drops in the `clean` and `doctor` GC summaries. [fix:gc] [#3073]
+- Skip the codebase-memory folder that `features.codebase_memory` uses in the state GC. [fix:gc] [#3075]
+- Judge a symlink by its own age in the cache GC and the session-log reaper. [fix:gc] [#3076]
+- Name the cause of each failed cache removal, and log a clock-skew entry once per run. [fix:gc] [#3077]
+- Log an unreadable working directory as an error, with the fix. Matching scopes still read as unmatched. [fix:scope] [#3070]
+- Reject a widget `display` value that the widget does not accept, and name the allowed values. [fix:config] [#3059]
+- Treat only an absent `git config` key as "not found", and scrub credentials from git errors. [fix:git] [#3053]
+- Migrate the bare `llmenv statusline` command in existing statusLine settings, and keep other values. [fix:adapter] [#3051]
+- Log the context and errors of the OpenCode SessionEnd hook. [fix:opencode] [#3037]
+- Log the first failed `gh pr view` attempt, and name the fix when the lookup fails or times out. [fix:statusline] [#3036]
+- Keep the template comments in `config.yaml` when `llmenv init` seeds settings. [fix:init] [#2964]
+- Refuse a plugin whose marketplace name differs from the name in its manifest, and name the fix. [fix:plugins] [#3048]
 
 ### Security
 
@@ -124,6 +149,8 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Added
 
+- Show the reset time of the `usage_5h` and `usage_7d` widgets as a local clock time, with `display: clock_24h` or `display: clock_12h`. A 7-day window also shows the weekday. The default is still the countdown. [feat:statusline] [#3022]
+- Warn in `llmenv doctor` when hook commands use the bare `llmenv` name, and name the fix. [feat:doctor] [#3049]
 - Run six more Claude Code hook events on opencode 2.x: `SubagentStart`, `SubagentStop` (foreground subagents only), `Notification`, `PreCompact`, `PostModelSwitch`, and `PostToolBatch`. The events and their opencode sources are in [Hook events on opencode](https://phaedrus1992.github.io/llmenv/docs/engines#hook-events-on-opencode). [feat:opencode]
 - Write the merged agent instructions to `CRUSH.md` in the Crush config dir, so Crush loads them as global context. [feat:crush]
 - Render opencode MCP tool tiers as permission rules. Read-only and mutation tools allow, and destructive tools ask. [feat:opencode]
@@ -136,10 +163,13 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 
 ### Changed
 
+- Show `?` for the prunable cache size in the statusline when the size cannot be read. The field no longer disappears. [feat:statusline] [#3054]
 - Skip a write when an owner-only file already holds the same bytes at the same mode, so a repeat `llmenv regenerate` leaves current files untouched. An existing file with a looser mode, such as 0644, is now tightened to 0600 on its next write. [#3020, #3024]
 - Run llmenv's PreToolUse guards on every Crush tool call, including the commit gate, cd guard, read-once, repeat detection, and slippage. Crush tool names map to Claude Code's names first, so these guards now apply to Crush sessions. [feat:crush]
 - Stop writing the model `reasoning` flag to the opencode config, because opencode 2.x drops it. [feat:opencode]
 - Send a failed opencode tool call to `PostToolUseFailure`, not `PostToolUse`, as Claude Code does. Bundle hooks on `PostToolUse` no longer see failed calls. [fix:opencode]
+- Skip the `lsof` call in `llmenv doctor` and `llmenv clean` when no entry under `state/tmp` or `state/codebase-memory` is old enough to remove. `lsof` can take up to a minute on a hung mount. [perf:doctor] [#3039]
+- Show warnings on stderr by default. `RUST_LOG` still overrides the level. [fix:cli] [#3061]
 
 ### Fixed
 
@@ -148,6 +178,30 @@ Everything shipping on the 3.x line is inherited; those entries live in `CHANGEL
 - Stop reading the keychain on every shell prompt when the credential is expired. A dead read is held back for five minutes, and a dead folder credential is no longer written over the cache. [fix:auth] [#3008]
 - Run `lsof` in the once-a-day stale `state/tmp` check only when an entry is a candidate. When no entry is stale, the SessionStart hook no longer waits 0.4 to 2.7 s. [fix:materialize] [#3031]
 - Block an opencode `failClosed` hook that exits with any code other than 0 or 2, or dies on a signal. Such a hook used to let the call through. A block from a SessionStart or PostToolUse hook now reaches the agent, hook errors print where they occur, and a malformed hook table is named on every request. [fix:opencode] [#2979]
+- Write hook commands with llmenv's absolute PATH location, so a repository that holds its own `llmenv` file cannot run in its place. A bare `llmenv` is used only when no absolute PATH folder holds it. [fix:hook] [#2956] See [the troubleshooting page](https://phaedrus1992.github.io/llmenv/docs/troubleshooting#a-program-is-reported-as-not-found).
+- Panic instead of writing a stdio server as a remote `http` server, if a stdio value ever reaches the remote renderer. A wrong `type` no longer reaches a config. [fix:adapter] [#2992]
+- Fail the cache size estimate when a path cannot be stat-ed or a directory cannot be listed, instead of reporting zero bytes. [fix:materialize] [#3038]
+- Match git's "not a git repository" message without case in the task tracker, the memory project check, and the CLI git-repo check. [fix:task] [#3040]
+- Stop `llmenv clean` from logging clock skew for a cache entry written during the GC run. The skew log now names the entry path. [fix:materialize] [#2954]
+- Compute the peak widget window from the zone database, so a countdown across a DST change counts the real hours. The old rule was one hour off on that day. A zone that cannot be read shows `unknown` and logs an error. [refactor:statusline] [#3063]
+- Stop `llmenv doctor` from reporting a failed codebase-memory GC when SQLite removes a `-wal` or `-shm` file during the scan. The false failure also forced an `lsof` run. [fix:cache-gc] [#3078]
+- Report an index database whose age cannot be read, even when a server has it in use. Before, that failure was dropped silently. [fix:cache-gc] [#3078]
+- Return an error for an unreadable keychain credential instead of falling back to the file credential, and name the fix. [fix:keychain] [#3067]
+- Report a failed keychain delete as an error, not as "not found". [fix:keychain] [#3068]
+- Show a partial prunable cache size as "at least N" in the status line and the stale-tmp hint. [fix:materialize] [#3058] [#3069]
+- Log a failed ICM or session-log stat at warn, with the fix, instead of at debug. [fix:status] [#3062]
+- Report failed credential drops in the `clean` and `doctor` GC summaries. [fix:gc] [#3073]
+- Skip the codebase-memory folder that `features.codebase_memory` uses in the state GC. [fix:gc] [#3075]
+- Judge a symlink by its own age in the cache GC and the session-log reaper. [fix:gc] [#3076]
+- Name the cause of each failed cache removal, and log a clock-skew entry once per run. [fix:gc] [#3077]
+- Log an unreadable working directory as an error, with the fix. Matching scopes still read as unmatched. [fix:scope] [#3070]
+- Reject a widget `display` value that the widget does not accept, and name the allowed values. [fix:config] [#3059]
+- Treat only an absent `git config` key as "not found", and scrub credentials from git errors. [fix:git] [#3053]
+- Migrate the bare `llmenv statusline` command in existing statusLine settings, and keep other values. [fix:adapter] [#3051]
+- Log the context and errors of the OpenCode SessionEnd hook. [fix:opencode] [#3037]
+- Log the first failed `gh pr view` attempt, and name the fix when the lookup fails or times out. [fix:statusline] [#3036]
+- Keep the template comments in `config.yaml` when `llmenv init` seeds settings. [fix:init] [#2964]
+- Refuse a plugin whose marketplace name differs from the name in its manifest, and name the fix. [fix:plugins] [#3048]
 
 ### Security
 

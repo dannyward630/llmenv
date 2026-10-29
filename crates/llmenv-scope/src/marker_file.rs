@@ -223,4 +223,28 @@ mod tests {
         std::fs::write(&marker, &body).expect("write marker");
         assert_eq!(read_project_file(&marker).id.as_deref(), Some("big"));
     }
+
+    #[test]
+    fn a_dangling_marker_link_is_the_marker_and_its_error_is_logged() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(home.path().join(".llmenv.yaml"), "id: parent\n").expect("write");
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir");
+        std::os::unix::fs::symlink(repo.join("gone.yaml"), repo.join(".llmenv.yaml"))
+            .expect("symlink");
+        let env = super::Env {
+            cwd: repo.to_string_lossy().to_string(),
+            home: Some(home.path().to_path_buf()),
+            ..super::Env::empty()
+        };
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let project = super::discover_project(&env).expect("discover");
+            assert_eq!(
+                project.root, repo,
+                "the walk must stop at the dangling link"
+            );
+            assert_eq!(project.id, "repo");
+        });
+        assert!(logs.contains("does not exist"), "{logs}");
+    }
 }

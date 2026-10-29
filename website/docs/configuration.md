@@ -75,7 +75,7 @@ With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the 
 
 `llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
-That check uses `lsof`.
+That check uses `lsof`, and llmenv runs it only when an entry is old enough to remove.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
 (added in v3.13.0) At session start, llmenv adds a one-line hint when `state/tmp` holds entries older than the retention.
@@ -1442,7 +1442,7 @@ Each entry under `widgets:` accepts:
 | `format` | Custom display template for the widget's own placeholders (see the table below). Only honored by widgets marked "yes" in the **Format?** column — set on a widget that doesn't support it, it's silently ignored |
 | `max_len` | Max character length; longer output is truncated with `…` (U+2026), UTF-8-safe. Default: no limit |
 | `style` | ANSI style string applied to the widget's entire rendered output — see [Style tokens](#style-tokens) below. Every widget has a sensible **default colour** when this is unset; set it to `none` (or `""`) to render that one widget in plain text |
-| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). Overridden by `format` when both are set; ignored by widgets without a display mode |
+| `display` | Named display mode for widgets that offer presets instead of a free-form `format`: `model` accepts `short` (family only, `Opus`), `version` (family + version, `Opus 4.8`, the default), or `full` (verbatim `display_name`); `pr` accepts `number` (`#834`, default) or `url` (full PR URL, falling back to `#<number>` when the engine sends none). `usage_5h` and `usage_7d` accept `clock_24h` (`04:20`) or `clock_12h` (`12:40pm`) to show the local clock time when the window resets, instead of the countdown (added in v3.14.0). A 7-day window adds the weekday before the time (`mon 04:20`). The default is the countdown. A value that the widget does not accept fails config load, and the error lists the allowed values (added in v3.14.0). Overridden by `format` when both are set; ignored by widgets without a display mode |
 | `width` | Bar cell width for `context`/`cache_usage`/`usage_5h`/`usage_7d` (default `10`). Ignored by other widgets |
 | `thresholds` | Two ascending percentages `[warn, crit]` for value-based coloring. Ignored by widgets without threshold coloring |
 
@@ -1519,7 +1519,8 @@ Notes:
 - `peak` is computed entirely from the local clock (Anthropic's peak window is
   weekdays 05:00–11:00 America/Los_Angeles) — Claude Code sends no peak data on
   stdin. `{countdown}` counts down to the window boundary (peak ending, or the
-  next peak starting).
+  next peak starting). When the zone database cannot be read, the widget shows
+  `unknown` and logs an error.
 - `pr` is colored by `{review_state}` when the engine sends one: `approved`
   green, `changes_requested` red, `pending`/`review_required` yellow. When a PR
   URL is present and color is on, `pr` (and the `branch` widget) render as an
@@ -1585,7 +1586,7 @@ placeholder renders the count with no staleness indication at all.
 | `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` (fully live-recomputed, not snapshot-sourced) |
 | `mcps` | `MCP {total}{stale_icon}` | `MCP 12` / `MCP 12 ⚙️` | `total`, `errors` (both snapshot-sourced), `stale_icon` (empty unless a live tag has drifted from the snapshot, resolves from the icon set like `config_stale`'s) |
 | `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
-| `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes) |
+| `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes). Both show `?` when the size cannot be read (added in v3.14.0) |
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}{stale_icon}` | `umans: 45s` / `umans: 45s ⚙️` | `raw` (`"<backend>: <cooldown_secs>s"`, snapshot-sourced), `cooldown_secs`, `reason` (the backend name), `stale_icon` (same drift check as `mcps`'s) |
 | `session_log` | `{icon} {entries}` | `📝 8` | `icon`, `entries` |

@@ -9,6 +9,10 @@ use llmenv::adapter::claude_code::ClaudeCodeAdapter;
 use llmenv::merge::{BundleRef, merge};
 use tempfile::tempdir;
 
+#[path = "support/claude_hooks.rs"]
+mod claude_hooks;
+use claude_hooks::{command_count, has_matcher, tracker_hooks, tracker_hooks_with};
+
 fn fixture_bundle(name: &str) -> BundleRef {
     BundleRef {
         name: name.into(),
@@ -677,137 +681,6 @@ fn fresh_render_dedups_typed_and_native_hook_duplicate() {
         guard_count, 1,
         "typed + native duplicate of the same hook must render once, got: {pre_tool_use:?}"
     );
-}
-
-// #985: the task-tool redirect PreToolUse hook is registered only when the
-// task tracker is enabled. #980: also gated by the `block_engine_task_tools`
-// opt-out sub-toggle.
-//
-// #1442: session logging is on in a default manifest and registers an
-// unmatched every-tool `pre_tool_use` group, which folds in the task-tool
-// redirect (and every other matcher-scoped `pre_tool_use` consumer) instead
-// of a second, matcher-scoped registration alongside it. Session logging is
-// off here so this test keeps isolating the tracker gate specifically,
-// rather than the redirect's presence in the (functionally equivalent)
-// unmatched group.
-fn task_tracker_matcher_present(enabled: bool, block_engine_task_tools: bool) -> bool {
-    let m = llmenv::merge::MergedManifest {
-        capabilities: llmenv::config::Capabilities {
-            features: Some(llmenv::config::Features {
-                task_tracker: Some(llmenv::config::TaskTracker {
-                    enabled,
-                    block_engine_task_tools,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        session_log: llmenv::config::SessionLog {
-            file: None,
-            transcript: None,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let tmp = tempdir().expect("tempdir");
-    ClaudeCodeAdapter
-        .materialize(&m, tmp.path())
-        .expect("materialize");
-    let parsed: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json"),
-    )
-    .expect("parse settings.json");
-    parsed["hooks"]["PreToolUse"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|e| e["matcher"].as_str() == Some("^(TaskCreate|TaskList|TaskUpdate)$"))
-}
-
-#[test]
-fn task_tool_redirect_hook_registered_when_tracker_enabled() {
-    assert!(
-        task_tracker_matcher_present(true, true),
-        "task-tool redirect hook must be registered when the tracker is enabled"
-    );
-}
-
-#[test]
-fn task_tool_redirect_hook_absent_when_tracker_disabled() {
-    assert!(
-        !task_tracker_matcher_present(false, true),
-        "task-tool redirect hook must not be registered when the tracker is disabled"
-    );
-}
-
-#[test]
-fn task_tool_redirect_hook_absent_when_opted_out() {
-    assert!(
-        !task_tracker_matcher_present(true, false),
-        "task-tool redirect hook must not be registered when \
-         block_engine_task_tools is false, even with the tracker enabled"
-    );
-}
-
-// #2456: the nudge and commit-deny hooks follow the tracker switches.
-fn tracker_hooks(tracker: llmenv::config::TaskTracker, session_log_on: bool) -> serde_json::Value {
-    tracker_hooks_with(tracker, session_log_on, None)
-}
-
-fn tracker_hooks_with(
-    tracker: llmenv::config::TaskTracker,
-    session_log_on: bool,
-    slippage: Option<llmenv::config::SlippageControl>,
-) -> serde_json::Value {
-    let session_log = if session_log_on {
-        llmenv::config::SessionLog::default()
-    } else {
-        llmenv::config::SessionLog {
-            file: None,
-            transcript: None,
-            max_content_bytes: None,
-        }
-    };
-    let m = llmenv::merge::MergedManifest {
-        session_log,
-        capabilities: llmenv::config::Capabilities {
-            features: Some(llmenv::config::Features {
-                task_tracker: Some(tracker),
-                slippage,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let tmp = tempdir().expect("tempdir");
-    ClaudeCodeAdapter
-        .materialize(&m, tmp.path())
-        .expect("materialize");
-    let parsed: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(tmp.path().join("settings.json")).expect("read settings.json"),
-    )
-    .expect("parse settings.json");
-    parsed["hooks"].clone()
-}
-
-fn has_matcher(hooks: &serde_json::Value, event: &str, matcher: &str) -> bool {
-    hooks[event]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|e| e["matcher"].as_str() == Some(matcher))
-}
-
-fn command_count(hooks: &serde_json::Value, event: &str, command: &str) -> usize {
-    hooks[event]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|e| e["hooks"].as_array().into_iter().flatten())
-        .filter(|h| h["command"].as_str().is_some_and(|c| c.ends_with(command)))
-        .count()
 }
 
 // A feature that already routes `Bash` to hook-run leaves only the missing tools to the tracker.
@@ -1593,7 +1466,7 @@ fn two_bundles_merge_into_deterministic_settings_json() {
     // Redact the temp directory so the snapshot is stable across runs.
     let tmp_dir = tmp.path().to_string_lossy().into_owned();
     let parsed_str = serde_json::to_string_pretty(&parsed).expect("serialize");
-    let stable = parsed_str.replace(&tmp_dir, "<CACHE_DIR>");
+    let stable = claude_hooks::redact_llmenv_program(&parsed_str.replace(&tmp_dir, "<CACHE_DIR>"));
     let stable_parsed: serde_json::Value = serde_json::from_str(&stable).expect("re-parse");
     insta::assert_yaml_snapshot!(stable_parsed);
 }

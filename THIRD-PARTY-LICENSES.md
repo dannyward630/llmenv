@@ -4145,7 +4145,7 @@ SOFTWARE
 
 Used by:
 - [pulldown-cmark-escape 0.11.0](https://github.com/raphlinus/pulldown-cmark)
-- [pulldown-cmark 0.13.4](https://github.com/raphlinus/pulldown-cmark)
+- [pulldown-cmark 0.13.5](https://github.com/raphlinus/pulldown-cmark)
 
 ```
 The MIT License
