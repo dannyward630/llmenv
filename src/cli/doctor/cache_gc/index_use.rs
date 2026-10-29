@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::paths;
 
 /// The folder of the bundles.
-pub(super) fn bundles_dir() -> anyhow::Result<PathBuf> {
+fn bundles_dir() -> anyhow::Result<PathBuf> {
     Ok(paths::config_dir()?.join("bundles"))
 }
 
@@ -27,14 +27,25 @@ pub(super) fn cache_use(config: &Config, bundles_dir: &Path, dir: &Path) -> Cach
         Ok(raws) => raws,
         Err(cause) => return CacheUse::Unknown(cause),
     };
-    let canonical_dir = std::fs::canonicalize(dir).ok();
+    let canonical_dir = match std::fs::canonicalize(dir) {
+        Ok(canonical) => canonical,
+        Err(e) => return CacheUse::Unknown(format!("cannot resolve {}: {e}", dir.display())),
+    };
     for raw in raws {
         let expanded = match paths::expand_tilde(&raw) {
             Ok(expanded) => PathBuf::from(expanded),
             Err(e) => return CacheUse::Unknown(format!("cannot expand index_path {raw}: {e:#}")),
         };
+        // A path that does not exist cannot be the folder in use. Any other failure to resolve it
+        // is unknown, so the sweep is skipped and not run as if the folder were unused (#3075).
         let same = expanded == dir
-            || (canonical_dir.is_some() && std::fs::canonicalize(&expanded).ok() == canonical_dir);
+            || match std::fs::canonicalize(&expanded) {
+                Ok(canonical) => canonical == canonical_dir,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    return CacheUse::Unknown(format!("cannot resolve index_path {raw}: {e}"));
+                }
+            };
         if same {
             return CacheUse::Live;
         }
@@ -58,4 +69,16 @@ fn configured_index_paths(config: &Config, bundles_dir: &Path) -> Result<Vec<Str
         raws.extend(index_paths(caps.as_ref().and_then(|c| c.features.as_ref())));
     }
     Ok(raws)
+}
+
+/// Whether a features.codebase_memory `index_path` uses `dir`. The bundle folder is needed to
+/// expand the paths, and an unknown bundle folder is reported as unknown (#3075).
+pub(super) fn cbm_use(config: &Config, dir: &Path) -> CacheUse {
+    match bundles_dir() {
+        Ok(bundles) => cache_use(config, &bundles, dir),
+        Err(e) if !config.bundle.is_empty() => CacheUse::Unknown(format!(
+            "cannot resolve the config folder, so the index_path of each bundle is unknown: {e:#}"
+        )),
+        Err(_) => cache_use(config, Path::new(""), dir),
+    }
 }

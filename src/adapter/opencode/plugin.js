@@ -265,11 +265,17 @@ async function endSession(sessionID) {
   const s = sessions.get(sessionID);
   if (!s || s.ended) return;
   s.ended = true;
-  const out = await runHooks("SessionEnd", sessionID, {});
-  // The session is over, so no request can carry the texts still queued. Log those now. The
-  // errors already logged where they occurred, so they are not logged again.
-  for (const text of [...(out.block ? [out.block] : []), ...s.once]) console.error(text);
-  sessions.delete(sessionID);
+  // The session is removed even when a hook throws, so its queued texts are not kept forever.
+  try {
+    const out = await runHooks("SessionEnd", sessionID, {});
+    // The session is over, so no request can carry these texts. Log them now. The errors of this
+    // run were already printed where they occurred (reportError), so they are not printed again.
+    for (const text of [...out.context, ...(out.block ? [out.block] : []), ...s.once]) {
+      console.error(text);
+    }
+  } finally {
+    sessions.delete(sessionID);
+  }
 }
 
 /**

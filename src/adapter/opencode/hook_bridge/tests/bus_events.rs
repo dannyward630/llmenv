@@ -78,7 +78,7 @@ fn the_plugin_bridges_bus_events_and_subagent_stops() {
     table["hooks"]
         .as_array_mut()
         .unwrap()
-        .retain(|h| !h["command"].as_str().unwrap().starts_with("llmenv "));
+        .retain(|h| !h["command"].as_str().unwrap().contains("--engine opencode"));
     let plugin = write_plugin(dir.path(), &table);
     let system = run_node(BUS_DRIVER, &[&plugin, dir.path(), log.as_path()]);
 
@@ -213,7 +213,7 @@ fn a_subagent_start_block_stops_a_matching_launch_only() {
     table["hooks"]
         .as_array_mut()
         .unwrap()
-        .retain(|h| !h["command"].as_str().unwrap().starts_with("llmenv "));
+        .retain(|h| !h["command"].as_str().unwrap().contains("--engine opencode"));
     let plugin = write_plugin(dir.path(), &table);
     let out = run_node(LAUNCH_DRIVER, &[&plugin, dir.path()]);
 
@@ -258,7 +258,7 @@ fn a_malformed_bus_event_is_named_and_an_inherited_name_runs_nothing() {
     table["hooks"]
         .as_array_mut()
         .unwrap()
-        .retain(|h| !h["command"].as_str().unwrap().starts_with("llmenv "));
+        .retain(|h| !h["command"].as_str().unwrap().contains("--engine opencode"));
     let plugin = write_plugin(dir.path(), &table);
     let system = run_node(MALFORMED_DRIVER, &[&plugin, dir.path()]);
 

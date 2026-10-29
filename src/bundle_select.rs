@@ -51,14 +51,14 @@ pub(crate) fn build_bundle_refs(
             }
             let path = bundles_dir.join(name);
             if !path.exists() {
-                // Stays at `warn!` (which the default `EnvFilter` drops)
-                // because a content-less bundle is a documented, valid
-                // configuration and this runs on every hook event — promoting
-                // it would make a legitimate setup log an error continuously.
-                // The one place it silently changed an outcome, memory-endpoint
-                // resolution, names the skipped bundles itself instead
+                // Logs at `debug!`, not `warn!`: a content-less bundle is a
+                // documented, valid configuration, and this runs on every hook
+                // event. The default stderr filter shows warnings (#3061), so a
+                // warning here would print on every event. The one place it
+                // silently changed an outcome, memory-endpoint resolution, names
+                // the skipped bundles itself instead
                 // (`hook_run::MemoryEndpoint::NotDeclared`, #1133).
-                tracing::warn!(
+                tracing::debug!(
                     "bundle '{}' has no content directory at {}; \
                      skipping (tag-only bundle, or missing/deleted directory)",
                     name,

@@ -11,6 +11,9 @@
 //! ponytail: per-task locking (rather than whole-store) if write throughput
 //! ever becomes a real bottleneck — unlikely for a CLI task tracker.
 
+mod branch_failure;
+mod slug;
+pub(crate) use slug::slugify;
 pub mod core_text;
 mod finish_hints;
 pub mod ownership;
@@ -151,30 +154,6 @@ fn with_store_lock<T>(
 /// readdir order, which is arbitrary, not creation order.
 fn now_rfc3339() -> String {
     humantime::format_rfc3339_nanos(std::time::SystemTime::now()).to_string()
-}
-
-/// Derive a kebab-case slug from a task title: lowercase, first ~6 words,
-/// non-alphanumeric runs collapsed to a single `-`, leading/trailing `-`
-/// trimmed. Pure function — collision uniquification happens separately in
-/// [`unique_slug`], which needs the store directory.
-pub(crate) fn slugify(title: &str) -> String {
-    let words: Vec<&str> = title.split_whitespace().take(6).collect();
-    let joined = words.join(" ");
-    let mut slug = String::with_capacity(joined.len());
-    let mut last_was_sep = true; // suppress a leading '-'
-    for c in joined.chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-            last_was_sep = false;
-        } else if !last_was_sep {
-            slug.push('-');
-            last_was_sep = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    slug
 }
 
 /// Uniquify `base_slug` against existing task files in `dir` by appending

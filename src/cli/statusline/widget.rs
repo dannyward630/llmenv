@@ -19,6 +19,10 @@ use gh_cmd::GhPrCmd;
 mod gh_lookup;
 use gh_lookup::{GhFailure, classify_gh_exit};
 
+mod reset_clock;
+mod usage;
+use usage::render_usage_widget;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EngineData {
     pub workspace: Option<Workspace>,
@@ -96,46 +100,6 @@ pub struct RateLimitWindow {
     pub used_percentage: Option<f64>,
     /// Unix epoch seconds at which this window's usage resets.
     pub resets_at: Option<i64>,
-}
-
-/// `usage_5h`/`usage_7d` dispatch: resolves the window, default thresholds,
-/// and default format that differ between the two, then delegates to the
-/// shared [`render_usage`] backend.
-fn render_usage_widget(
-    name: &str,
-    data: &EngineData,
-    cfg: Option<&llmenv_config::WidgetConfig>,
-    use_color: bool,
-) -> String {
-    let state = usage_state_dir();
-    let (window, window_secs, defaults, fmt) = if name == "usage_5h" {
-        (
-            data.rate_limits.as_ref().and_then(|r| r.five_hour.as_ref()),
-            FIVE_HOUR_SECS,
-            [70, 90],
-            "5h {pct}%{delta}{pace} ➡{reset}",
-        )
-    } else {
-        (
-            data.rate_limits.as_ref().and_then(|r| r.seven_day.as_ref()),
-            SEVEN_DAY_SECS,
-            [60, 80],
-            "7d {pct}%{delta}{pace} ➡{reset}",
-        )
-    };
-    render_usage(
-        &UsageArgs {
-            window,
-            now: now_unix(),
-            window_secs,
-            thresholds: cfg.and_then(|c| c.thresholds).unwrap_or(defaults),
-            state_dir: state.as_deref(),
-            state_key: name,
-            use_color,
-        },
-        cfg,
-        fmt,
-    )
 }
 
 /// Render one engine-sourced widget by name. Returns `None` for a name this
@@ -752,9 +716,14 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
     // A timeout is final, and a missing binary fails the retry too.
     let out = match run() {
         Err(e) if !matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::NotFound) => {
+            // The first failure is logged here, so a retry that works still leaves a trace (#3036).
+            tracing::warn!("gh pr view failed, so it is retried once: {e}");
             std::thread::sleep(Duration::from_millis(20));
             run().inspect_err(|second| {
-                tracing::error!("gh pr view: failed twice: {e}, then {second}");
+                tracing::error!(
+                    "gh pr view failed twice: {e}, then {second}. Fix: run `gh pr view` by hand \
+                     in this folder to see the cause."
+                );
             })
         }
         other => other,
@@ -768,7 +737,10 @@ fn gh_pr_view(gh: GhPrCmd<'_>, repo_dir: &Path, branch: &str) -> PrLookup {
         }
         Err(e) if e.kind() == ErrorKind::TimedOut => {
             let secs = gh.timeout.as_secs_f32();
-            tracing::error!("gh pr view timed out after {secs}s");
+            tracing::error!(
+                "gh pr view timed out after {secs}s. Fix: run `gh pr view` by hand in this \
+                 folder, and check that GitHub is reachable."
+            );
             Err(GhFailure::Failed)
         }
         Err(e) => {
@@ -793,7 +765,9 @@ fn parse_gh_pr_view(stdout: &[u8]) -> Option<PrInfo> {
     let parsed: GhPrView = match serde_json::from_slice(stdout) {
         Ok(parsed) => parsed,
         Err(e) => {
-            tracing::debug!("gh pr view: unparseable JSON (non-fatal): {e}");
+            tracing::warn!(
+                "gh pr view printed JSON that does not parse, so the PR is unknown: {e}. Fix: run `gh pr view` by hand in this folder."
+            );
             return None;
         }
     };
@@ -951,121 +925,15 @@ fn now_unix() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
-/// Humanize the seconds from `now` until `resets_at`: `"3h04m"` past an hour,
-/// `"23m"` under. A reset already in the past clamps to `"0m"`.
-fn humanize_until(resets_at: i64, now: i64) -> String {
-    let secs = resets_at.saturating_sub(now).max(0);
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    if h > 0 {
-        format!("{h}h{m:02}m")
-    } else {
-        format!("{m}m")
-    }
-}
-
-/// Render a Claude.ai usage window (`five_hour` / `seven_day`). Empty when the
-/// window is absent (not a subscriber, or before the first API response) or
-/// carries a non-finite percentage. `{pct}` is the clamped, rounded used
-/// percentage, `{bar}` a 10-cell fill of it, `{reset}` the time until the
-/// window resets.
-/// Inputs for a usage-window widget, bundled to keep the argument count sane.
-struct UsageArgs<'a> {
-    window: Option<&'a RateLimitWindow>,
-    now: i64,
-    window_secs: i64,
-    thresholds: [u8; 2],
-    /// Directory for delta state files (`None` disables delta tracking).
-    state_dir: Option<&'a Path>,
-    state_key: &'a str,
-    use_color: bool,
-}
-
-/// Render a Claude.ai usage window: threshold-colored percentage, a per-cell
-/// bar (filled = threshold color, empty dim) with a bright pace-target marker,
-/// reset countdown, over/under-pace indicator, and a delta from the last
-/// render. `{pct}`/`{bar}`/`{reset}`/`{pace}`/`{delta}` are the placeholders.
-fn render_usage(
-    args: &UsageArgs,
-    cfg: Option<&llmenv_config::WidgetConfig>,
-    default_format: &str,
-) -> String {
-    let Some(window) = args.window else {
-        return String::new();
-    };
-    let Some(raw) = window.used_percentage else {
-        return String::new();
-    };
-    if !raw.is_finite() {
-        return String::new();
-    }
-    let pct = raw.clamp(0.0, 100.0);
-    let width = resolve_bar_width(cfg, DEFAULT_BAR_WIDTH);
-    let reset = window
-        .resets_at
-        .map(|r| humanize_until(r, args.now))
-        .unwrap_or_default();
-    let (pace, marker) = match window.resets_at {
-        Some(r) => pace_and_target(pct, r, args.window_secs, args.now, width),
-        None => (String::new(), None),
-    };
-    let style = BarStyle::Threshold {
-        thresholds: args.thresholds,
-        marker,
-    };
-    let (pct_str, bar) = pct_and_bar(pct, width, &style, args.use_color);
-    let delta = usage_delta(args.state_dir, args.state_key, pct, args.now);
-    let format = cfg
-        .and_then(|c| c.format.as_deref())
-        .unwrap_or(default_format);
-    format
-        .replace("{pct}", &pct_str)
-        .replace("{bar}", &bar)
-        .replace("{reset}", &reset)
-        .replace("{pace}", &pace)
-        .replace("{delta}", &delta)
-}
-
-/// The over/under-pace indicator plus the bar column of the linear-pace
-/// target. `⇡N%` when usage is ahead of the elapsed window time (burning too
-/// fast), `⇣N%` when behind, empty within ±0.5% (with a leading space so it
-/// drops out cleanly). The marker column is `None` at the bar extremes, where
-/// a marker reads oddly.
-fn pace_and_target(
-    pct: f64,
-    resets_at: i64,
-    window_secs: i64,
-    now: i64,
-    width: usize,
-) -> (String, Option<usize>) {
-    if window_secs <= 0 {
-        return (String::new(), None);
-    }
-    let remaining = (resets_at - now).clamp(0, window_secs);
-    let target = (window_secs - remaining) as f64 / window_secs as f64 * 100.0;
-    let over = pct - target;
-    let abs = over.abs().round() as i64;
-    let indicator = if over > 0.5 {
-        format!(" \u{21e1}{abs}%") // ⇡
-    } else if over < -0.5 {
-        format!(" \u{21e3}{abs}%") // ⇣
-    } else {
-        String::new()
-    };
-    let pos = (target / 100.0 * width as f64).round() as i64;
-    let marker = (pos > 0 && (pos as usize) < width).then_some(pos as usize);
-    (indicator, marker)
-}
-
-/// Window durations in seconds for the pace calculation.
-const FIVE_HOUR_SECS: i64 = 5 * 3600;
-const SEVEN_DAY_SECS: i64 = 7 * 86_400;
+#[cfg(test)]
+mod gh_tests;
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
+    use super::gh_tests::{fake_gh, write_fake_gh};
 
-    use super::gh_lookup::{GH_LOGIN_SIGNS, GH_NO_PR_SIGNS};
+    use super::usage::{UsageArgs, humanize_until, render_usage};
     use super::*;
     use proptest::prelude::*;
 
@@ -1717,222 +1585,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_gh_pr_view_none_for_missing_number_or_malformed_json() {
-        assert_eq!(parse_gh_pr_view(br#"{"url":"https://x"}"#), None);
-        assert_eq!(parse_gh_pr_view(b"not json"), None);
-    }
-
-    #[cfg(unix)]
-    fn write_fake_gh(dir: &Path, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("gh");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-
-    /// A fake-`gh` invocation with a deliberately generous timeout (#1073).
-    ///
-    /// These tests assert what the derivation chain *does* with a subprocess's
-    /// output — not how quickly the OS schedules that subprocess. Under
-    /// `DEFAULT_GH_PR_TIMEOUT` a loaded machine can fail to run the `/bin/sh`
-    /// fake to completion inside the production budget, turning every such
-    /// test into a load-sensitive coin flip. The timeout's own behavior is
-    /// covered separately by
-    /// `gh_pr_view_fails_when_gh_outlives_its_timeout`.
-    #[cfg(unix)]
-    fn fake_gh(bin: &str) -> GhPrCmd<'_> {
-        GhPrCmd {
-            bin,
-            timeout: Duration::from_secs(120),
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gh_pr_view_derived_path_renders_expected_widget() {
-        // Full derived-PR chain: a fake `gh` stands in for the real
-        // subprocess, its JSON is parsed into a PrInfo, and that PrInfo
-        // renders exactly like an engine-supplied one would.
-        let bin_dir = tempfile::tempdir().unwrap();
-        let repo_dir = tempfile::tempdir().unwrap();
-        let gh = write_fake_gh(
-            bin_dir.path(),
-            "#!/bin/sh\necho '{\"number\":834,\"url\":\"https://github.com/o/r/pull/834\",\"reviewDecision\":\"CHANGES_REQUESTED\"}'\n",
-        );
-        let pr = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x")
-            .unwrap()
-            .unwrap();
-        assert_eq!(pr.number, Some(834));
-        assert_eq!(render_pr_info(&pr, None, false), "#834");
-        assert_eq!(pr.review_state.as_deref(), Some("changes_requested"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gh_pr_view_terminates_options_before_a_dash_prefixed_branch() {
-        // A branch name that looks like a flag (e.g. from a hostile or
-        // unusual git ref) must land after `--` so `gh` reads it as the
-        // positional branch argument, not an option. The fake `gh` dumps its
-        // argv so the test can check `--` immediately precedes the branch.
-        let bin_dir = tempfile::tempdir().unwrap();
-        let repo_dir = tempfile::tempdir().unwrap();
-        let gh = write_fake_gh(
-            bin_dir.path(),
-            "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > argv.log\necho '{\"number\":1}'\n",
-        );
-        let branch = "--json";
-        let _ = gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), branch);
-        let argv = std::fs::read_to_string(repo_dir.path().join("argv.log")).unwrap();
-        let args: Vec<&str> = argv.lines().collect();
-        let dash_dash = args
-            .iter()
-            .position(|a| *a == "--")
-            .expect("no -- terminator in argv");
-        assert_eq!(
-            args.get(dash_dash + 1),
-            Some(&branch),
-            "branch must immediately follow -- in argv: {args:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gh_pr_view_reports_a_missing_binary() {
-        // Simulates "gh isn't installed": spawn itself fails (#2821).
-        let repo_dir = tempfile::tempdir().unwrap();
-        let missing = repo_dir.path().join("no-such-gh-binary");
-        assert_eq!(
-            gh_pr_view(
-                fake_gh(&missing.to_string_lossy()),
-                repo_dir.path(),
-                "feat/x"
-            ),
-            Err(GhFailure::Missing)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gh_pr_view_reports_a_failed_login() {
-        let bin_dir = tempfile::tempdir().unwrap();
-        let repo_dir = tempfile::tempdir().unwrap();
-        let gh = write_fake_gh(
-            bin_dir.path(),
-            "#!/bin/sh\necho 'To get started with GitHub CLI, please run:  gh auth login' >&2\nexit 4\n",
-        );
-        assert_eq!(
-            gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
-            Err(GhFailure::Unauthenticated)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gh_pr_view_no_pr_when_gh_exits_nonzero_for_no_pr() {
-        // "no remote" and "no open PR" are answers, so they read as no PR.
-        let bin_dir = tempfile::tempdir().unwrap();
-        let repo_dir = tempfile::tempdir().unwrap();
-        let gh = write_fake_gh(
-            bin_dir.path(),
-            "#!/bin/sh\necho 'No pull requests found for branch \"feat/x\"' >&2\nexit 1\n",
-        );
-        assert_eq!(
-            gh_pr_view(fake_gh(&gh.to_string_lossy()), repo_dir.path(), "feat/x"),
-            Ok(None)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gh_pr_view_fails_when_gh_outlives_its_timeout() {
-        // The timeout's own contract (#1073): a `gh` that would eventually
-        // print a perfectly good PR still yields None if it doesn't finish in
-        // time, and gh_pr_view gives up rather than blocking the render. This
-        // is the one test that legitimately asserts on the timeout, so it
-        // injects a tiny budget against a fake that sleeps far longer —
-        // orders of magnitude of margin, rather than racing production's 3s.
-        let bin_dir = tempfile::tempdir().unwrap();
-        let repo_dir = tempfile::tempdir().unwrap();
-        let gh = write_fake_gh(
-            bin_dir.path(),
-            "#!/bin/sh\nsleep 30\necho '{\"number\":1}'\n",
-        );
-        let gh_bin = gh.to_string_lossy();
-        let cmd = GhPrCmd {
-            bin: &gh_bin,
-            timeout: Duration::from_millis(50),
-        };
-        let started = std::time::Instant::now();
-        assert_eq!(
-            gh_pr_view(cmd, repo_dir.path(), "feat/x"),
-            Err(GhFailure::Failed)
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "timeout must abandon the child, not wait it out"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn derive_pr_cache_miss_calls_gh_and_writes_cache() {
-        let bin_dir = tempfile::tempdir().unwrap();
-        let repo_dir = tempfile::tempdir().unwrap();
-        let cache_dir = tempfile::tempdir().unwrap();
-        let gh = write_fake_gh(
-            bin_dir.path(),
-            "#!/bin/sh\necho called >> gh-calls.log\necho '{\"number\":1,\"url\":null,\"reviewDecision\":null}'\n",
-        );
-        let pr = derive_pr(
-            fake_gh(&gh.to_string_lossy()),
-            repo_dir.path(),
-            "feat/x",
-            Some(cache_dir.path()),
-            1_000,
-        );
-        assert_eq!(pr.clone().ok().flatten().and_then(|p| p.number), Some(1));
-        let calls = std::fs::read_to_string(repo_dir.path().join("gh-calls.log")).unwrap();
-        assert_eq!(calls.lines().count(), 1, "gh should be called on a miss");
-        let cache_path = pr_cache_path(cache_dir.path(), repo_dir.path(), "feat/x");
-        assert!(cache_path.exists(), "cache miss must write a cache entry");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn classify_gh_exit_reads_only_known_answers_as_no_pr() {
-        use std::os::unix::process::ExitStatusExt as _;
-        let status = std::process::ExitStatus::from_raw(1 << 8);
-        let no_pr = "no pull requests found for branch \"fix/authentication-retry\"";
-        assert_eq!(classify_gh_exit(status, no_pr), Ok(None));
-        // Real `gh` 2.102.0 capitalizes the first letter (#2975).
-        let real_no_pr = "No pull requests found for branch \"release/3.x\"";
-        assert_eq!(classify_gh_exit(status, real_no_pr), Ok(None));
-        assert_eq!(
-            classify_gh_exit(status, "To get started, please run:  gh auth login"),
-            Err(GhFailure::Unauthenticated)
-        );
-        assert_eq!(
-            classify_gh_exit(status, "error connecting to api.github.com"),
-            Err(GhFailure::Failed)
-        );
-        assert_eq!(classify_gh_exit(status, ""), Err(GhFailure::Failed));
-    }
-
-    #[cfg(unix)]
-    proptest::proptest! {
-        #[test]
-        fn classify_gh_exit_never_reads_unknown_text_as_no_pr(stderr in "\\PC{0,80}") {
-            use std::os::unix::process::ExitStatusExt as _;
-            let status = std::process::ExitStatus::from_raw(1 << 8);
-            let lowered = stderr.to_ascii_lowercase();
-            let known = GH_NO_PR_SIGNS.iter().chain(GH_LOGIN_SIGNS.iter()).any(|s| lowered.contains(s));
-            proptest::prop_assume!(!known);
-            proptest::prop_assert_eq!(classify_gh_exit(status, &stderr), Err(GhFailure::Failed));
-        }
-    }
-
-    #[test]
     fn a_cached_failure_reads_back_as_a_failure_not_as_no_pr() {
         let cache_dir = tempfile::tempdir().unwrap();
         let path = cache_dir.path().join("pr-cache-x");
@@ -2188,7 +1840,7 @@ mod tests {
         };
         assert_eq!(
             render_usage(
-                &usage_args(&window, 1000, FIVE_HOUR_SECS),
+                &usage_args(&window, 1000, usage::FIVE_HOUR_SECS),
                 None,
                 "5h {pct}% ➡{reset}"
             ),
@@ -2206,7 +1858,7 @@ mod tests {
         };
         assert_eq!(
             render_usage(
-                &usage_args(&window, 0, FIVE_HOUR_SECS),
+                &usage_args(&window, 0, usage::FIVE_HOUR_SECS),
                 None,
                 "{bar} {pct}% ➡{reset}"
             ),
@@ -2228,7 +1880,7 @@ mod tests {
         };
         assert_eq!(
             render_usage(
-                &usage_args(&window, 0, FIVE_HOUR_SECS),
+                &usage_args(&window, 0, usage::FIVE_HOUR_SECS),
                 Some(&cfg),
                 "{pct}% {bar}"
             ),
@@ -2290,7 +1942,7 @@ mod tests {
         let args1 = UsageArgs {
             window: Some(&window1),
             now: 1_000_000,
-            window_secs: FIVE_HOUR_SECS,
+            window_secs: usage::FIVE_HOUR_SECS,
             thresholds: [70, 90],
             state_dir: Some(dir.path()),
             state_key: "usage_5h",

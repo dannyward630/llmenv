@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::hook_program::hook_command;
 use crate::merge::MergedManifest;
 
 mod mcp;
@@ -19,9 +20,6 @@ pub struct CrushAdapter;
 
 const CRUSH_JSON_FILE: &str = "crush.json";
 const CRUSH_MD_FILE: &str = "CRUSH.md";
-/// Command for llmenv's own PreToolUse guards. They run on every tool call, as on Claude Code.
-const CRUSH_HOOK_RUN_PRE_TOOL: &str = "llmenv hook-run --engine crush pre_tool_use";
-
 /// Crush only supports PreToolUse hooks today.
 const SUPPORTED_HOOK_EVENTS: &[&str] = &["PreToolUse"];
 
@@ -290,7 +288,8 @@ impl AgentAdapter for CrushAdapter {
         hooks_by_event
             .entry("PreToolUse".into())
             .or_default()
-            .push(json!({ "command": CRUSH_HOOK_RUN_PRE_TOOL }));
+            // Guards for llmenv's own PreToolUse hooks, run on every tool call as on Claude Code.
+            .push(json!({ "command": hook_command("hook-run --engine crush pre_tool_use") }));
 
         let mut hooks_value = serde_json::Value::Object(
             hooks_by_event
@@ -443,11 +442,10 @@ impl AgentAdapter for CrushAdapter {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
+    use crate::adapter::hook_program::hook_command;
+
     use super::render::{crush_tool_name, render_permission_rule};
-    use super::{
-        CRUSH_HOOK_RUN_PRE_TOOL, CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter,
-        SUPPORTED_HOOK_EVENTS,
-    };
+    use super::{CRUSH_JSON_FILE, CRUSH_MODELED_KEYS, CrushAdapter, SUPPORTED_HOOK_EVENTS};
     use crate::adapter::AgentAdapter;
     use crate::adapter::skills::arb_yaml_value;
     use crate::config::{
@@ -674,7 +672,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc,
-            serde_json::json!({ "hooks": { "PreToolUse": [{ "command": CRUSH_HOOK_RUN_PRE_TOOL }] } })
+            serde_json::json!({ "hooks": { "PreToolUse": [{ "command": hook_command("hook-run --engine crush pre_tool_use") }] } })
         );
     }
 
@@ -815,7 +813,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc["hooks"]["PreToolUse"],
-            serde_json::json!([{ "command": CRUSH_HOOK_RUN_PRE_TOOL }]),
+            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use") }]),
             "unsupported hook must not appear in output, so only llmenv's own hook remains: {doc}"
         );
     }
@@ -1139,7 +1137,7 @@ mod tests {
             matcher: Some("^Bash$".into()),
             handler: HookHandler {
                 kind: HookHandlerKind::Command,
-                command: Some("llmenv throttle pre-tool".into()),
+                command: Some(hook_command("throttle pre-tool")),
                 tool: None,
             },
             bundle_origin: None,
@@ -1512,7 +1510,7 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             doc["hooks"]["PreToolUse"],
-            serde_json::json!([{ "command": CRUSH_HOOK_RUN_PRE_TOOL }]),
+            serde_json::json!([{ "command": hook_command("hook-run --engine crush pre_tool_use") }]),
             "mcp_tool hook must not appear in output, so only llmenv's own hook remains: {doc}"
         );
     }

@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::adapter::hook_program::hook_command;
+
 /// opencode supports exactly these hook events via its JS plugin API.
 /// See spec §3 for the event mapping.
 pub(super) const SUPPORTED_HOOK_EVENTS: &[&str] = &[
@@ -125,17 +127,17 @@ pub(super) fn hook_table(
     entries.push(builtin(
         "SessionStart",
         None,
-        "llmenv check-stale --engine opencode",
+        &hook_command("check-stale --engine opencode"),
     ));
     entries.push(builtin(
         "SessionStart",
         None,
-        "llmenv config-context --engine opencode",
+        &hook_command("config-context --engine opencode"),
     ));
     entries.push(builtin(
         "PreToolUse",
         Some(CONFIG_GUARD_MATCHER),
-        "llmenv config-guard --engine opencode",
+        &hook_command("config-guard --engine opencode"),
     ));
     if !pre_tools.is_empty() {
         // The commit gate and the index guard deny on purpose, so a run that times out or cannot
@@ -143,7 +145,7 @@ pub(super) fn hook_table(
         let mut gate = builtin(
             "PreToolUse",
             Some(&pre_tools.join("|")),
-            "llmenv hook-run pre_tool_use --engine opencode",
+            &hook_command("hook-run pre_tool_use --engine opencode"),
         );
         gate["timeout"] = USER_HOOK_TIMEOUT_MS.into();
         gate["failClosed"] = true.into();
