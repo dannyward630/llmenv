@@ -89,7 +89,9 @@ pub(crate) fn resolve_command_paths_against_files(
             let unsafe_key = crate::paths::is_unsafe_join_target(k.to_string_lossy().as_ref());
             if unsafe_key {
                 tracing::error!(
-                    "known_files key contains traversal, not rewritten: {}",
+                    "bundle file {} has a path that leaves the bundle, so its hook command \
+                     word is not rewritten. Fix: rename the bundle file so its path stays \
+                     inside the bundle, then regenerate.",
                     k.display()
                 );
             }

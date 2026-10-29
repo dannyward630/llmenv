@@ -1,6 +1,32 @@
 use super::*;
+use proptest::prop_assert;
 
 proptest::proptest! {
+    /// A key with `..` in any segment is never joined into the cache path, whatever the command.
+    #[test]
+    fn a_traversal_key_is_never_joined_for_any_generated_key(
+        prefix in "[a-z]{0,6}",
+        suffix in "[a-z]{1,6}",
+    ) {
+        let key = format!("{prefix}/../{suffix}.sh");
+        let mut files = BTreeMap::new();
+        files.insert(PathBuf::from(&key), PathBuf::from("/src/tool.sh"));
+        let command = format!("bash /root/{key}");
+        let got = resolve_command_paths_against_files(&command, Path::new(CACHE), &files);
+        prop_assert!(
+            got.as_deref().is_none_or(|out| !out.contains(&format!("{CACHE}/{key}"))),
+            "a traversal key was joined into the cache: {got:?}"
+        );
+    }
+
+    /// Rewriting never panics on arbitrary command text, and text with no bundle path is unchanged.
+    #[test]
+    fn rewriting_never_panics_and_keeps_text_without_a_bundle_path(command in "\\PC{0,120}") {
+        let files = BTreeMap::new();
+        let got = resolve_command_paths_against_files(&command, Path::new(CACHE), &files);
+        prop_assert!(got.is_none(), "no known file means no rewrite: {got:?}");
+    }
+
     #[test]
     fn a_root_needs_a_tilde_a_slash_or_a_named_variable(word in "[~$/{}A-Za-z_0-9.]{0,12}") {
         let named = |name: &str| {
