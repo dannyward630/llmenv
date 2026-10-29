@@ -36,8 +36,15 @@ pub(crate) fn matches_content_all<'a>(
         .iter()
         .filter_map(|s| match globset::Glob::new(&s.r#match.glob) {
             Ok(glob) => Some((s.id.as_str(), glob.compile_matcher(), s.r#match.depth)),
-            Err(_) => {
-                tracing::debug!("content scope {}: invalid glob pattern", s.id);
+            // The scope cannot match at all, so this is logged where a user sees it (#3070 review).
+            Err(e) => {
+                tracing::error!(
+                    scope = %s.id,
+                    glob = %s.r#match.glob,
+                    error = %e,
+                    "content scope has an invalid glob, so it never matches. Fix: correct the \
+                     glob in config.yaml."
+                );
                 None
             }
         })

@@ -29,7 +29,17 @@ pub(super) fn collect_icm() -> Option<IcmData> {
             return None;
         }
     };
-    parse_icm_stats(&raw)
+    let parsed = parse_icm_stats(&raw);
+    if parsed.is_none() {
+        // The status field is empty without this line, so a format change in ICM's reply is
+        // visible instead of silent. The reply is cut to keep the log short.
+        let head: String = raw.chars().take(200).collect();
+        tracing::warn!(
+            "icm stat reply has no readable Memories line, so the ICM field is empty. Reply \
+             starts: {head:?}. Fix: check that the ICM backend returns the stats text."
+        );
+    }
+    parsed
 }
 
 /// Pure text-extraction half of `collect_icm`, split out so it's testable
