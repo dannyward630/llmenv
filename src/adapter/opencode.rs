@@ -859,11 +859,6 @@ fn write_translated(out: &Path, rel: &Path, translated: &str) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", dest.display()))
 }
 
-/// The `hook-run` command for one engine-neutral event.
-fn hook_run_command(event: &str) -> String {
-    super::hook_program::hook_command(&format!("hook-run {event} --engine opencode"))
-}
-
 /// The gate and lifecycle registrations for `manifest`. The every-tool session-log entry runs the
 /// gate too, so when it is present the gate needs no entry of its own (#1442).
 fn registrations(
@@ -888,7 +883,9 @@ fn lifecycle_hooks(
 ) -> Vec<hook_bridge::LifecycleHook> {
     let hook = |event: &'static str, neutral: &str, fail_closed: bool| hook_bridge::LifecycleHook {
         event,
-        command: hook_run_command(neutral),
+        command: super::hook_program::hook_command(&format!(
+            "hook-run {neutral} --engine opencode"
+        )),
         fail_closed,
     };
     let mut out = vec![
