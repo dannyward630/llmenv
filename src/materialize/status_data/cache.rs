@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::cli::statusline::data::CacheData;
 use crate::config::HashingMode;
-use crate::materialize::dir_size::dir_size;
+use crate::materialize::dir_size::{DirSize, dir_size};
 
 /// Best-effort prunable-bytes estimate: a dry-run `StaleOnly` prune scan, so
 /// no filesystem mutation ever happens just to report a stat. The bytes are
@@ -14,6 +14,7 @@ use crate::materialize::dir_size::dir_size;
 pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheData {
     let unknown = CacheData {
         prunable_bytes: None,
+        prunable_partial: false,
     };
     let current_version =
         matches!(hashing, HashingMode::Normal).then(crate::materialize::cache::version_major);
@@ -42,21 +43,26 @@ pub(super) fn collect_cache(cache_root: &Path, hashing: HashingMode) -> CacheDat
         );
         return unknown;
     }
-    let prunable_bytes = match report
+    let sizes = report
         .removed
         .iter()
         .map(|p| dir_size(p))
-        .sum::<anyhow::Result<u64>>()
-    {
-        Ok(bytes) => Some(bytes),
+        .collect::<anyhow::Result<Vec<DirSize>>>();
+    match sizes {
+        Ok(sizes) => {
+            let total = sizes.into_iter().fold(DirSize::default(), DirSize::combine);
+            CacheData {
+                prunable_bytes: Some(total.bytes),
+                prunable_partial: total.skipped > 0,
+            }
+        }
         Err(e) => {
             tracing::warn!(
                 "cache stat: the prunable size is unknown, so it shows as unknown: {e:#}"
             );
-            None
+            unknown
         }
-    };
-    CacheData { prunable_bytes }
+    }
 }
 
 #[cfg(test)]
@@ -75,7 +81,8 @@ mod tests {
         assert_eq!(
             result,
             CacheData {
-                prunable_bytes: Some(0)
+                prunable_bytes: Some(0),
+                prunable_partial: false,
             }
         );
     }
@@ -97,7 +104,8 @@ mod tests {
         assert_eq!(
             result,
             CacheData {
-                prunable_bytes: None
+                prunable_bytes: None,
+                prunable_partial: false,
             }
         );
     }
@@ -114,7 +122,8 @@ mod tests {
         assert_eq!(
             result,
             CacheData {
-                prunable_bytes: Some(10)
+                prunable_bytes: Some(10),
+                prunable_partial: false,
             }
         );
         // dry_run: the stale folder must still be on disk afterward.

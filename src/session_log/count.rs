@@ -11,7 +11,9 @@ pub(crate) fn count_records(path: &Path) -> Option<u64> {
         Ok(Some(file)) => file,
         Ok(None) => return None,
         Err(e) => {
-            tracing::debug!("session log stat collection failed (non-fatal): {e}");
+            tracing::warn!(
+                "session log stat collection failed, so the record count is empty: {e}. Fix: check that the session log folder is readable."
+            );
             return None;
         }
     };
@@ -21,7 +23,9 @@ pub(crate) fn count_records(path: &Path) -> Option<u64> {
             Ok(line) if !line.trim().is_empty() => count = count.saturating_add(1),
             Ok(_) => {}
             Err(e) => {
-                tracing::debug!("session log stat collection failed (non-fatal): {e}");
+                tracing::warn!(
+                    "session log stat collection failed, so the record count is empty: {e}. Fix: check that the session log folder is readable."
+                );
                 return None;
             }
         }

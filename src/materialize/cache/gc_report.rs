@@ -1,5 +1,6 @@
 //! The report of an age-based sweep, and the two removal helpers that fill it (#1372, #2917).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::remove_dir_all_forcing_writable;
@@ -13,6 +14,8 @@ pub struct GcReport {
     /// Entries gc tried to remove but couldn't. Same contract as
     /// [`super::PruneReport::failed`] — never counted as `removed` (#1372).
     pub(crate) failed: Vec<PathBuf>,
+    /// The reason for each entry in `failed`, keyed by path, so the summary can name it (#3077).
+    pub(crate) causes: BTreeMap<PathBuf, String>,
     /// When set, the sweep records each removal in `removed` and deletes nothing (#2917).
     pub(crate) dry_run: bool,
 }
@@ -24,8 +27,15 @@ impl GcReport {
             removed: Vec::new(),
             kept: 0,
             failed: Vec::new(),
+            causes: BTreeMap::new(),
             dry_run,
         }
+    }
+
+    /// Record `path` as failed, with the reason the sweep gave (#3077).
+    pub(crate) fn record_failure(&mut self, path: PathBuf, cause: String) {
+        self.causes.insert(path.clone(), cause);
+        self.failed.push(path);
     }
 }
 
@@ -68,7 +78,28 @@ fn gc_remove(
                 error = %e,
                 "gc: failed to {action}; skipping"
             );
-            report.failed.push(p.to_path_buf());
+            report.record_failure(p.to_path_buf(), e.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test fails loudly when its fixture cannot be set up"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_removal_keeps_its_cause_with_its_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent");
+        let mut report = GcReport::new(false);
+
+        gc_remove_link(&missing, &mut report);
+
+        assert_eq!(report.failed, vec![missing.clone()]);
+        assert!(report.causes.get(&missing).is_some_and(|c| !c.is_empty()));
     }
 }

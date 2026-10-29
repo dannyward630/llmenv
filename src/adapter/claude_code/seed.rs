@@ -187,11 +187,25 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
 
     match std::fs::read(&settings_path) {
         Ok(bytes) => {
-            if let Ok(serde_json::Value::Object(obj)) =
+            // A user's statusLine is kept as it is. Only the exact bare command that older llmenv
+            // seeded is replaced, so an install from before #2956 gets the fixed command (#3051).
+            if let Ok(serde_json::Value::Object(mut obj)) =
                 serde_json::from_slice::<serde_json::Value>(&bytes)
-                && obj.contains_key("statusLine")
             {
-                return Ok(());
+                match obj.get("statusLine") {
+                    None => {}
+                    Some(existing) if !is_bare_seeded_status_line(existing) => return Ok(()),
+                    // `apply_seeded_settings` never overwrites a key, so the bare entry is removed
+                    // first and the seeded value is written in its place.
+                    Some(_) => {
+                        obj.remove("statusLine");
+                        let json = serde_json::to_string_pretty(&serde_json::Value::Object(obj))?;
+                        crate::paths::write_user_file_atomic(&settings_path, json.as_bytes())
+                            .map_err(|e| {
+                                anyhow::anyhow!("writing {}: {e}", settings_path.display())
+                            })?;
+                    }
+                }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -215,4 +229,61 @@ pub(crate) fn seed_status_line(out: &std::path::Path) -> anyhow::Result<()> {
         serde_json::json!({ "type": "command", "command": hook_command("statusline --color always") }),
     );
     apply_seeded_settings(out, &seeded)
+}
+
+/// The `statusLine` command that llmenv seeded before it named itself by absolute path (#2956).
+/// Only this exact value is migrated (#3051).
+const BARE_SEEDED_STATUS_COMMAND: &str = "llmenv statusline --color always";
+
+/// True when `existing` is the bare command that an older llmenv seeded.
+fn is_bare_seeded_status_line(existing: &serde_json::Value) -> bool {
+    existing.get("command").and_then(serde_json::Value::as_str) == Some(BARE_SEEDED_STATUS_COMMAND)
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod status_line_tests {
+    use super::*;
+
+    fn seeded_command(out: &std::path::Path) -> String {
+        let bytes = std::fs::read(out.join("settings.json")).expect("read settings");
+        let settings: serde_json::Value = serde_json::from_slice(&bytes).expect("parse settings");
+        settings["statusLine"]["command"]
+            .as_str()
+            .expect("statusLine command")
+            .to_owned()
+    }
+
+    #[test]
+    fn seed_status_line_migrates_the_bare_llmenv_command() {
+        let out = tempfile::tempdir().expect("tempdir");
+        // The marker key is not part of a seeded entry, so it is gone only if the entry was
+        // rewritten. The seeded command depends on PATH, so the test does not compare it.
+        let before = format!(
+            r#"{{"statusLine":{{"type":"command","command":"{BARE_SEEDED_STATUS_COMMAND}","marker":1}}}}"#
+        );
+        std::fs::write(out.path().join("settings.json"), before).expect("write settings");
+
+        seed_status_line(out.path()).expect("seed");
+
+        let bytes = std::fs::read(out.path().join("settings.json")).expect("read settings");
+        let settings: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
+        assert!(
+            settings["statusLine"].get("marker").is_none(),
+            "the bare entry was kept: {settings}"
+        );
+        let command = seeded_command(out.path());
+        assert!(command.ends_with("statusline --color always"), "{command}");
+    }
+
+    #[test]
+    fn seed_status_line_keeps_a_user_command() {
+        let out = tempfile::tempdir().expect("tempdir");
+        let before = r#"{"statusLine":{"type":"command","command":"my-bar --wide"}}"#;
+        std::fs::write(out.path().join("settings.json"), before).expect("write settings");
+
+        seed_status_line(out.path()).expect("seed");
+
+        assert_eq!(seeded_command(out.path()), "my-bar --wide");
+    }
 }

@@ -118,9 +118,14 @@ fn stale_tmp_hint(state_dir: &Path, hours: u64, now: SystemTime) -> Option<Strin
 /// The one-line hint. It names the count, the size, the retention, and the command.
 fn stale_tmp_text(summary: &StaleSummary, hours: u64) -> String {
     format!(
-        "llmenv: {} state/tmp entries ({}) have not changed in {hours} hours. \
+        "llmenv: {} state/tmp entries ({}{}) have not changed in {hours} hours. \
          Fix: run `llmenv clean` to remove them.",
         summary.count,
+        if summary.bytes_partial {
+            "at least "
+        } else {
+            ""
+        },
         human_bytes(summary.bytes)
     )
 }
@@ -183,6 +188,7 @@ mod tests {
         let summary = StaleSummary {
             count: 4,
             bytes: 2 * 1024 * 1024,
+            bytes_partial: false,
             unreadable: 0,
         };
 

@@ -24,26 +24,39 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(any(target_os = "macos", test))]
 fn timeout_error(operation: &str, service: &str, timeout: Duration) -> anyhow::Error {
     anyhow::anyhow!(
-        "`security {operation}` for keychain item {service} gave no answer within {} s. Fix: \
+        "`security {operation}` for keychain item {service} gave no answer within {} s, so the outcome is unknown. Fix: \
          unlock the login keychain (`security unlock-keychain`), answer any macOS keychain \
          prompt, then run the command again.",
         timeout.as_secs()
     )
 }
 
+/// Why a call run by [`with_deadline`] gave no answer.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoAnswer {
+    /// The call was still running at the deadline.
+    TimedOut,
+    /// The worker ended before it sent an answer, for example after a panic (#3067 review).
+    WorkerLost,
+}
+
 /// Run `call` on a worker thread for at most `timeout`. A call past the deadline keeps its thread,
-/// because the Security framework gives no way to stop it, and the caller gets the timeout error.
+/// because the Security framework gives no way to stop it, and the caller gets [`NoAnswer`].
 #[cfg(any(target_os = "macos", test))]
 fn with_deadline<T: Send + 'static>(
     timeout: Duration,
     call: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
+) -> Result<T, NoAnswer> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         // The receiver is gone after a timeout, so a late answer has no reader.
         let _ = tx.send(call());
     });
-    rx.recv_timeout(timeout).ok()
+    rx.recv_timeout(timeout).map_err(|e| match e {
+        std::sync::mpsc::RecvTimeoutError::Timeout => NoAnswer::TimedOut,
+        std::sync::mpsc::RecvTimeoutError::Disconnected => NoAnswer::WorkerLost,
+    })
 }
 
 /// Run one `security` call with a deadline. A timeout names the operation, the keychain item, and
@@ -64,26 +77,68 @@ fn run_security(
     })
 }
 
+/// The error for a keychain item that holds no usable credential. The fix names the delete
+/// command, because a stale item from an older install is the usual cause.
+#[cfg(any(target_os = "macos", test))]
+fn bad_item_error(service: &str, reason: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "keychain item {service} is not a usable credential: {reason}. Fix: delete the item with \
+         `security delete-generic-password -s {service}` and log in again."
+    )
+}
+
+/// Turn the stdout of `security find-generic-password -w` into a credential.
+///
+/// A present item that does not parse is an error, not an absent item. `None` makes the caller
+/// read the file credential, so the user would never learn that the keychain item is bad (#3067).
+/// The error never quotes the item, because the item holds the token.
+#[cfg(any(target_os = "macos", test))]
+fn parse_keychain_blob(service: &str, raw: &str) -> anyhow::Result<super::Credentials> {
+    let value: serde_json::Value = serde_json::from_str(raw.trim()).map_err(|e| {
+        let reason = format!("not JSON (line {}, column {})", e.line(), e.column());
+        bad_item_error(service, &reason)
+    })?;
+    super::Credentials::from_json(value)
+        .ok_or_else(|| bad_item_error(service, "the JSON has no OAuth credential object"))
+}
+
+/// Read the exit status of `security delete-generic-password`. Exit 44 (errSecItemNotFound) is
+/// the only "nothing to delete" answer. Any other failure is an error, so a locked keychain does
+/// not look like a clean run (#3068).
+#[cfg(any(target_os = "macos", test))]
+fn forget_outcome(service: &str, status: &std::process::ExitStatus) -> anyhow::Result<bool> {
+    if status.success() {
+        return Ok(true);
+    }
+    if status.code() == Some(SECURITY_ITEM_NOT_FOUND_EXIT_CODE) {
+        return Ok(false);
+    }
+    Err(anyhow::anyhow!(
+        "deleting keychain item {service} failed (status {status}). Fix: unlock the login keychain \
+         (`security unlock-keychain`) and run the command again."
+    ))
+}
+
 /// Drop the keychain credential belonging to a config dir that no longer exists.
 ///
 /// Returns `true` when an item was deleted. No-op off macOS, where the
 /// credential lives inside the folder and dies with it.
 ///
 /// # Errors
-/// Returns an error when `security` cannot be run, or gives no answer within 10 s.
+/// Returns an error when `security` cannot be run, gives no answer within 10 s, or fails for a
+/// reason other than "item not found" (for example, a locked keychain).
 #[cfg(target_os = "macos")]
 pub(crate) fn forget(config_dir: &Path) -> anyhow::Result<bool> {
     let service = super::keychain_service(config_dir);
     let account = keychain_account()?;
-    // stderr discarded deliberately (#1092): the overwhelmingly common failure
-    // is "item not found", which the `bool` return already communicates as
-    // `false` — there's nothing more a caller needs from stderr for a delete.
+    // stderr is discarded (#1092). The exit status carries the answer: 44 is "not found",
+    // and `forget_outcome` maps every other failure to an error.
     let mut cmd = std::process::Command::new(security_bin()?);
     cmd.args(["delete-generic-password", "-s", &service, "-a", &account])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let out = run_security(cmd, FORGET_TIMEOUT, "delete-generic-password", &service)?;
-    Ok(out.status.success())
+    forget_outcome(&service, &out.status)
 }
 
 /// Drop the keychain credential belonging to a config dir that no longer exists.
@@ -156,7 +211,7 @@ fn keychain_account() -> anyhow::Result<String> {
 /// strings via `SecCopyErrorMessageString`, so on a non-English system a
 /// string match would silently miss every failure and collapse back to the
 /// same "absent" outcome the classification exists to avoid.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const SECURITY_ITEM_NOT_FOUND_EXIT_CODE: i32 = 44;
 
 /// Why `security find-generic-password` failed — distinguishing these matters
@@ -232,17 +287,7 @@ pub(super) fn keychain_read(config_dir: &Path) -> anyhow::Result<Option<super::C
     }
     // Deliberately not logged or surfaced — stdout is the token itself.
     let raw = String::from_utf8_lossy(&out.stdout);
-    match serde_json::from_str::<serde_json::Value>(raw.trim()) {
-        Ok(value) => Ok(super::Credentials::from_json(value)),
-        Err(e) => {
-            tracing::debug!(
-                "keychain item {service} is not a JSON credential (line {}, column {})",
-                e.line(),
-                e.column()
-            );
-            Ok(None)
-        }
-    }
+    parse_keychain_blob(&service, &raw).map(Some)
 }
 
 /// Store a credential in the keychain via the Security framework directly
@@ -264,11 +309,26 @@ pub(super) fn keychain_write(config_dir: &Path, creds: &super::Credentials) -> a
     let blob = creds.to_blob()?;
     // A locked keychain blocks the write as it blocks the read, and export runs this (#2892).
     let item = service.clone();
-    let written = with_deadline(WRITE_TIMEOUT, move || {
+    let answer = with_deadline(WRITE_TIMEOUT, move || {
         security_framework::passwords::set_generic_password(&item, &account, blob.as_bytes())
             .map_err(|e| e.to_string())
-    })
-    .ok_or_else(|| timeout_error("add-generic-password", &service, WRITE_TIMEOUT))?;
+    });
+    let written = match answer {
+        Ok(written) => written,
+        Err(NoAnswer::TimedOut) => {
+            return Err(timeout_error(
+                "add-generic-password",
+                &service,
+                WRITE_TIMEOUT,
+            ));
+        }
+        Err(NoAnswer::WorkerLost) => {
+            anyhow::bail!(
+                "the keychain write for service {service} ended without an answer, so it may not \
+                 be stored. Fix: run the command again."
+            );
+        }
+    };
     written.map_err(|e| anyhow::anyhow!("writing keychain item for service {service}: {e}"))
 }
 
@@ -303,8 +363,15 @@ mod tests {
             std::thread::sleep(Duration::from_secs(5));
             1
         });
-        assert_eq!(slow, None);
-        assert_eq!(with_deadline(Duration::from_secs(5), || 2), Some(2));
+        assert_eq!(slow, Err(NoAnswer::TimedOut));
+        assert_eq!(with_deadline(Duration::from_secs(5), || 2), Ok(2));
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "test code: the worker must panic")]
+    fn a_worker_that_panics_is_not_reported_as_a_timeout() {
+        let lost = with_deadline(Duration::from_secs(5), || -> u8 { panic!("worker failed") });
+        assert_eq!(lost, Err(NoAnswer::WorkerLost));
     }
 
     #[test]
@@ -326,9 +393,56 @@ mod tests {
 
     // -- keychain_read failure classification (#1092) --
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn exit_status(code: i32) -> std::process::ExitStatus {
         std::os::unix::process::ExitStatusExt::from_raw(code << 8)
+    }
+
+    // -- an unreadable keychain item is an error, not an absent one (#3067) --
+
+    #[test]
+    fn an_item_that_is_not_json_is_an_error_naming_the_item_and_the_fix() {
+        let err = parse_keychain_blob("svc-z", "not json")
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("svc-z") && err.contains("line 1"), "{err}");
+        assert!(err.contains("Fix: delete the item"), "{err}");
+        assert!(err.contains("delete-generic-password -s svc-z"), "{err}");
+    }
+
+    #[test]
+    fn an_item_that_is_json_without_an_oauth_object_is_an_error() {
+        let err = parse_keychain_blob("svc-z", r#"{"other":1}"#)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("svc-z") && err.contains("OAuth"), "{err}");
+    }
+
+    #[test]
+    fn an_item_with_an_oauth_object_parses_as_a_credential() {
+        assert!(parse_keychain_blob("svc-z", r#"{"claudeAiOauth":{}}"#).is_ok());
+    }
+
+    // -- forget reports a failed delete as a failure, not as not found (#3068) --
+
+    #[test]
+    fn forget_exit_zero_is_deleted_and_exit_44_is_not_found() {
+        assert!(forget_outcome("svc-x", &exit_status(0)).unwrap());
+        assert!(!forget_outcome("svc-x", &exit_status(SECURITY_ITEM_NOT_FOUND_EXIT_CODE)).unwrap());
+    }
+
+    #[test]
+    fn forget_other_exit_codes_are_errors_naming_the_item_and_the_unlock_fix() {
+        let err = forget_outcome("svc-x", &exit_status(36))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            err.contains("svc-x") && err.contains("unlock-keychain"),
+            "{err}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -378,6 +492,34 @@ mod tests {
                 err.contains("LLMENV_SECURITY_BIN") && err.contains("absolute"),
                 "{err}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::parse_keychain_blob;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// An error from an unusable keychain item never quotes the token it was given.
+        #[test]
+        fn a_bad_item_error_never_quotes_the_token(
+            token in "[A-Za-z0-9]{12,40}",
+            cut in 0usize..200,
+        ) {
+            let full = format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}"}}}}"#);
+            // A truncated item is not valid JSON, so it must fail.
+            let raw: String = full.chars().take(cut).collect();
+            if let Err(err) = parse_keychain_blob("svc-z", &raw) {
+                prop_assert!(!format!("{err:#}").contains(&token), "{err:#}");
+            }
+        }
+
+        /// Arbitrary item text never panics.
+        #[test]
+        fn arbitrary_item_text_never_panics(raw in ".{0,120}") {
+            let _ = parse_keychain_blob("svc-z", &raw);
         }
     }
 }

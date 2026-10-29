@@ -49,7 +49,10 @@ impl GcOutput<'_> {
         self.list(&report.removed);
         // #1372: a removal failure does not abort the walk, so the skipped entries are named here.
         for p in &report.failed {
-            eprintln!("{warn} GC: could not process {}", p.display());
+            match report.causes.get(p) {
+                Some(cause) => eprintln!("{warn} GC: could not process {}: {cause}", p.display()),
+                None => eprintln!("{warn} GC: could not process {}", p.display()),
+            }
         }
     }
 }
@@ -59,7 +62,10 @@ mod index_use;
 mod session_rotation;
 mod state_gate;
 pub(in crate::cli) use credentials::forget_credentials_for;
-use index_use::{CacheUse, bundles_dir, cache_use};
+use credentials::report_credential_drops;
+#[cfg(test)]
+use index_use::cache_use;
+use index_use::{CacheUse, cbm_use};
 use session_rotation::prune_session_log;
 use state_gate::state_may_have_stale_entries;
 
@@ -115,16 +121,13 @@ fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOu
     match cache::gc(cache_dir, retention, config.cache.hashing, out.dry_run) {
         Ok(report) => {
             out.report("", &report);
-            if !out.dry_run {
-                let forgotten = forget_credentials_for(&report.removed);
-                if forgotten > 0 {
-                    eprintln!(
-                        "{} GC: dropped {forgotten} orphaned OAuth credential entries",
-                        out.pass
-                    );
-                }
-            }
-            report.failed.len()
+            // A dry run deletes nothing, so it drops no credentials and has none to fail (#3073).
+            let credential_failures = if out.dry_run {
+                0
+            } else {
+                report_credential_drops(&report.removed, out)
+            };
+            report.failed.len() + credential_failures
         }
         Err(e) => {
             eprintln!("{} GC failed: {e:#}", out.warn);
@@ -142,7 +145,11 @@ fn sweep_state(state_dir: &Path, config: &Config, retention: Duration, out: GcOu
     // With nothing old enough to remove, the tmp and index sweeps are skipped. A sweep that ran
     // now could see an entry that crossed the cutoff after this check, and remove it without
     // the in-use list.
-    if !state_may_have_stale_entries(state_dir, retention) {
+    let cbm_live = matches!(
+        cbm_use(config, &state_dir.join("codebase-memory")),
+        CacheUse::Live
+    );
+    if !state_may_have_stale_entries(state_dir, retention, cbm_live) {
         return prune_session_log(state_dir, retention, out);
     }
     let in_use = crate::materialize::open_files::open_paths().map_err(|e| format!("{e:#}"));
@@ -198,14 +205,7 @@ fn sweep_cbm_indexes(
             return 1;
         }
     };
-    let used = match bundles_dir() {
-        Ok(bundles) => cache_use(config, &bundles, &dir),
-        Err(e) if !config.bundle.is_empty() => CacheUse::Unknown(format!(
-            "cannot resolve the config folder, so the index_path of each bundle is unknown: {e:#}"
-        )),
-        Err(_) => cache_use(config, Path::new(""), &dir),
-    };
-    match used {
+    match cbm_use(config, &dir) {
         CacheUse::Unused => {}
         CacheUse::Live => {
             eprintln!(

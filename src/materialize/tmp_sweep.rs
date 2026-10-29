@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::materialize::cache::{GcReport, gc_remove_dir, gc_remove_link};
-use crate::materialize::dir_size::dir_size;
+use crate::materialize::dir_size::{DirSize, dir_size};
 use crate::materialize::open_files::open_paths;
 
 mod claude_root;
@@ -21,6 +21,8 @@ use walk::scan;
 pub struct StaleSummary {
     pub count: usize,
     pub bytes: u64,
+    /// True when `bytes` leaves out an entry that could not be measured, so it is a floor (#3069).
+    pub bytes_partial: bool,
     /// Entries the scan could not read or judge. They are not in `count`.
     pub unreadable: usize,
 }
@@ -94,13 +96,16 @@ pub fn stale_summary_in(
     in_use: &[PathBuf],
 ) -> anyhow::Result<StaleSummary> {
     let scan = scan(tmp_root, older_than, in_use)?;
+    let sizes = scan
+        .stale
+        .iter()
+        .map(|s| dir_size(&s.path))
+        .collect::<anyhow::Result<Vec<DirSize>>>()?;
+    let total = sizes.into_iter().fold(DirSize::default(), DirSize::combine);
     Ok(StaleSummary {
         count: scan.stale.len(),
-        bytes: scan
-            .stale
-            .iter()
-            .map(|s| dir_size(&s.path))
-            .sum::<anyhow::Result<u64>>()?,
+        bytes: total.bytes,
+        bytes_partial: total.skipped > 0,
         unreadable: scan.failed.len(),
     })
 }
@@ -386,6 +391,7 @@ mod tests {
             StaleSummary {
                 count: 1,
                 bytes: 500,
+                bytes_partial: false,
                 unreadable: 0
             }
         );
@@ -409,6 +415,7 @@ mod tests {
             StaleSummary {
                 count: 0,
                 bytes: 0,
+                bytes_partial: false,
                 unreadable: 0
             }
         );
@@ -426,6 +433,7 @@ mod tests {
             StaleSummary {
                 count: 0,
                 bytes: 0,
+                bytes_partial: false,
                 unreadable: 0
             }
         );

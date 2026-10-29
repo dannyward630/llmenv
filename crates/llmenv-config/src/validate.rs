@@ -1,6 +1,15 @@
-use super::{Config, PermissionRule};
+use super::Config;
+#[cfg(test)]
+use super::PermissionRule;
 use llmenv_paths::has_parent_component;
+
+mod permissions;
+mod widgets;
+#[cfg(test)]
+use permissions::has_balanced_parens;
+pub use permissions::{validate_permission_rule, validate_permission_string};
 use thiserror::Error;
+pub use widgets::check_widget_display;
 
 #[cfg(test)]
 use super::{
@@ -253,6 +262,15 @@ pub enum ValidateError {
     HookCommandMissingCommand { event: String },
     #[error("hook '{event}' has type: mcp_tool but no tool")]
     HookMcpToolMissingTool { event: String },
+    #[error(
+        "widget {widget}: display \"{value}\" is not one of {allowed}. Fix: set display to one of \
+         those values, or remove it."
+    )]
+    WidgetDisplayInvalid {
+        widget: String,
+        value: String,
+        allowed: String,
+    },
 }
 
 /// A state-tool subdir must be a single safe path component: non-empty, not
@@ -339,75 +357,6 @@ pub fn validate_capabilities_env_key(context: &str, key: &str) -> Result<(), Val
     Ok(())
 }
 
-/// A pattern/path is only safe to wrap as `Tool(value)` if its own parentheses
-/// balance — otherwise the wrapped string's parens don't balance either, and
-/// engines that parse the rule by tracking paren depth (Claude Code, Crush)
-/// silently skip the whole rule. `<(` from shell process substitution is the
-/// common trigger (`bash <(curl *` has one unmatched `(`).
-fn has_balanced_parens(s: &str) -> bool {
-    let mut depth: i32 = 0;
-    let mut prev_was_escape = false;
-    for c in s.chars() {
-        if prev_was_escape {
-            prev_was_escape = false;
-            continue;
-        }
-        match c {
-            '\\' => prev_was_escape = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    depth == 0
-}
-
-/// Validate a single permission rule's `pattern`/`paths` for balanced
-/// parentheses. Returns an error with the given `context` label (e.g.
-/// `"config.yaml: capabilities.permissions"` or `"bundle 'foo'"`) on failure —
-/// see [`ValidateError::PermissionRuleUnbalancedParens`] for why this is
-/// rejected rather than rendered as-is.
-pub fn validate_permission_rule(context: &str, rule: &PermissionRule) -> Result<(), ValidateError> {
-    if let Some(pattern) = &rule.pattern
-        && !has_balanced_parens(pattern)
-    {
-        return Err(ValidateError::PermissionRuleUnbalancedParens {
-            context: context.to_string(),
-            tool: rule.tool.clone(),
-            value: pattern.clone(),
-        });
-    }
-    for path in &rule.paths {
-        if !has_balanced_parens(path) {
-            return Err(ValidateError::PermissionRuleUnbalancedParens {
-                context: context.to_string(),
-                tool: rule.tool.clone(),
-                value: path.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Validate a single native permission rule string (already in `Tool(value)`
-/// format) for balanced parentheses — same rationale as
-/// [`validate_permission_rule`].
-pub fn validate_permission_string(context: &str, raw: &str) -> Result<(), ValidateError> {
-    if !has_balanced_parens(raw) {
-        return Err(ValidateError::PermissionRuleUnbalancedParens {
-            context: context.to_string(),
-            tool: raw.to_string(),
-            value: raw.to_string(),
-        });
-    }
-    Ok(())
-}
-
 fn is_valid_var_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -467,6 +416,7 @@ impl Config {
         {
             return Err(ValidateError::RetentionDaysInvalid);
         }
+        self.validate_widget_displays()?;
         let mut seen_scope_ids = std::collections::HashSet::new();
         let ids = self
             .scope
@@ -623,6 +573,19 @@ impl Config {
     /// valid shell variable name, its subdir a single safe path component, and
     /// no env var may repeat or collide with a var llmenv itself emits into the
     /// same set (`LLMENV_STATE_DIR`, `CLAUDE_CONFIG_DIR`).
+    /// Every widget `display` must be a preset that the widget accepts (#3059).
+    fn validate_widget_displays(&self) -> Result<(), ValidateError> {
+        let Some(statusline) = &self.statusline else {
+            return Ok(());
+        };
+        for (widget, cfg) in &statusline.widgets {
+            if let Some(value) = &cfg.display {
+                check_widget_display(widget, value)?;
+            }
+        }
+        Ok(())
+    }
+
     fn validate_state(&self) -> Result<(), ValidateError> {
         let mut seen_env = std::collections::HashSet::new();
         // Reserve llmenv/adapter-emitted vars so a tool can't shadow them and
@@ -915,6 +878,27 @@ impl Config {
 mod tests {
     use super::*;
     use crate::CodebaseMemory;
+
+    #[test]
+    fn a_widget_display_outside_its_presets_is_rejected_with_the_allowed_values() {
+        let err = check_widget_display("usage_5h", "clock_24H")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("usage_5h"), "{err}");
+        assert!(err.contains("clock_24H"), "{err}");
+        assert!(err.contains("clock_24h, clock_12h"), "{err}");
+    }
+
+    #[test]
+    fn a_widget_display_preset_is_accepted() {
+        assert!(check_widget_display("pr", "url").is_ok());
+        assert!(check_widget_display("model", "full").is_ok());
+    }
+
+    #[test]
+    fn a_widget_without_display_presets_ignores_its_display_value() {
+        assert!(check_widget_display("context", "anything").is_ok());
+    }
     use crate::HashingMode;
     use proptest::prelude::*;
     use std::collections::BTreeMap;

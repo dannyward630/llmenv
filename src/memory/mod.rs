@@ -22,6 +22,24 @@ fn connect() -> anyhow::Result<McpHttpClient> {
     connect_with_timeout(CLI_TIMEOUT)
 }
 
+/// The scope has no memory backend. Most sessions have none, so a stats poll treats it as
+/// absent and does not warn (#3062).
+#[derive(Debug)]
+pub(crate) struct NoBackendForScope(String);
+
+impl std::fmt::Display for NoBackendForScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoBackendForScope {}
+
+/// True when `err` says the scope has no memory backend, not that a backend failed.
+pub(crate) fn is_no_backend(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<NoBackendForScope>().is_some()
+}
+
 fn connect_with_timeout(timeout: Duration) -> anyhow::Result<McpHttpClient> {
     let config_path = crate::paths::config_path()?;
     let config = crate::config::Config::load(&config_path)?;
@@ -30,8 +48,12 @@ fn connect_with_timeout(timeout: Duration) -> anyhow::Result<McpHttpClient> {
         .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?;
     let env = crate::scope::matcher::Env::detect_for_config(&config)?;
     let active = crate::scope::evaluate(&config, &env);
-    let url = crate::hook_run::memory_url(&config, config_dir, &active)?.into_url()?;
-    McpHttpClient::new(url, timeout).map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e}"))
+    // `into_url` fails only for an inactive endpoint, so every error here is "no backend".
+    let url = crate::hook_run::memory_url(&config, config_dir, &active)?
+        .into_url()
+        .map_err(|e| NoBackendForScope(format!("{e:#}")))?;
+    McpHttpClient::new(url, timeout)
+        .map_err(|e| anyhow::anyhow!("invalid memory backend URL: {e:#}"))
 }
 
 /// Bridge a synchronous CLI context to an async MCP tool call.
@@ -181,7 +203,14 @@ pub(crate) fn prune(dry_run: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{read_or_init_snapshot, scope_recall_args};
+    use super::{NoBackendForScope, is_no_backend, read_or_init_snapshot, scope_recall_args};
+
+    #[test]
+    fn a_missing_backend_is_no_backend_and_a_failed_call_is_not() {
+        let missing = anyhow::Error::new(NoBackendForScope("no backend".to_owned()));
+        assert!(is_no_backend(&missing));
+        assert!(!is_no_backend(&anyhow::anyhow!("MCP call timed out")));
+    }
 
     // #2253 variant: without `project`, ICM filters by the ICM server's cwd,
     // not by the project that `llmenv memory list` runs in.

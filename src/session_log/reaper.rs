@@ -73,7 +73,8 @@ pub(crate) fn reap_session_log(log_path: &Path, retention_days: u64) {
 /// The age of the file at `path`. `None` for a missing file, and for an mtime in the
 /// future, which is kept rather than deleted.
 fn log_age(path: &Path) -> std::io::Result<Option<Duration>> {
-    let modified = match path.metadata() {
+    // `symlink_metadata` reads the link itself, because the reaper removes the link, not its target.
+    let modified = match path.symlink_metadata() {
         Ok(meta) => meta.modified()?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
@@ -85,6 +86,29 @@ fn log_age(path: &Path) -> std::io::Result<Option<Duration>> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn log_age_of_a_new_symlink_is_the_link_age_not_the_target_age() {
+        // The reaper removes the link itself, so its age is the link's own mtime (#3076).
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("old.jsonl");
+        std::fs::write(&target, "x").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(10 * 86_400);
+        std::fs::File::open(&target)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let link = dir.path().join("session-log.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let age = log_age(&link).unwrap().unwrap();
+
+        assert!(
+            age < Duration::from_secs(3600),
+            "the link reads as {age:?} old"
+        );
+    }
 
     #[test]
     fn log_age_is_none_for_a_missing_file() {

@@ -1,5 +1,7 @@
 use super::network::NetworkNeeds;
-use crate::config::{ContentScope, HostScope, UserScope};
+
+pub(crate) use super::content_walk::matches_content_all;
+use crate::config::{HostScope, UserScope};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -228,7 +230,7 @@ const MAX_TAGS_PER_SOURCE: usize = 64;
 /// mode as tags.
 pub(crate) fn sanitize_tags(raw: Vec<String>, source: &str) -> Vec<String> {
     // #1345: these report a tag the *user* wrote never taking effect, so they
-    // have to be `eprintln!`. The default `EnvFilter` is `ERROR`, so a
+    // have to be `eprintln!`. The session-log file layer's `EnvFilter` is `ERROR`, so a
     // `tracing::warn!` here reached neither stderr nor the log file — the tag
     // silently did nothing and no bundle gated on it ever fired.
     let mut valid = Vec::with_capacity(raw.len());
@@ -350,98 +352,14 @@ pub(crate) fn matches_user(s: &UserScope, env: &Env) -> bool {
     s.r#match.user.as_deref().is_some_and(|u| u == env.user)
 }
 
-/// Evaluate every content scope against `cwd` in a single directory walk.
-///
-/// Each content scope previously triggered its own `walkdir` traversal
-/// (#703) — N active content scopes meant N full tree walks on every hook
-/// fire and export. Here all globs are compiled up front and evaluated
-/// per entry against a single walk; a scope drops out of the pending set as
-/// soon as it matches, and the walk ends early once none remain pending.
-///
-/// Returns the `id`s of scopes whose glob matched.
-#[must_use]
-pub(crate) fn matches_content_all<'a>(
-    scopes: &'a [ContentScope],
-    cwd: &std::path::Path,
-) -> std::collections::BTreeSet<&'a str> {
-    let mut pending: Vec<(&str, globset::GlobMatcher, Option<usize>)> = scopes
-        .iter()
-        .filter_map(|s| match globset::Glob::new(&s.r#match.glob) {
-            Ok(glob) => Some((s.id.as_str(), glob.compile_matcher(), s.r#match.depth)),
-            Err(_) => {
-                tracing::debug!("content scope {}: invalid glob pattern", s.id);
-                None
-            }
-        })
-        .collect();
-
-    let mut matched = std::collections::BTreeSet::new();
-    if pending.is_empty() {
-        return matched;
-    }
-
-    // Cap the walk at the loosest per-scope depth limit; any scope with no
-    // limit forces an unbounded walk (short-circuits to `None` below).
-    let max_depth = pending
-        .iter()
-        .map(|(_, _, d)| *d)
-        .try_fold(0usize, |acc, d| d.map(|d| acc.max(d)));
-
-    let mut walker = walkdir::WalkDir::new(cwd).follow_links(false);
-    if let Some(depth) = max_depth {
-        walker = walker.max_depth(depth);
-    }
-
-    for entry in walker {
-        if pending.is_empty() {
-            break;
-        }
-        let Ok(entry) =
-            entry.inspect_err(|e| tracing::warn!(error = %e, "walkdir entry error; skipping"))
-        else {
-            continue;
-        };
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        let Ok(relative) = entry.path().strip_prefix(cwd) else {
-            // walkdir only yields paths under root, so this is a walkdir bug
-            debug_assert!(
-                false,
-                "walkdir path {:?} not under root {:?}",
-                entry.path(),
-                cwd,
-            );
-            tracing::warn!(
-                path = ?entry.path(),
-                cwd = ?cwd,
-                "walkdir yielded path outside root; skipping",
-            );
-            continue;
-        };
-        let entry_depth = entry.depth();
-        pending.retain(|(id, matcher, depth)| {
-            if depth.is_some_and(|d| entry_depth > d) {
-                return true;
-            }
-            if matcher.is_match(relative) {
-                matched.insert(*id);
-                false
-            } else {
-                true
-            }
-        });
-    }
-    matched
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        ContentScope, Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, glob_matches,
-        is_valid_tag_charset, matches_content_all, parse_extra_tags, sanitize_tags,
+        Env, MAX_TAGS_PER_SOURCE, cap_aggregate_tags, glob_matches, is_valid_tag_charset,
+        matches_content_all, parse_extra_tags, sanitize_tags,
     };
+    use crate::config::ContentScope;
     use crate::scope::marker_file::discover_project;
     use proptest::prelude::*;
     use std::collections::BTreeSet;

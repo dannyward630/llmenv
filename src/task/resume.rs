@@ -178,10 +178,12 @@ pub(crate) fn git_branch(cwd: &Path) -> anyhow::Result<Option<String>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if branch_failure_is_unexpected(output.status.code(), &stderr) {
+            // The shared helper scrubs credentials and gives the exit status when stderr is empty,
+            // as after a signal (#3053).
             anyhow::bail!(
                 "git could not report the branch in {}: {}. Fix: check the repository with `git status`.",
                 cwd.display(),
-                stderr.trim()
+                llmenv_git::git_failure_detail(&output.stderr, &output.stdout, output.status)
             );
         }
         return Ok(None);
