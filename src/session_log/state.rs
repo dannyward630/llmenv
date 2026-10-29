@@ -91,9 +91,11 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
             let mut aside = path.with_extension("json.corrupt");
             let free = aside_name_is_free(&aside).with_context(|| {
                 format!(
-                    "checking the aside name {}; the corrupt session map {} was not moved",
-                    aside.display(),
-                    path.display()
+                    "the session map {} is corrupt ({e}), and its aside name {} cannot be \
+                     checked, so the map was not moved. Fix: check the permissions of the \
+                     folder that holds the map, then retry.",
+                    path.display(),
+                    aside.display()
                 )
             })?;
             if !free {
