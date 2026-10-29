@@ -35,22 +35,27 @@ pub(crate) fn read_marketplace_plugins(
     };
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("parsing {}", manifest_path.display()))?;
-    let plugins = json
-        .get("plugins")
-        .and_then(|p| p.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|entry| match parse_plugin_entry(entry) {
-                    Ok(parsed) => parsed,
-                    // One bad entry must not hide the other plugins of the marketplace.
-                    Err(e) => {
-                        eprintln!("warning: {e:#} — skipping entry");
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
+    let arr = match json.get("plugins") {
+        None => return Ok(Vec::new()),
+        Some(value) => value.as_array().with_context(|| {
+            format!(
+                "{} has a \"plugins\" value that is not an array. Fix: make \"plugins\" a list of \
+                 plugin entries.",
+                manifest_path.display()
+            )
+        })?,
+    };
+    let plugins = arr
+        .iter()
+        .filter_map(|entry| match parse_plugin_entry(entry) {
+            Ok(parsed) => parsed,
+            // One bad entry must not hide the other plugins of the marketplace.
+            Err(e) => {
+                eprintln!("warning: {e:#} — skipping entry");
+                None
+            }
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>();
     Ok(plugins)
 }
 
@@ -59,10 +64,10 @@ pub(crate) fn read_marketplace_plugins(
 /// pin), and the caller skips the entry with the error as the warning.
 fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePluginEntry>> {
     let name = match entry.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
-        None => {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
             eprintln!(
-                "warning: marketplace entry skipped: missing or non-string 'name' \
+                "warning: marketplace entry skipped: missing, empty, or non-string 'name' \
                  field (entry = {:?})",
                 entry
             );
@@ -135,7 +140,8 @@ fn parse_plugin_entry(entry: &serde_json::Value) -> Result<Option<MarketplacePlu
 
 /// The name that a marketplace checkout declares in its manifest. Claude Code names a directory
 /// marketplace from this field, not from the config key, so a mismatch hides its plugins (#3048).
-/// `None` when the manifest is absent or has no `name`.
+/// `None` only when the manifest is absent. A manifest without a string `name` is an error, so the
+/// check cannot pass silently (#3048).
 ///
 /// # Errors
 /// Returns an error when the file exists but cannot be read or parsed.
@@ -148,10 +154,16 @@ pub(crate) fn read_marketplace_name(marketplace_dir: &Path) -> Result<Option<Str
     };
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("parsing {}", manifest_path.display()))?;
-    Ok(json
+    let name = json
         .get("name")
         .and_then(serde_json::Value::as_str)
-        .map(str::to_owned))
+        .with_context(|| {
+            format!(
+                "{} has no string \"name\". Fix: add the marketplace name to the manifest.",
+                manifest_path.display()
+            )
+        })?;
+    Ok(Some(name.to_owned()))
 }
 
 #[cfg(test)]
@@ -178,5 +190,60 @@ mod tests {
     fn read_marketplace_name_is_none_without_a_manifest() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(read_marketplace_name(dir.path()).expect("read"), None);
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod error_tests {
+    use super::{read_marketplace_name, read_marketplace_plugins};
+    use proptest::prelude::*;
+
+    fn write_manifest(text: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".claude-plugin")).expect("create dir");
+        std::fs::write(
+            dir.path().join(".claude-plugin").join("marketplace.json"),
+            text,
+        )
+        .expect("write manifest");
+        dir
+    }
+
+    #[test]
+    fn a_non_string_name_is_an_error_not_an_absent_name() {
+        let dir = write_manifest(r#"{"name": 5}"#);
+        let err = read_marketplace_name(dir.path()).expect_err("a number is not a name");
+        assert!(format!("{err:#}").contains("no string \"name\""), "{err:#}");
+    }
+
+    #[test]
+    fn a_missing_name_is_an_error() {
+        let dir = write_manifest(r#"{"plugins": []}"#);
+        assert!(read_marketplace_name(dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_plugins_value_that_is_not_an_array_is_an_error() {
+        let dir = write_manifest(r#"{"plugins": {"name": "p"}}"#);
+        let err = read_marketplace_plugins(dir.path()).expect_err("an object is not a list");
+        assert!(format!("{err:#}").contains("not an array"), "{err:#}");
+    }
+
+    proptest! {
+        /// Untrusted manifest entries never panic, and an accepted entry always has a name.
+        #[test]
+        fn parse_plugin_entry_never_panics_and_accepts_only_named_entries(
+            name in proptest::option::of(".{0,20}"),
+            source in proptest::option::of(".{0,20}"),
+        ) {
+            let mut obj = serde_json::Map::new();
+            if let Some(n) = name { obj.insert("name".into(), n.into()); }
+            if let Some(s) = source { obj.insert("source".into(), s.into()); }
+            let entry = serde_json::Value::Object(obj);
+            if let Ok(Some(parsed)) = super::parse_plugin_entry(&entry) {
+                prop_assert!(!parsed.name.is_empty());
+            }
+        }
     }
 }
