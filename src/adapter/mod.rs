@@ -2,6 +2,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod crush;
 pub(crate) mod hook_command;
+pub(crate) mod hook_program;
 mod json_nulls;
 pub(crate) mod llmenv_skill;
 pub(crate) mod mcp_tiers;
@@ -10,9 +11,11 @@ pub(crate) mod native_keys;
 pub mod opencode;
 pub(crate) mod output_styles;
 pub(crate) use json_nulls::strip_json_nulls;
+mod remote_transport;
 pub(crate) mod skills;
 mod temp_dir;
 pub(crate) mod tools;
+pub(crate) use remote_transport::remote_transport_type_str;
 
 pub(crate) use hook_command::resolve_bundle_relative_paths;
 
@@ -710,21 +713,6 @@ fn resolve_plugin_payload(
     Ok(PathBuf::from(install_location).join(&plugin.plugin))
 }
 
-/// Map a resolved remote transport onto the `type` discriminator string shared
-/// by every engine's remote-MCP config shape (`"http"` / `"sse"`).
-///
-/// `ResolvedKind::Remote` never actually carries `McpTransport::Stdio` (stdio
-/// servers always resolve to `ResolvedKind::Stdio` instead — see
-/// `crate::mcp::resolve`), so that arm is unreachable in practice; it is
-/// folded to `"http"` defensively rather than panicking.
-pub(crate) fn remote_transport_type_str(transport: crate::config::McpTransport) -> &'static str {
-    use crate::config::McpTransport;
-    match transport {
-        McpTransport::Sse => "sse",
-        McpTransport::Http | McpTransport::Stdio => "http",
-    }
-}
-
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
@@ -734,8 +722,7 @@ mod tests {
         AgentAdapter, MEMORY_MCP_NAME, SessionStartContext, active_adapter_from,
         adapter_for_launch_target, emit_hook_context, engine_id, known_engine_ids,
         lifecycle_event_registered, lifecycle_hook_registrations, modeled_key_redirect,
-        overlay_native_json, registered_adapters, remote_transport_type_str,
-        resolve_bundle_relative_paths, strip_json_nulls,
+        overlay_native_json, registered_adapters, resolve_bundle_relative_paths, strip_json_nulls,
     };
     use crate::adapter::hook_command::resolve_command_paths_against_files;
     use crate::merge::MergedManifest;
@@ -1371,18 +1358,6 @@ mod tests {
         assert_eq!(
             resolve_bundle_relative_paths("bash hooks/guard.sh 2>/dev/null", dir),
             Some("bash /bundles/foo/hooks/guard.sh 2>/dev/null".to_string())
-        );
-    }
-
-    #[test]
-    fn remote_transport_type_str_maps_http_and_sse() {
-        use crate::config::McpTransport;
-        assert_eq!(remote_transport_type_str(McpTransport::Http), "http");
-        assert_eq!(remote_transport_type_str(McpTransport::Sse), "sse");
-        assert_eq!(
-            remote_transport_type_str(McpTransport::Stdio),
-            "http",
-            "unreachable in practice, but must not panic"
         );
     }
 

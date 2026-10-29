@@ -12,8 +12,8 @@ use anyhow::Context;
 use crate::materialize::cache::{
     GcReport, gc_remove_dir, gc_remove_link, is_expired, newest_mtime,
 };
+use crate::materialize::dir_size::{DirSize, dir_size};
 use crate::materialize::open_files::open_paths;
-use crate::materialize::status_data::dir_size;
 
 mod claude_root;
 
@@ -38,6 +38,8 @@ struct Scan {
 pub struct StaleSummary {
     pub count: usize,
     pub bytes: u64,
+    /// True when `bytes` leaves out an entry that could not be measured, so it is a floor (#3069).
+    pub bytes_partial: bool,
     /// Entries the scan could not read or judge. They are not in `count`.
     pub unreadable: usize,
 }
@@ -111,9 +113,16 @@ pub fn stale_summary_in(
     in_use: &[PathBuf],
 ) -> anyhow::Result<StaleSummary> {
     let scan = scan(tmp_root, older_than, in_use)?;
+    let sizes = scan
+        .stale
+        .iter()
+        .map(|s| dir_size(&s.path))
+        .collect::<anyhow::Result<Vec<DirSize>>>()?;
+    let total = sizes.into_iter().fold(DirSize::default(), DirSize::combine);
     Ok(StaleSummary {
         count: scan.stale.len(),
-        bytes: scan.stale.iter().map(|s| dir_size(&s.path)).sum(),
+        bytes: total.bytes,
+        bytes_partial: total.skipped > 0,
         unreadable: scan.failed.len(),
     })
 }
@@ -170,7 +179,7 @@ fn judge_entry(path: &Path, is_dir: bool, older_than: Duration, now: SystemTime,
     };
     // A future mtime means the clock moved. Keep the entry, because a removal on a bad
     // clock is not reversible.
-    if modified > now || !is_expired(now, modified, older_than) {
+    if modified > now || !is_expired(now, modified, older_than, path) {
         scan.kept += 1;
     } else {
         scan.stale.push(Stale {

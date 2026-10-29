@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde_json::json;
 
 use super::AgentAdapter;
+use super::hook_program::hook_command;
 use super::mcp_tiers::{
     CBM_DESTRUCTIVE, CBM_MUTATION, CBM_READ_ONLY, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY,
     ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, McpTier, tier_action,
@@ -15,6 +16,7 @@ use crate::mcp::resolve::{ResolvedKind, ResolvedMcp};
 use crate::merge::MergedManifest;
 use crate::plugins::resolve::ResolvedMarketplace;
 use crate::util::{dedup, merge_json};
+use lsp_plugin::write_lsp_plugin;
 
 pub(crate) mod retired;
 mod seed;
@@ -23,31 +25,40 @@ pub(crate) mod version;
 
 #[cfg(test)]
 use seed::classify_claude_path;
+mod lsp_plugin;
 pub(crate) use seed::{apply_seeded_settings, seed_install_method, seed_status_line};
 pub(crate) use skill_copy::copy_dir_owner_only;
 
 /// Command the auto-emitted SessionStart hook runs to inject source config paths
 /// into agent context (#289). Outputs `hookSpecificOutput.additionalContext` JSON
 /// so the agent always knows where to edit config rather than touching the cache.
-const CONFIG_CONTEXT_COMMAND: &str = "llmenv config-context --engine claude_code";
+fn config_context_command() -> String {
+    hook_command("config-context --engine claude_code")
+}
 
 /// Command the auto-emitted PreToolUse hook runs to guard against writes to the
 /// managed cache directory (#289). Reads the Write/Edit/MultiEdit tool call from
 /// stdin and prints a redirection hint if the target is a cache path. Exits 0
 /// (fail-soft) so the write still proceeds; the hint keeps agents oriented.
-const CONFIG_GUARD_COMMAND: &str = "llmenv config-guard --engine claude_code";
+fn config_guard_command() -> String {
+    hook_command("config-guard --engine claude_code")
+}
 
 /// Command the auto-emitted throttle hooks run. Throttle hooks fire on
 /// PreToolUse and UserPromptSubmit to poll the usage backend and sleep a
 /// capped adaptive delay to avoid rate limits.
-const THROTTLE_COMMAND: &str = "llmenv throttle";
+fn throttle_command() -> String {
+    hook_command("throttle")
+}
 
 /// Prefix of the auto-emitted lifecycle/session-log hook commands. The full
-/// command is `HOOK_RUN_COMMAND <neutral_event>`, e.g.
+/// command is `hook_run_command() <neutral_event>`, e.g.
 /// `llmenv hook-run --engine claude_code session_start`. Dispatches ICM memory
 /// wake-up/store (#197/#228) and, per `session_log` config, the session-log
 /// file/transcript sinks (#382). Always fail-soft (exit 0).
-const HOOK_RUN_COMMAND: &str = "llmenv hook-run --engine claude_code";
+fn hook_run_command() -> String {
+    hook_command("hook-run --engine claude_code")
+}
 
 /// #317: fragment appended to CLAUDE.md when slippage control is enabled with
 /// compact_survival. Guides agent behavior after context compaction.
@@ -1164,85 +1175,6 @@ const DIAGNOSE_SKILL_CONTENT: &str = concat!(
     "- Add a regression guard if appropriate\n",
 );
 
-/// Renders `manifest.capabilities.lsp` into `skills/llmenv-lsp/.claude-plugin/plugin.json`.
-/// Returns the relative path written, or `None` if nothing rendered (mirrors how the
-/// Crush adapter omits its `lsp` key entirely when every server is disabled/skipped).
-///
-/// Claude Code's `lspServers` schema requires `extensionToLanguage` (file extension →
-/// language id). The neutral `filetypes` field (language ids only, e.g. `"rust"`) can't
-/// be reliably converted into that — a language id is often not its own extension
-/// (`rust` → `.rs`, `python` → `.py`) — so a server without `extension_to_language` set
-/// is skipped for Claude Code with a warning, the same "skip + warn loudly" pattern
-/// `CrushAdapter` uses for hooks it can't express, rather than a hard error that would
-/// break a bundle shared with an engine (Crush) that renders `filetypes` directly.
-/// `root_markers` and `timeout` have no Claude Code equivalent (a single `workspaceFolder`
-/// path and a startup-only `startupTimeout` respectively, not per-request) and are left
-/// unrendered rather than guessed at.
-fn write_lsp_plugin(
-    out: &Path,
-    servers: &[crate::config::LspServer],
-) -> anyhow::Result<Option<PathBuf>> {
-    let mut lsp_servers = serde_json::Map::new();
-    for srv in servers {
-        if srv.disabled {
-            continue;
-        }
-        if srv.extension_to_language.is_empty() {
-            eprintln!(
-                "warning: Claude Code requires an extensionToLanguage map for LSP servers — \
-                 skipping '{}' for Claude Code. Add capabilities.lsp[].extension_to_language \
-                 (e.g. {{\".rs\": \"rust\"}}) to enable it there.",
-                srv.name
-            );
-            continue;
-        }
-        let mut entry = serde_json::Map::new();
-        entry.insert("command".into(), json!(srv.command));
-        if !srv.args.is_empty() {
-            entry.insert("args".into(), json!(srv.args));
-        }
-        if !srv.env.is_empty() {
-            entry.insert("env".into(), json!(srv.env));
-        }
-        entry.insert(
-            "extensionToLanguage".into(),
-            json!(srv.extension_to_language),
-        );
-        if let Some(opts) = &srv.init_options {
-            let as_json = serde_json::to_value(opts).map_err(|err| {
-                anyhow::anyhow!(
-                    "LSP server '{}': failed to convert init_options to JSON: {err}",
-                    srv.name
-                )
-            })?;
-            entry.insert("initializationOptions".into(), as_json);
-        }
-        lsp_servers.insert(srv.name.clone(), serde_json::Value::Object(entry));
-    }
-
-    if lsp_servers.is_empty() {
-        return Ok(None);
-    }
-
-    let plugin_dir = out
-        .join("skills")
-        .join(LSP_PLUGIN_NAME)
-        .join(".claude-plugin");
-    create_dir_owner_only(&plugin_dir)?;
-    let manifest = json!({ "name": LSP_PLUGIN_NAME, "lspServers": lsp_servers });
-    let rel_path = PathBuf::from("skills")
-        .join(LSP_PLUGIN_NAME)
-        .join(".claude-plugin")
-        .join("plugin.json");
-    crate::paths::write_owner_only_atomic(
-        &plugin_dir.join("plugin.json"),
-        serde_json::to_string_pretty(&manifest)?.as_bytes(),
-    )
-    .with_context(|| format!("writing {}", rel_path.display()))?;
-
-    Ok(Some(rel_path))
-}
-
 /// SessionStart (#85): the hook object shape supports it; hash-comparison logic
 /// lives in the runtime hook script.
 fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Result<()> {
@@ -1334,7 +1266,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .entry("SessionStart".to_string())
         .or_default()
         .push(json!({
-            "hooks": [{ "type": "command", "command": CONFIG_CONTEXT_COMMAND }],
+            "hooks": [{ "type": "command", "command": config_context_command() }],
         }));
 
     // #289: warn the agent when it tries to write inside the managed cache dir.
@@ -1345,7 +1277,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .or_default()
         .push(json!({
             "matcher": "^(Write|Edit|MultiEdit)$",
-            "hooks": [{ "type": "command", "command": CONFIG_GUARD_COMMAND }],
+            "hooks": [{ "type": "command", "command": config_guard_command() }],
         }));
 
     // Tool-name matchers that have to reach `hook-run pre_tool_use`. Collected
@@ -1374,7 +1306,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("PostToolUse".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} post_tool_use") }],
+                "hooks": [{ "type": "command", "command": format!("{} post_tool_use", hook_run_command()) }],
             }));
     }
 
@@ -1454,7 +1386,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 .or_default()
                 .push(json!({
                     "matcher": matcher,
-                    "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} pre_tool_use") }],
+                    "hooks": [{ "type": "command", "command": format!("{} pre_tool_use", hook_run_command()) }],
                 }));
         }
     }
@@ -1465,13 +1397,13 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("PreToolUse".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{THROTTLE_COMMAND} pre-tool") }],
+                "hooks": [{ "type": "command", "command": format!("{} pre-tool", throttle_command()) }],
             }));
         hooks_by_event
             .entry("UserPromptSubmit".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{THROTTLE_COMMAND} prompt") }],
+                "hooks": [{ "type": "command", "command": format!("{} prompt", throttle_command()) }],
             }));
     }
 
@@ -1483,7 +1415,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry((*native_event).to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+                "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()) }],
             }));
     }
 
@@ -1499,7 +1431,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("UserPromptSubmit".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} user_prompt_submit") }],
+                "hooks": [{ "type": "command", "command": format!("{} user_prompt_submit", hook_run_command()) }],
             }));
     }
 
@@ -1515,7 +1447,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("UserPromptSubmit".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} turn_start") }],
+                "hooks": [{ "type": "command", "command": format!("{} turn_start", hook_run_command()) }],
             }));
     }
 
@@ -1533,7 +1465,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 .entry((*native_event).to_string())
                 .or_default()
                 .push(json!({
-                    "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()) }],
                 }));
         }
     }
@@ -1543,7 +1475,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .or_default()
             .push(json!({
                 "matcher": "^Agent$",
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} subagent_task") }],
+                "hooks": [{ "type": "command", "command": format!("{} subagent_task", hook_run_command()) }],
             }));
     }
 
@@ -1555,7 +1487,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
                 .entry((*native_event).to_string())
                 .or_default()
                 .push(json!({
-                    "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} {neutral_event}") }],
+                    "hooks": [{ "type": "command", "command": format!("{} {neutral_event}", hook_run_command()) }],
                 }));
         }
     } else if super::lifecycle_event_registered(manifest, "stop") {
@@ -1570,7 +1502,7 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
             .entry("Stop".to_string())
             .or_default()
             .push(json!({
-                "hooks": [{ "type": "command", "command": format!("{HOOK_RUN_COMMAND} stop") }],
+                "hooks": [{ "type": "command", "command": format!("{} stop", hook_run_command()) }],
             }));
     }
 
@@ -1584,8 +1516,8 @@ fn generate_settings_json(out: &Path, manifest: &MergedManifest) -> anyhow::Resu
         .and_then(|f| f.task_tracker.as_ref())
         .filter(|t| t.enabled)
     {
-        let post = format!("{HOOK_RUN_COMMAND} post_tool_use");
-        let pre = format!("{HOOK_RUN_COMMAND} pre_tool_use");
+        let post = format!("{} post_tool_use", hook_run_command());
+        let pre = format!("{} pre_tool_use", hook_run_command());
         let post_tools = unrouted_tools(
             hooks_by_event.get("PostToolUse"),
             &post,
@@ -2645,6 +2577,14 @@ fn apply_mcp_tier_permissions(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use crate::adapter::hook_program::hook_command;
+
+    /// True for a hook command that runs llmenv, whether it names llmenv by bare name or by the
+    /// absolute path that `hook_command` renders (#2956).
+    fn is_llmenv_command(cmd: &str) -> bool {
+        cmd.contains("llmenv ") || cmd.contains("llmenv' ")
+    }
+
     #[test]
     fn a_hooks_sidecar_reads_back_what_the_writer_wrote() {
         let dir = tempfile::tempdir().unwrap();
@@ -2679,16 +2619,16 @@ mod tests {
     use super::super::AgentAdapter;
     use super::{
         CBM_DESTRUCTIVE, CBM_MCP_PREFIX, CBM_MUTATION, CBM_READ_ONLY, CLAUDE_JSON_FILE,
-        CLAUDE_JSON_OWNED_SERVERS_FILE, CONFIG_CONTEXT_COMMAND, CONFIG_GUARD_COMMAND,
-        CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY, ClaudeCodeAdapter, HOOK_RUN_COMMAND,
-        ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY, LLMENV_OWNED_SETTINGS_KEYS,
-        MODELED_SETTINGS_KEYS, RENDERED_ENTRY_KEYS, build_mcp_servers, carry_runtime_keys,
-        classify_claude_path, dedup_hooks_doc, generate_installed_plugins_json,
-        generate_settings_json, is_hook_json, merge_mcp_into_claude_json,
-        normalize_deprecated_tool, overlay_native, permission_mode_str, plugin_install_paths_json,
-        purge_hooks_from_disabled_plugins, read_owned_servers, reconcile_settings,
-        reject_modeled_keys_in_catch_all, render_marketplace_source, render_permission_rule,
-        seed_install_method, seed_status_line, starting_permission_mode,
+        CLAUDE_JSON_OWNED_SERVERS_FILE, CTX_DESTRUCTIVE, CTX_MUTATION, CTX_READ_ONLY,
+        ClaudeCodeAdapter, ICM_DESTRUCTIVE, ICM_MUTATION, ICM_READ_ONLY,
+        LLMENV_OWNED_SETTINGS_KEYS, MODELED_SETTINGS_KEYS, RENDERED_ENTRY_KEYS, build_mcp_servers,
+        carry_runtime_keys, classify_claude_path, config_context_command, config_guard_command,
+        dedup_hooks_doc, generate_installed_plugins_json, generate_settings_json, hook_run_command,
+        is_hook_json, merge_mcp_into_claude_json, normalize_deprecated_tool, overlay_native,
+        permission_mode_str, plugin_install_paths_json, purge_hooks_from_disabled_plugins,
+        read_owned_servers, reconcile_settings, reject_modeled_keys_in_catch_all,
+        render_marketplace_source, render_permission_rule, seed_install_method, seed_status_line,
+        starting_permission_mode,
     };
     use crate::adapter::skills::{
         arb_distinct_resolved_mcps, arb_yaml_value, reject_hardcoded_config_path, validate_skills,
@@ -4054,18 +3994,18 @@ mod tests {
 
         assert!(
             hook_commands_for(&settings, "SessionStart")
-                .contains(&format!("{HOOK_RUN_COMMAND} session_start"))
+                .contains(&format!("{} session_start", hook_run_command()))
         );
         assert!(
             hook_commands_for(&settings, "SessionEnd")
-                .contains(&format!("{HOOK_RUN_COMMAND} session_end"))
+                .contains(&format!("{} session_end", hook_run_command()))
         );
         // PreToolUse now always has a hook-run command for the read-once hook
         // (#318 unconditional registration).
         assert!(
             hook_commands_for(&settings, "PreToolUse")
                 .iter()
-                .any(|c| c.starts_with(HOOK_RUN_COMMAND)),
+                .any(|c| c.starts_with(&hook_run_command())),
             "PreToolUse must carry a hook-run command for read-once"
         );
         for event in [
@@ -4079,7 +4019,7 @@ mod tests {
             assert!(
                 hook_commands_for(&settings, event)
                     .iter()
-                    .all(|c| !c.starts_with(HOOK_RUN_COMMAND)),
+                    .all(|c| !c.starts_with(&hook_run_command())),
                 "{event} must not carry a hook-run command when all sinks are disabled; got {:?}",
                 hook_commands_for(&settings, event)
             );
@@ -4114,7 +4054,7 @@ mod tests {
         ] {
             assert_eq!(
                 hook_commands_for(&settings, event),
-                [format!("{HOOK_RUN_COMMAND} {neutral}")],
+                [format!("{} {neutral}", hook_run_command())],
                 "{event}"
             );
         }
@@ -4124,7 +4064,8 @@ mod tests {
             .iter()
             .any(|entry| {
                 entry["matcher"] == "^Agent$"
-                    && entry["hooks"][0]["command"] == format!("{HOOK_RUN_COMMAND} subagent_task")
+                    && entry["hooks"][0]["command"]
+                        == format!("{} subagent_task", hook_run_command())
             });
         assert!(
             agent_matcher,
@@ -4165,11 +4106,11 @@ mod tests {
         }
         assert!(
             !hook_commands_for(&settings, "PreToolUse")
-                .contains(&format!("{HOOK_RUN_COMMAND} subagent_task"))
+                .contains(&format!("{} subagent_task", hook_run_command()))
         );
         assert!(
             hook_commands_for(&settings, "UserPromptSubmit")
-                .contains(&format!("{HOOK_RUN_COMMAND} turn_start")),
+                .contains(&format!("{} turn_start", hook_run_command())),
             "stateless recall still runs"
         );
     }
@@ -4198,7 +4139,7 @@ mod tests {
         let settings = render_settings_for_test(&manifest);
         assert!(
             hook_commands_for(&settings, "UserPromptSubmit")
-                .contains(&format!("{HOOK_RUN_COMMAND} turn_start"))
+                .contains(&format!("{} turn_start", hook_run_command()))
         );
     }
 
@@ -4239,7 +4180,7 @@ mod tests {
             ("SubagentStop", "subagent_stop"),
             ("PreCompact", "pre_compact"),
         ] {
-            let expected = format!("{HOOK_RUN_COMMAND} {neutral}");
+            let expected = format!("{} {neutral}", hook_run_command());
             assert!(
                 hook_commands_for(&settings, event).contains(&expected),
                 "{event} missing {expected:?}; got {:?}",
@@ -4249,7 +4190,7 @@ mod tests {
         // Baseline hooks remain present too.
         assert!(
             hook_commands_for(&settings, "SessionStart")
-                .contains(&format!("{HOOK_RUN_COMMAND} session_start"))
+                .contains(&format!("{} session_start", hook_run_command()))
         );
     }
 
@@ -6507,7 +6448,7 @@ mod tests {
         assert_eq!(json["statusLine"]["type"], "command");
         assert_eq!(
             json["statusLine"]["command"],
-            "llmenv statusline --color always"
+            hook_command("statusline --color always")
         );
         assert_eq!(json["otherKey"], "value");
     }
@@ -7042,7 +6983,7 @@ mod tests {
         let settings = render_settings_for_test(&manifest);
 
         for cmd in hook_commands_for(&settings, "SessionStart") {
-            if cmd.starts_with("llmenv ") {
+            if is_llmenv_command(&cmd) {
                 assert!(
                     cmd.contains("--engine claude_code"),
                     "SessionStart command missing --engine flag: {cmd:?}"
@@ -7050,7 +6991,7 @@ mod tests {
             }
         }
         for cmd in hook_commands_for(&settings, "PreToolUse") {
-            if cmd.starts_with("llmenv ") {
+            if is_llmenv_command(&cmd) {
                 assert!(
                     cmd.contains("--engine claude_code"),
                     "PreToolUse command missing --engine flag: {cmd:?}"
@@ -7147,7 +7088,7 @@ mod tests {
         assert!(entries[0].get("matcher").is_none());
         assert_eq!(
             hook_commands_for(&settings, "PostModelSwitch"),
-            [format!("{HOOK_RUN_COMMAND} post_model_switch")]
+            [format!("{} post_model_switch", hook_run_command())]
         );
         assert!(
             ClaudeCodeAdapter
@@ -7424,24 +7365,27 @@ mod tests {
     #[test]
     fn config_context_command_carries_engine_flag() {
         assert!(
-            CONFIG_CONTEXT_COMMAND.contains("--engine claude_code"),
-            "CONFIG_CONTEXT_COMMAND must carry --engine flag: {CONFIG_CONTEXT_COMMAND:?}"
+            config_context_command().contains("--engine claude_code"),
+            "config_context_command must carry --engine flag: {:?}",
+            config_context_command()
         );
     }
 
     #[test]
     fn config_guard_command_carries_engine_flag() {
         assert!(
-            CONFIG_GUARD_COMMAND.contains("--engine claude_code"),
-            "CONFIG_GUARD_COMMAND must carry --engine flag: {CONFIG_GUARD_COMMAND:?}"
+            config_guard_command().contains("--engine claude_code"),
+            "config_guard_command must carry --engine flag: {:?}",
+            config_guard_command()
         );
     }
 
     #[test]
     fn hook_run_command_carries_engine_flag() {
         assert!(
-            HOOK_RUN_COMMAND.contains("--engine claude_code"),
-            "HOOK_RUN_COMMAND must carry --engine flag: {HOOK_RUN_COMMAND:?}"
+            hook_run_command().contains("--engine claude_code"),
+            "hook_run_command must carry --engine flag: {:?}",
+            hook_run_command()
         );
     }
 

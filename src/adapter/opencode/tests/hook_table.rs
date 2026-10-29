@@ -1,6 +1,7 @@
 //! The hook table that materialize writes to `plugin/llmenv-hooks.json` (#2840).
 
 use super::*;
+use crate::adapter::hook_program::hook_command;
 
 #[test]
 fn materialize_hook_unsupported_event_skipped() {
@@ -126,7 +127,7 @@ fn the_commit_gate_runs_pre_tool_use_for_bash() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|h| h["command"] == "llmenv hook-run pre_tool_use --engine opencode")
+            .find(|h| h["command"] == hook_command("hook-run pre_tool_use --engine opencode"))
             .cloned()
     };
     // Session logging also registers `pre_tool_use` for every call, so the gate rides on that one
