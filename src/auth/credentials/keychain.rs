@@ -24,26 +24,39 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(any(target_os = "macos", test))]
 fn timeout_error(operation: &str, service: &str, timeout: Duration) -> anyhow::Error {
     anyhow::anyhow!(
-        "`security {operation}` for keychain item {service} gave no answer within {} s. Fix: \
+        "`security {operation}` for keychain item {service} gave no answer within {} s, so the outcome is unknown. Fix: \
          unlock the login keychain (`security unlock-keychain`), answer any macOS keychain \
          prompt, then run the command again.",
         timeout.as_secs()
     )
 }
 
+/// Why a call run by [`with_deadline`] gave no answer.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoAnswer {
+    /// The call was still running at the deadline.
+    TimedOut,
+    /// The worker ended before it sent an answer, for example after a panic (#3067 review).
+    WorkerLost,
+}
+
 /// Run `call` on a worker thread for at most `timeout`. A call past the deadline keeps its thread,
-/// because the Security framework gives no way to stop it, and the caller gets the timeout error.
+/// because the Security framework gives no way to stop it, and the caller gets [`NoAnswer`].
 #[cfg(any(target_os = "macos", test))]
 fn with_deadline<T: Send + 'static>(
     timeout: Duration,
     call: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
+) -> Result<T, NoAnswer> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         // The receiver is gone after a timeout, so a late answer has no reader.
         let _ = tx.send(call());
     });
-    rx.recv_timeout(timeout).ok()
+    rx.recv_timeout(timeout).map_err(|e| match e {
+        std::sync::mpsc::RecvTimeoutError::Timeout => NoAnswer::TimedOut,
+        std::sync::mpsc::RecvTimeoutError::Disconnected => NoAnswer::WorkerLost,
+    })
 }
 
 /// Run one `security` call with a deadline. A timeout names the operation, the keychain item, and
@@ -296,11 +309,26 @@ pub(super) fn keychain_write(config_dir: &Path, creds: &super::Credentials) -> a
     let blob = creds.to_blob()?;
     // A locked keychain blocks the write as it blocks the read, and export runs this (#2892).
     let item = service.clone();
-    let written = with_deadline(WRITE_TIMEOUT, move || {
+    let answer = with_deadline(WRITE_TIMEOUT, move || {
         security_framework::passwords::set_generic_password(&item, &account, blob.as_bytes())
             .map_err(|e| e.to_string())
-    })
-    .ok_or_else(|| timeout_error("add-generic-password", &service, WRITE_TIMEOUT))?;
+    });
+    let written = match answer {
+        Ok(written) => written,
+        Err(NoAnswer::TimedOut) => {
+            return Err(timeout_error(
+                "add-generic-password",
+                &service,
+                WRITE_TIMEOUT,
+            ));
+        }
+        Err(NoAnswer::WorkerLost) => {
+            anyhow::bail!(
+                "the keychain write for service {service} ended without an answer, so it may not \
+                 be stored. Fix: run the command again."
+            );
+        }
+    };
     written.map_err(|e| anyhow::anyhow!("writing keychain item for service {service}: {e}"))
 }
 
@@ -335,8 +363,15 @@ mod tests {
             std::thread::sleep(Duration::from_secs(5));
             1
         });
-        assert_eq!(slow, None);
-        assert_eq!(with_deadline(Duration::from_secs(5), || 2), Some(2));
+        assert_eq!(slow, Err(NoAnswer::TimedOut));
+        assert_eq!(with_deadline(Duration::from_secs(5), || 2), Ok(2));
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "test code: the worker must panic")]
+    fn a_worker_that_panics_is_not_reported_as_a_timeout() {
+        let lost = with_deadline(Duration::from_secs(5), || -> u8 { panic!("worker failed") });
+        assert_eq!(lost, Err(NoAnswer::WorkerLost));
     }
 
     #[test]
@@ -457,6 +492,34 @@ mod tests {
                 err.contains("LLMENV_SECURITY_BIN") && err.contains("absolute"),
                 "{err}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::parse_keychain_blob;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// An error from an unusable keychain item never quotes the token it was given.
+        #[test]
+        fn a_bad_item_error_never_quotes_the_token(
+            token in "[A-Za-z0-9]{12,40}",
+            cut in 0usize..200,
+        ) {
+            let full = format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}"}}}}"#);
+            // A truncated item is not valid JSON, so it must fail.
+            let raw: String = full.chars().take(cut).collect();
+            if let Err(err) = parse_keychain_blob("svc-z", &raw) {
+                prop_assert!(!format!("{err:#}").contains(&token), "{err:#}");
+            }
+        }
+
+        /// Arbitrary item text never panics.
+        #[test]
+        fn arbitrary_item_text_never_panics(raw in ".{0,120}") {
+            let _ = parse_keychain_blob("svc-z", &raw);
         }
     }
 }
