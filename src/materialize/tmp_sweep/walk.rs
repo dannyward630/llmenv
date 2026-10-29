@@ -83,9 +83,9 @@ pub(super) fn judge_entry(
             return;
         }
     };
-    // A future mtime means the clock moved. Keep the entry, because a removal on a bad
-    // clock is not reversible.
-    if modified > now || !is_expired(now, modified, older_than, path) {
+    // `is_expired` keeps a future mtime and logs the skew. A removal on a bad clock is not
+    // reversible, so the entry must reach that check.
+    if !is_expired(now, modified, older_than, path) {
         scan.kept += 1;
     } else {
         scan.stale.push(Stale {
@@ -113,4 +113,37 @@ pub(super) fn record_failure(path: &Path, error: impl std::fmt::Display, scan: &
         "state/tmp sweep: cannot read entry; skipping"
     );
     scan.failed.push(path.to_path_buf());
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: a failed setup step should abort the test"
+)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+    use crate::materialize::tmp_sweep::tests::DAY;
+    use crate::test_log_capture::capture_logs;
+
+    #[test]
+    fn a_future_mtime_entry_is_kept_and_its_clock_skew_is_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("future.txt");
+        std::fs::write(&file, b"f").unwrap();
+        File::open(&file)
+            .unwrap()
+            .set_modified(SystemTime::now() + DAY)
+            .unwrap();
+
+        let mut scan = Scan::default();
+        let logs = capture_logs(|| {
+            judge_entry(&file, false, DAY * 7, SystemTime::now(), &mut scan);
+        });
+
+        assert!(scan.stale.is_empty(), "a future mtime must not be stale");
+        assert_eq!(scan.kept, 1);
+        assert!(logs.contains("clock skew"), "skew not logged: {logs}");
+    }
 }
