@@ -79,6 +79,10 @@ pub(super) fn cbm_use(config: &Config, dir: &Path) -> CacheUse {
         Err(e) if !config.bundle.is_empty() => CacheUse::Unknown(format!(
             "cannot resolve the config folder, so the index_path of each bundle is unknown: {e:#}"
         )),
-        Err(_) => cache_use(config, Path::new(""), dir),
+        Err(e) => {
+            // No bundle is configured, so no index_path needs the folder. The error is logged.
+            tracing::debug!("bundles folder unknown, but no bundle needs it: {e:#}");
+            cache_use(config, Path::new(""), dir)
+        }
     }
 }

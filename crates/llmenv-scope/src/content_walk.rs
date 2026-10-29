@@ -78,13 +78,8 @@ pub(crate) fn matches_content_all<'a>(
             continue;
         }
         let Ok(relative) = entry.path().strip_prefix(cwd) else {
-            // walkdir only yields paths under root, so this is a walkdir bug
-            debug_assert!(
-                false,
-                "walkdir path {:?} not under root {:?}",
-                entry.path(),
-                cwd,
-            );
+            // walkdir only yields paths under root, so this is a walkdir bug. It logs and skips in
+            // every build, so a debug build does not behave differently from a release build.
             tracing::warn!(
                 path = ?entry.path(),
                 cwd = ?cwd,

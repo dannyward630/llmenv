@@ -1585,7 +1585,7 @@ placeholder renders the count with no staleness indication at all.
 | `scopes` | `{tags}` | `dev · rust` | `tags` (tag list, joined with ` · `; `$LLMENV_EXTRA_TAGS` is live, every other source is from the snapshot) |
 | `plugins` | `🔌 {total}` | `🔌 12` | `total`, `errors` (fully live-recomputed, not snapshot-sourced) |
 | `mcps` | `MCP {total}{stale_icon}` | `MCP 12` / `MCP 12 ⚙️` | `total`, `errors` (both snapshot-sourced), `stale_icon` (empty unless a live tag has drifted from the snapshot, resolves from the icon set like `config_stale`'s) |
-| `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` |
+| `icm` | `🧠 {memories}` | `🧠 142` | `memories`, `concepts` (`concepts` shows `?` when the ICM stats have no Topics line, added in v3.14.0) |
 | `cache` | `{prunable}` | `15 MB` | `prunable` (humanized), `prunable_raw` (bytes). Both show `?` when the size cannot be read (added in v3.14.0) |
 | `config_stale` | `{stale_icon} stale` | `⚙️ stale` | `stale_icon` (resolves from the icon set, gear emoji by default — a `statusline.icons.config_stale` override applies even without a custom `format`). Config out of date — relaunch to reload. Renders empty when the config isn't stale — there's no "fresh" variant |
 | `throttle` | `{raw}{stale_icon}` | `umans: 45s` / `umans: 45s ⚙️` | `raw` (`"<backend>: <cooldown_secs>s"`, snapshot-sourced), `cooldown_secs`, `reason` (the backend name), `stale_icon` (same drift check as `mcps`'s) |
