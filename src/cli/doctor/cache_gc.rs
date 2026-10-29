@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::materialize::cache::GcReport;
-use crate::materialize::{cache, tmp_sweep};
+use crate::materialize::tmp_sweep;
 use crate::paths;
 
 /// How the sweeps print their result, and whether they remove anything.
@@ -57,12 +57,13 @@ impl GcOutput<'_> {
     }
 }
 
+mod cache_sweep;
 mod credentials;
 mod index_use;
 mod session_rotation;
 mod state_gate;
+use cache_sweep::sweep_cache_root;
 pub(in crate::cli) use credentials::forget_credentials_for;
-use credentials::report_credential_drops;
 #[cfg(test)]
 use index_use::cache_use;
 use index_use::{CacheUse, cbm_use};
@@ -84,24 +85,7 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
         );
         return 0;
     };
-    let mut failures = match std::fs::metadata(cache_dir) {
-        Ok(meta) if meta.permissions().readonly() => {
-            eprintln!(
-                "{} GC of the cache skipped: cache directory is read-only",
-                out.warn
-            );
-            1
-        }
-        Ok(_) => sweep_cache(cache_dir, config, retention, out),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-        Err(e) => {
-            eprintln!(
-                "{} GC of the cache skipped: cannot stat cache directory: {e:#}",
-                out.warn
-            );
-            1
-        }
-    };
+    let mut failures = sweep_cache_root(cache_dir, config, retention, out);
     match paths::state_dir() {
         Ok(state_dir) => failures += sweep_state(&state_dir, config, retention, out),
         Err(e) => {
@@ -114,26 +98,6 @@ pub(in crate::cli) fn run(cache_dir: &Path, config: &Config, out: GcOutput<'_>) 
         }
     }
     failures
-}
-
-/// Sweep the hashed cache under `cache_dir`. Returns the count of failed entries.
-fn sweep_cache(cache_dir: &Path, config: &Config, retention: Duration, out: GcOutput<'_>) -> usize {
-    match cache::gc(cache_dir, retention, config.cache.hashing, out.dry_run) {
-        Ok(report) => {
-            out.report("", &report);
-            // A dry run deletes nothing, so it drops no credentials and has none to fail (#3073).
-            let credential_failures = if out.dry_run {
-                0
-            } else {
-                report_credential_drops(&report.removed, out)
-            };
-            report.failed.len() + credential_failures
-        }
-        Err(e) => {
-            eprintln!("{} GC failed: {e:#}", out.warn);
-            1
-        }
-    }
 }
 
 /// Sweep the folders under `state_dir`: `state/tmp`, the session-log rotations, and the old
@@ -246,7 +210,8 @@ mod tests {
     use std::fs::File;
     use std::time::{Duration, SystemTime};
 
-    use super::{GcOutput, sweep_cache, sweep_state};
+    use super::cache_sweep::{sweep_cache, sweep_cache_root};
+    use super::{GcOutput, sweep_state};
     use crate::config::Config;
 
     const DAY: Duration = Duration::from_secs(86_400);
@@ -380,6 +345,24 @@ mod tests {
         let failures = sweep_cache(cache.path(), &Config::default(), DAY * 7, OUT);
         assert!(entry.exists(), "a fresh cache entry was removed");
         assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn a_symlink_cache_root_is_refused_and_a_dangling_one_is_too() {
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("real");
+        std::fs::create_dir(&target).unwrap();
+        let live = base.path().join("live-link");
+        std::os::unix::fs::symlink(&target, &live).unwrap();
+        let dangling = base.path().join("dangling-link");
+        std::os::unix::fs::symlink(base.path().join("absent"), &dangling).unwrap();
+        for link in [&live, &dangling] {
+            let failures = sweep_cache_root(link, &Config::default(), DAY * 7, OUT);
+            assert_eq!(
+                failures, 1,
+                "a symlink root must count as a failure: {link:?}"
+            );
+        }
     }
 
     #[test]

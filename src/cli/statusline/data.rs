@@ -49,7 +49,8 @@ pub struct CountData {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct IcmData {
     pub memories: u64,
-    pub concepts: u64,
+    /// `None` when the stats text has no Topics line. That count is unknown, not zero.
+    pub concepts: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

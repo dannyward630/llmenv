@@ -16,6 +16,8 @@ mod hook_command;
 use hook_command::run_doctor_hook_command;
 mod cleartext;
 mod instruction_size;
+mod marketplace_names;
+use marketplace_names::{report_declared_names, unused_marketplaces};
 mod marketplace_pins;
 mod mcp_text;
 mod network;
@@ -212,24 +214,6 @@ fn bundles_with_missing_dirs<'a>(bundles: &'a [Bundle], bundles_dir: &Path) -> V
         .iter()
         .filter(|b| !bundles_dir.join(&b.name).is_dir())
         .map(|b| b.name.as_str())
-        .collect()
-}
-
-/// Returns marketplace names defined in `config` that no plugin collection references.
-fn unused_marketplaces(config: &Config) -> Vec<&str> {
-    use crate::config::split_plugin_ref;
-    let referenced: HashSet<&str> = config
-        .plugin_collection
-        .iter()
-        .flat_map(|c| c.plugins.iter())
-        .filter_map(|p| split_plugin_ref(p))
-        .map(|(m, _)| m)
-        .collect();
-    config
-        .marketplace
-        .iter()
-        .filter(|m| !referenced.contains(m.name.as_str()))
-        .map(|m| m.name.as_str())
         .collect()
 }
 
@@ -1558,6 +1542,7 @@ pub(super) fn run_doctor(
     }
 
     marketplace_pins::report_pinned_marketplaces(&config, &cache_dir, &warn);
+    report_declared_names(&config, &cache_dir, &warn);
 
     report_credential_cache(&cache_dir, &pass, &info, &warn);
 

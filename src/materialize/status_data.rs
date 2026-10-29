@@ -623,19 +623,19 @@ mod tests {
             result,
             Some(IcmData {
                 memories: 142,
-                concepts: 47
+                concepts: Some(47)
             })
         );
     }
 
     #[test]
-    fn parse_icm_stats_defaults_concepts_to_zero_when_absent() {
+    fn parse_icm_stats_leaves_concepts_unknown_when_absent() {
         let result = parse_icm_stats("Memories: 10\n");
         assert_eq!(
             result,
             Some(IcmData {
                 memories: 10,
-                concepts: 0
+                concepts: None
             })
         );
     }
@@ -653,7 +653,7 @@ mod tests {
     proptest! {
         /// Roundtrip: any `memories`/`concepts` pair formatted as the real
         /// `icm_memory_stats` text response must parse back to the same
-        /// `IcmData`, with `concepts` defaulting to 0 when its "Topics" line
+        /// `IcmData`, with `concepts` unknown (`None`) when its "Topics" line
         /// is omitted.
         #[test]
         fn parse_icm_stats_roundtrips_arbitrary_values(
@@ -669,7 +669,7 @@ mod tests {
                 result,
                 Some(IcmData {
                     memories,
-                    concepts: concepts.unwrap_or(0),
+                    concepts,
                 })
             );
         }

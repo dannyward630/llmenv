@@ -421,6 +421,11 @@ The age-based sweeps remove:
 - Old cache entries.
   On macOS this also drops the keychain credential item of each cache folder that it deletes.
   The match is by folder path, so your default `~/.claude` login is never affected.
+- Marketplace clones under `<cache_dir>/marketplaces/` that no config entry names (added in v3.14.0).
+  A plugin reference, and the context-mode marketplace, keep their clone.
+  `--dry-run` lists the clones it would remove.
+- If `cache_dir` is itself a symlink, `clean` skips the cache sweep and names the real folder to set (added in v3.14.0).
+  It does not follow the link, so it never removes entries under a link target.
 - Old entries in the state temp folder, `state/tmp`, which `TMPDIR` points at.
   An entry that a process holds open is kept.
 - Old session-log rotations.

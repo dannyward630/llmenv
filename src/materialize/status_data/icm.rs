@@ -47,13 +47,13 @@ pub(super) fn collect_icm() -> Option<IcmData> {
 ///
 /// The `icm_memory_stats` MCP tool has no structured-output mode — it always
 /// returns a human-formatted text block (`"Memories: 2880\nTopics: 155\n..."`),
-/// never JSON. `memories` is required; `concepts` (sourced from the tool's
-/// "Topics" line — its closest analogous count) defaults to 0 when the line
-/// is absent, so an older/trimmed stats response still yields a usable count.
+/// never JSON. `memories` is required. `concepts` (sourced from the tool's
+/// "Topics" line — its closest analogous count) is `None` when the line is
+/// absent, so an older or trimmed stats response shows an unknown count, not zero.
 pub(super) fn parse_icm_stats(raw: &str) -> Option<IcmData> {
     Some(IcmData {
         memories: extract_stat_line(raw, "Memories")?,
-        concepts: extract_stat_line(raw, "Topics").unwrap_or(0),
+        concepts: extract_stat_line(raw, "Topics"),
     })
 }
 

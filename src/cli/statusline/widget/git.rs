@@ -111,8 +111,12 @@ pub(super) fn git_branch(dir: &Path) -> Result<Option<String>, String> {
 pub(super) fn find_git_dir(start: &Path) -> Result<Option<PathBuf>, String> {
     for dir in start.ancestors() {
         let dot_git = dir.join(".git");
-        let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
-            continue;
+        let meta = match std::fs::symlink_metadata(&dot_git) {
+            Ok(meta) => meta,
+            // Only a missing `.git` means this folder has no repository. Any other error is
+            // returned, so an unreadable repository is not read as an ancestor's repository.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("cannot read {}: {e}", dot_git.display())),
         };
         // git accepts a `.git` link to a git directory, so a link is followed for that check.
         let is_dir = meta.is_dir() || (meta.is_symlink() && dot_git.is_dir());
@@ -139,6 +143,22 @@ pub(super) fn find_git_dir(start: &Path) -> Result<Option<PathBuf>, String> {
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreadable_parent_is_an_error_not_an_ancestor_repository() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        let inner = locked.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = find_git_dir(&inner);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            result.is_err(),
+            "an unreadable path must be an error: {result:?}"
+        );
+    }
 
     fn mkfifo(path: &Path) {
         let made = std::process::Command::new("mkfifo")

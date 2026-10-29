@@ -47,6 +47,10 @@ HEAD is mixed into the materialized scope's content hash, so a marketplace updat
 re-renders the agent config. Local-path marketplaces are content-hashed by their
 current state and need no sync.
 
+Claude Code registers a clone under the name in its `marketplace.json`, not under the config key.
+`llmenv doctor` warns when the two differ, and the plugins of that marketplace do not load until they match (added in v3.14.0).
+Rename the config key to the manifest name.
+
 ### Plugin sources in a marketplace manifest
 
 (added in v3.12.0)

@@ -44,7 +44,9 @@ pub(super) const GH_LOGIN_SIGNS: [&str; 3] =
 /// branch name can hold a login word. Any other exit, such as a network or rate-limit error, is
 /// a failure, so it cannot look like "no open PR" (#2821).
 pub(super) fn classify_gh_exit(status: std::process::ExitStatus, stderr: &str) -> PrLookup {
-    let first_line = stderr.lines().next().unwrap_or("");
+    // The same scrub as git's failure text strips control bytes and URL credentials before logging.
+    let detail = llmenv_git::git_failure_detail(stderr.as_bytes(), &[], status);
+    let first_line = detail.lines().next().unwrap_or("");
     let lowered = stderr.to_ascii_lowercase();
     if GH_NO_PR_SIGNS.iter().any(|sign| lowered.contains(sign)) {
         tracing::debug!("gh pr view exited {status}, read as no PR: {first_line}");
@@ -64,6 +66,25 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
 
     use super::*;
+
+    #[test]
+    fn a_failed_gh_call_logs_its_stderr_without_credentials_or_escapes() {
+        // An OSC sequence (ESC ]) is one the logger never writes, so its presence means the raw
+        // stderr reached the log. The logger's own colors use ESC [ and do not count.
+        let stderr = "error: https://user:hunter2@example.com/repo failed\u{1b}]0;title\u{7} red";
+        let logs = crate::test_log_capture::capture_logs(|| {
+            let _ = classify_gh_exit(exit_one(), stderr);
+        });
+        assert!(
+            logs.contains("failed"),
+            "the message was not logged: {logs}"
+        );
+        assert!(!logs.contains("hunter2"), "a credential was logged: {logs}");
+        assert!(
+            !logs.contains("\u{1b}]"),
+            "an OSC escape was logged: {logs}"
+        );
+    }
 
     fn exit_one() -> std::process::ExitStatus {
         std::process::ExitStatus::from_raw(1 << 8)
