@@ -77,6 +77,13 @@
       "enabled": false,
     },
     {
+      // release/3.x ships the patch releases, so its updates go first. All bases
+      // share one queue under prConcurrentLimit, and main is processed first.
+      "description": "Create release/3.x update PRs before other bases",
+      "matchBaseBranches": ["release/3.x"],
+      "prPriority": 5,
+    },
+    {
       "description": "Automerge every non-major update once its branch is green",
       "matchUpdateTypes": ["minor", "patch", "pin", "digest", "lockFileMaintenance"],
       "automerge": true,
