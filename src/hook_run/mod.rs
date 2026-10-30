@@ -1406,21 +1406,32 @@ fn run_inner(
         chunk = apply_memory_config_defaults(chunk, settings.as_ref());
         storage_chunk = apply_memory_config_defaults(storage_chunk, settings.as_ref());
         // A failed project lookup skips this event's memory work, and the agent is told why (#2688).
-        let (wake, memory_notice) = match wake_args(
-            event,
-            settings.as_ref(),
-            stdin_payload,
-            &env.cwd,
-            claude_session_id,
-        ) {
-            Ok(args) => (args, None),
-            Err(e) => {
-                tracing::error!("memory skipped for {event}: {e:#}");
-                let args = WakeUpArgs {
-                    max_tokens: settings.as_ref().and_then(|s| s.wakeup_max_tokens),
+        let (wake, memory_notice) = if resolved_client.is_none() {
+            // No backend resolved, so no memory call reads the project, and the lookup runs git.
+            (
+                WakeUpArgs {
+                    max_tokens: None,
                     project: None,
-                };
-                (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
+                },
+                None,
+            )
+        } else {
+            match wake_args(
+                event,
+                settings.as_ref(),
+                stdin_payload,
+                &env.cwd,
+                claude_session_id,
+            ) {
+                Ok(args) => (args, None),
+                Err(e) => {
+                    tracing::error!("memory skipped for {event}: {e:#}");
+                    let args = WakeUpArgs {
+                        max_tokens: settings.as_ref().and_then(|s| s.wakeup_max_tokens),
+                        project: None,
+                    };
+                    (args, Some(format!("llmenv: memory {event} skipped: {e:#}")))
+                }
             }
         };
         let memory_skipped = memory_notice.is_some();
