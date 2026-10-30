@@ -9,7 +9,9 @@ use std::sync::{Mutex, PoisonError};
 
 use llmenv_paths::{create_dir_owner_only, state_dir};
 
-use crate::session_log::rotation::{MAX_BYTES, rotate_if_full, rotation_marker};
+use crate::session_log::rotation::{
+    MAX_BYTES, rotate_if_full, rotation_failed_marker, rotation_marker,
+};
 
 /// Default file-sink path: `<state_dir>/session-log.jsonl`.
 ///
@@ -57,6 +59,8 @@ static REPORTED_FAILURES: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new())
 
 /// True on the first append failure for `path` in this process.
 fn first_failure(path: &Path) -> bool {
+    // A panic cannot leave the set half-changed, because `insert` is its only write. So a
+    // poisoned lock holds a valid set, and the sink uses it.
     REPORTED_FAILURES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -83,8 +87,7 @@ impl FileSink {
         let Err(e) = self.try_append(line) else {
             return;
         };
-        // Error level: the default filter hides a debug, and the lost event leaves no trace.
-        // A persistent failure such as a symlinked path fails on every event, so only the
+        // Error level: the lost event leaves no other trace. A persistent failure such as a symlinked path fails on every event, so only the
         // first one is shown (#3136).
         if first_failure(&self.path) {
             tracing::error!(
@@ -106,16 +109,15 @@ impl FileSink {
         }
         // A failed rotation must not stop logging. The event goes to the active file, and the
         // next append tries the rotation again.
-        let rotated = match rotate_if_full(&self.path, MAX_BYTES) {
-            Ok(rotated) => rotated,
+        let (rotated, rotation_error) = match rotate_if_full(&self.path, MAX_BYTES) {
+            Ok(rotated) => (rotated, None),
             Err(e) => {
-                // Error level: the default filter hides a warn (#2657).
                 tracing::error!(
                     path = %self.path.display(),
                     error = %e,
                     "session log rotation failed; appending to the active file"
                 );
-                None
+                (None, Some(e))
             }
         };
         let mut opts = OpenOptions::new();
@@ -139,6 +141,12 @@ impl FileSink {
         }
         if let Some(name) = rotated {
             f.write_all(rotation_marker(&name).as_bytes())?;
+            f.write_all(b"\n")?;
+        }
+        // The layer drops the error event above while it writes to this file, so the file
+        // records the failure itself.
+        if let Some(e) = rotation_error {
+            f.write_all(rotation_failed_marker(&e).as_bytes())?;
             f.write_all(b"\n")?;
         }
         f.write_all(line.as_bytes())?;
@@ -240,6 +248,13 @@ mod tests {
         FileSink::new(path.clone()).append("{\"after\":1}");
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.ends_with("{\"after\":1}\n"), "the event was lost");
+        // The sparse fixture has no newline, so the marker shares the last line of NUL bytes.
+        let marker = body.find(r#"{"error":"#).unwrap();
+        let event = body.rfind(r#"{"after":1}"#).unwrap();
+        assert!(marker < event, "the marker must come before the event");
+        let line = body[marker..event].trim_end();
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["llmenv_log"], "rotation_failed", "{line}");
     }
     #[test]
     fn a_configured_tilde_path_is_expanded() {
@@ -261,6 +276,45 @@ mod tests {
         let got =
             resolve_file_path_with(None, || Ok(PathBuf::from("/state/session-log.jsonl"))).unwrap();
         assert_eq!(got, PathBuf::from("/state/session-log.jsonl"));
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// An absolute configured path comes back unchanged, and the default is not read.
+            #[test]
+            fn an_absolute_configured_path_is_kept(rest in "[a-zA-Z0-9_./-]{0,40}") {
+                let raw = format!("/{rest}");
+                let got = resolve_file_path_with(Some(&raw), || unreachable!()).unwrap();
+                prop_assert_eq!(got, PathBuf::from(&raw));
+            }
+
+            /// A relative configured path, the empty path included, is an error that names the key.
+            #[test]
+            fn a_relative_configured_path_is_an_error(raw in "([a-zA-Z0-9_.-][a-zA-Z0-9_./-]{0,30})?") {
+                prop_assume!(!raw.starts_with('~'));
+                let err = resolve_file_path_with(Some(&raw), || unreachable!()).unwrap_err();
+                let msg = format!("{err:#}");
+                prop_assert!(msg.contains("session_log.file.path"), "{}", msg);
+            }
+
+            /// Each distinct path reports once, and every later failure for it does not.
+            #[test]
+            fn each_path_reports_its_first_failure_only(
+                names in proptest::collection::btree_set("[a-z]{1,8}", 1..6),
+                repeats in 1usize..4,
+            ) {
+                let dir = tempfile::tempdir().unwrap();
+                let paths: Vec<PathBuf> = names.iter().map(|n| dir.path().join(n)).collect();
+                let firsts = paths.iter().filter(|p| first_failure(p)).count();
+                prop_assert_eq!(firsts, paths.len());
+                for _ in 0..repeats {
+                    prop_assert!(paths.iter().all(|p| !first_failure(p)));
+                }
+            }
+        }
     }
 
     // #3136: a sink that keeps failing reports the failure once, not once per event.

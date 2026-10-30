@@ -44,7 +44,7 @@ fn resolve_file_sink_path(
     crate::session_log::file_sink::resolve_file_path_with(cfg.file_path(), default)
         .inspect_err(|e| {
             warn!(
-                "session_log: file sink disabled, no path resolved, so events are not written to a file: {e:#}. Fix: set HOME or the session log path."
+                "session_log: file sink disabled, no path resolved, so events are not written to a file: {e:#}. Fix: set HOME, or set session_log.file.path to an absolute path."
             );
         })
         .ok()
