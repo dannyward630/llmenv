@@ -283,6 +283,42 @@ fn corrupt_state_file_fail_soft() {
     );
 }
 
+/// A state file that is ten days old, past the seven-day retention.
+fn write_stale_state_file(rd_dir: &Path, name: &str) -> PathBuf {
+    std::fs::create_dir_all(rd_dir).expect("test");
+    let path = rd_dir.join(name);
+    std::fs::write(&path, b"{}").expect("test");
+    let ten_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 86_400);
+    filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(ten_days_ago))
+        .expect("test");
+    path
+}
+
+#[test]
+fn the_first_save_of_a_session_prunes_stale_state_files() {
+    let dir = TempDir::new().expect("test");
+    let stale = write_stale_state_file(&repeat_detect_state_dir(dir.path()), "old.json");
+
+    SessionState::new("s1").save(dir.path()).expect("save");
+
+    assert!(!stale.exists(), "the first save removes a stale file");
+}
+
+#[test]
+fn a_later_save_of_the_same_session_does_not_scan_for_stale_files() {
+    let dir = TempDir::new().expect("test");
+    SessionState::new("s1")
+        .save(dir.path())
+        .expect("first save");
+    let stale = write_stale_state_file(&repeat_detect_state_dir(dir.path()), "old.json");
+
+    SessionState::new("s1")
+        .save(dir.path())
+        .expect("second save");
+
+    assert!(stale.exists(), "only the first save of a session prunes");
+}
+
 mod proptests {
     use super::*;
     use proptest::prelude::*;
