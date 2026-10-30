@@ -13,7 +13,10 @@ pub use tilde::expand_tilde;
 use tilde::expand_tilde_with_env;
 pub use write_stats::{WriteStats, snapshot as write_stats_snapshot};
 pub mod program;
-pub use atomic_write::{resolve_user_link, write_owner_only_atomic, write_user_file_atomic};
+pub use atomic_write::{
+    resolve_user_link, write_owner_only_atomic, write_owner_only_atomic_unsynced,
+    write_user_file_atomic,
+};
 pub use bounded_read::{check_regular_file, read_file_bounded, read_open_file, read_text_bounded};
 pub use names::{
     cwd_under_prefix, has_parent_component, is_unsafe_join_target, is_valid_short_name,
@@ -715,6 +718,15 @@ mod tests {
             let dir = tempfile::TempDir::new().expect("tempdir");
             let path = dir.path().join("payload.bin");
             write_owner_only_atomic(&path, &payload).expect("atomic write");
+            let read = std::fs::read(&path).expect("read");
+            prop_assert_eq!(payload, read);
+        }
+
+        #[test]
+        fn unsynced_atomic_write_byte_roundtrip(payload in proptest::collection::vec(any::<u8>(), 0..8192)) {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let path = dir.path().join("payload.bin");
+            write_owner_only_atomic_unsynced(&path, &payload).expect("unsynced write");
             let read = std::fs::read(&path).expect("read");
             prop_assert_eq!(payload, read);
         }

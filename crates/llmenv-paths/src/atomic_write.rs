@@ -15,6 +15,17 @@ use crate::create_dir_owner_only;
 /// Use for any structured/JSON state file where a half-written file would
 /// break the next read: `icm.json`, `sync.json`, `settings.json`, `mcp.json`.
 pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    write_atomic(path, content, true)
+}
+
+/// [`write_owner_only_atomic`] without the `fsync`. A power loss can leave the file empty, so use
+/// it only for state that a reader rebuilds when it cannot parse the file. On macOS `fsync` is a
+/// full flush to the disk, which costs milliseconds on every hook call.
+pub fn write_owner_only_atomic_unsynced(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    write_atomic(path, content, false)
+}
+
+fn write_atomic(path: &Path, content: &[u8], sync: bool) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -49,7 +60,7 @@ pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<(
             format!("creating/hardening directory {}: {e}", parent.display()),
         )
     })?;
-    write_owner_only_atomic_in_dir(parent, file_name, path, content)
+    write_owner_only_atomic_in_dir(parent, file_name, path, content, sync)
 }
 
 /// Process-local counter used to disambiguate temp filenames when multiple
@@ -63,6 +74,7 @@ fn write_owner_only_atomic_in_dir(
     file_name: &std::ffi::OsStr,
     final_path: &Path,
     content: &[u8],
+    sync: bool,
 ) -> std::io::Result<()> {
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,7 +111,9 @@ fn write_owner_only_atomic_in_dir(
                     .mode(0o600)
                     .open(&tmp_path)?;
                 file.write_all(content)?;
-                file.sync_all()?;
+                if sync {
+                    file.sync_all()?;
+                }
             }
             #[cfg(not(unix))]
             {
@@ -108,7 +122,9 @@ fn write_owner_only_atomic_in_dir(
                     .create_new(true)
                     .open(&tmp_path)?;
                 file.write_all(content)?;
-                file.sync_all()?;
+                if sync {
+                    file.sync_all()?;
+                }
             }
             std::fs::rename(&tmp_path, final_path)?;
             Ok(())
@@ -212,7 +228,7 @@ pub fn write_user_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<()
             ),
         ));
     };
-    write_owner_only_atomic_in_dir(parent, file_name, &target, content)
+    write_owner_only_atomic_in_dir(parent, file_name, &target, content, true)
 }
 
 #[cfg(test)]

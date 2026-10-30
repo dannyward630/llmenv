@@ -126,7 +126,7 @@ impl SessionState {
             super::session_state::prune_orphan_locks(&rd_dir, 7);
         }
         let json = serde_json::to_string(&self)?;
-        crate::paths::write_owner_only_atomic(&path, json.as_bytes())?;
+        crate::paths::write_owner_only_atomic_unsynced(&path, json.as_bytes())?;
         Ok(())
     }
 }
