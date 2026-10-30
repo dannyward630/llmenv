@@ -1204,8 +1204,9 @@ active context (active bundles, active MCP servers, etc.). Checks:
   scope never matches there. See [Network match fields](configuration.md#network-match-fields)
 - cleartext MCP URLs (added in v3.12.0) — warns when the hostname of an `http://` MCP URL
   resolves to a public address. See [MCP](mcp.md)
-- session-log path (added in v3.14.0) — when the file sink is on, checks `session_log.file.path`.
+- session-log path (added in v3.14.0) — when the file sink is on, or `session_log.file.path` is set, checks the path.
   It warns when the path is a symlink, a FIFO, a socket, a device, or a folder, because the sink cannot append to it.
+  It also warns when the file does not exist yet and the nearest existing folder above it is not writable.
   See [`session_log:`](configuration.md#session_log)
 - lifecycle hooks (added in v3.11.0) — lists which lifecycle events
   (`session_start`, `session_end`, `post_model_switch`, `turn_start`, `post_tool_batch`,
