@@ -7,8 +7,7 @@
   ],
 
   // General settings
-  // Off: non-major updates automerge on green and no update needs dashboard
-  // approval, so the issue is noise. The Mend job log shows held updates (#3146).
+  // Off: no update needs dashboard approval; the Mend job log shows held ones (#3146).
   "dependencyDashboard": false,
   "assigneesFromCodeOwners": true,
   // Track main plus every maintained release line (release/1.x, release/2.x, …).
