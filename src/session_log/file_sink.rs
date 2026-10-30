@@ -1,9 +1,11 @@
 //! Local JSONL sink. Append-only, owner-only, best-effort: a write failure logs
-//! at `debug!` and is dropped — session logging never fails a launch.
+//! once at `error!` and is dropped — session logging never fails a launch.
 
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use llmenv_paths::{create_dir_owner_only, state_dir};
 
@@ -22,6 +24,17 @@ pub(crate) fn file_path_in(state_dir: &Path) -> PathBuf {
     state_dir.join("session-log.jsonl")
 }
 
+/// Sink paths whose append failure this process already reported at error level.
+static REPORTED_FAILURES: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// True on the first append failure for `path` in this process.
+fn first_failure(path: &Path) -> bool {
+    REPORTED_FAILURES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(path.to_path_buf())
+}
+
 /// Appends rendered events to one JSONL file.
 #[derive(Debug, Clone)]
 pub struct FileSink {
@@ -37,11 +50,22 @@ impl FileSink {
     }
 
     /// Append one line (a `\n` is added). Best-effort; errors are logged and
-    /// dropped.
+    /// dropped. The first failure for a path logs at error level, later ones at debug.
     pub(crate) fn append(&self, line: &str) {
-        if let Err(e) = self.try_append(line) {
-            // Error level: the default filter hides a debug, and the lost event leaves no trace.
+        let Err(e) = self.try_append(line) else {
+            return;
+        };
+        // Error level: the default filter hides a debug, and the lost event leaves no trace.
+        // A persistent failure such as a symlinked path fails on every event, so only the
+        // first one is shown (#3136).
+        if first_failure(&self.path) {
             tracing::error!(
+                "session_log file append to {} failed: {e}. Later failures for this path are \
+                 logged at debug level only. Run `llmenv doctor` to check the path.",
+                self.path.display()
+            );
+        } else {
+            tracing::debug!(
                 "session_log file append to {} failed: {e}",
                 self.path.display()
             );
@@ -188,5 +212,27 @@ mod tests {
         FileSink::new(path.clone()).append("{\"after\":1}");
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.ends_with("{\"after\":1}\n"), "the event was lost");
+    }
+    // #3136: a sink that keeps failing reports the failure once, not once per event.
+    #[cfg(unix)]
+    #[test]
+    fn a_repeated_append_failure_is_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.jsonl");
+        std::fs::write(&target, "").unwrap();
+        let link = dir.path().join("link.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let log = dir.path().join("log.jsonl");
+        crate::session_log::tracing_layer::capture_file_logs_at(
+            &log,
+            tracing_subscriber::filter::LevelFilter::TRACE,
+            || {
+                FileSink::new(link.clone()).append("{}");
+                FileSink::new(link.clone()).append("{}");
+            },
+        );
+        let body = std::fs::read_to_string(&log).unwrap();
+        let reports = body.lines().filter(|l| l.contains("append to")).count();
+        assert_eq!(reports, 1, "log body: {body}");
     }
 }
