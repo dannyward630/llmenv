@@ -240,3 +240,24 @@ fn unix_now_reads_the_real_clock() {
     let now = u64::try_from(unix_now()).expect("test");
     assert!(now.abs_diff(expected) <= 5, "{now} vs {expected}");
 }
+
+// #3116: an entry that exists only as a dangling link still belongs to its session, so the
+// lock beside it is not an orphan. `exists()` follows the link and reports the entry as absent.
+#[cfg(unix)]
+#[test]
+fn a_lock_stays_when_its_json_is_a_dangling_link() {
+    let dir = TempDir::new().expect("test");
+    let lock = dir.path().join("s.lock");
+    std::fs::write(&lock, "").expect("test");
+    let old = SystemTime::now() - Duration::from_secs(10 * 86_400);
+    filetime::set_file_mtime(&lock, filetime::FileTime::from_system_time(old)).expect("test");
+    std::os::unix::fs::symlink(dir.path().join("gone.json"), dir.path().join("s.json"))
+        .expect("test");
+
+    prune_orphan_locks(dir.path(), 7);
+
+    assert!(
+        lock.exists(),
+        "a lock whose .json entry is a dangling link must stay"
+    );
+}
