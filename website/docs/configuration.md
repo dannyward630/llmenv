@@ -75,7 +75,8 @@ With `null`, `llmenv clean` (and the deprecated `llmenv doctor --gc`) skips the 
 
 `llmenv clean` applies the same window to the state temp folder, `state/tmp`, which `TMPDIR` points at, and to session-log rotations (see `session_log` below).
 An entry in `state/tmp` is kept while a process holds a file open in it.
-(changed in v3.14.0) The age of an entry comes from the newest file in it, not from folder mtimes.
+(changed in v3.14.0) The age of a cache entry and of a `state/tmp` entry comes from the newest file in it, not from folder mtimes.
+So a tree unpacked with its old file mtimes kept (`tar -x`, `cp -p`) looks old as soon as no process holds a file open in it.
 That check uses `lsof`, and llmenv runs it only when an entry is old enough to remove.
 When `lsof` cannot run, the sweep stops and names the fix, so no entry is removed on a guess.
 
