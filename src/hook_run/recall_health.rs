@@ -76,7 +76,7 @@ pub(crate) fn record(state_dir: &Path, ok: usize, failed: usize, now: i64) {
         let excess = ring.calls.len().saturating_sub(RING_CAP);
         ring.calls.drain(..excess);
         let bytes = serde_json::to_vec(&ring).context("encoding the ring")?;
-        crate::paths::write_owner_only_atomic(&path, &bytes)
+        crate::paths::write_owner_only_atomic_unsynced(&path, &bytes)
             .with_context(|| format!("writing {}", path.display()))
     });
     if let Err(e) = result {
