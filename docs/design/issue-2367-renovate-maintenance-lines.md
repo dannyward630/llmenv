@@ -5,6 +5,7 @@
 - **Base branch:** `main` (Renovate reads its config from the default branch only; this is the one exception to the "oldest release branch first" rule for this milestone)
 - **Type:** CI fix (dependency policy)
 - **Decision owner:** ranger confirmed on 2026-10-02 that `release/1.x` and `release/2.x` still promise transitive security fixes
+- **Superseded:** on 2026-10-30 the owner declared `release/1.x` and `release/2.x` unmaintained, and Renovate no longer tracks them (#3170).
 
 This is a spec, not a plan.
 
