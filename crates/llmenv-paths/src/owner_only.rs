@@ -16,11 +16,12 @@ use std::path::Path;
 ///
 /// # Errors
 /// Propagates directory-creation failure, and failure to chmod an
-/// already-existing directory (e.g. owned by another user).
+/// already-existing directory (e.g. owned by another user). On Unix, a symlink
+/// at `dir` is an error, and the link target keeps its mode.
 pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -30,7 +31,25 @@ pub fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
         // bare create_dir_all, a permissive umask), its mode is left
         // untouched -- self-heal it so every caller gets an owner-only
         // directory regardless of whether it was just created.
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        //
+        // The chmod runs on an open handle with O_NOFOLLOW. A chmod by path
+        // follows a link planted at `dir` and changes the folder it points to.
+        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::DIRECTORY;
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(flags.bits().cast_signed())
+            .open(dir)
+            .map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "cannot open {} as an owner-only folder ({e}). Fix: make it a real \
+                         folder, not a link.",
+                        dir.display()
+                    ),
+                )
+            })?;
+        handle.set_permissions(std::fs::Permissions::from_mode(0o700))
     }
     #[cfg(not(unix))]
     {
@@ -271,6 +290,28 @@ mod tests {
         assert_eq!(
             mode, 0o700,
             "pre-existing looser dir must be hardened, got {mode:o}"
+        );
+    }
+
+    // #3137: a chmod by path follows a link, so a planted link at the folder would change the
+    // folder it points to. The target must keep its mode, and the call must fail.
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_owner_only_refuses_a_symlink_and_leaves_its_target_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("shared");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join("store");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(create_dir_owner_only(&link).is_err());
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "the link target must keep its mode, got {mode:o}"
         );
     }
 
