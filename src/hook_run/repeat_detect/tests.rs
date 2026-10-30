@@ -325,5 +325,28 @@ mod proptests {
             let back: SessionState = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(back, state);
         }
+
+        // The counter is saved without an fsync, so a power loss can leave a cut-off file.
+        // Any strict prefix of a saved state, including the empty file, must load as a fresh
+        // streak that can be saved again, not as a read failure that blocks the save.
+        #[test]
+        fn a_truncated_state_file_loads_as_a_fresh_streak(
+            state in arb_session_state(),
+            cut in 0.0..1.0f64,
+        ) {
+            let json = serde_json::to_string(&state).unwrap();
+            let mut end = (json.len() as f64 * cut) as usize;
+            while !json.is_char_boundary(end) {
+                end -= 1;
+            }
+            let dir = TempDir::new().unwrap();
+            let path = session_state_path(dir.path(), "s1");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &json.as_bytes()[..end]).unwrap();
+            let loaded = SessionState::load(dir.path(), "s1");
+            prop_assert_eq!(loaded.consecutive, 0);
+            prop_assert!(loaded.last_signature.is_none());
+            prop_assert!(!loaded.read_failed);
+        }
     }
 }

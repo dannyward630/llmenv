@@ -220,6 +220,21 @@ mod tests {
         assert_eq!(health(log).unwrap().unwrap().calls, 1);
     }
 
+    // The ring is saved without an fsync, so a power loss can leave an empty or cut-off file.
+    // Every strict prefix of a saved ring must be replaced by the next hook, not block it.
+    #[test]
+    fn an_empty_or_cut_off_file_is_replaced_by_the_next_hook() {
+        let dir = dir();
+        let log = dir.path();
+        record(log, 2, 1, 3);
+        let saved = std::fs::read_to_string(path(log)).unwrap();
+        for end in 0..saved.len() {
+            std::fs::write(path(log), &saved.as_bytes()[..end]).unwrap();
+            record(log, 1, 0, 9);
+            assert_eq!(health(log).unwrap().unwrap().calls, 1, "cut at {end}");
+        }
+    }
+
     #[test]
     fn an_unwritable_folder_tells_the_agent() {
         let dir = tempfile::tempdir().unwrap();
