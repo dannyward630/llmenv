@@ -7,9 +7,9 @@
   ],
 
   // General settings
-  // Enabled for visibility into per-base pending/rate-limited updates — which
-  // updates are queued behind the concurrency limit, and why they're held.
-  "dependencyDashboard": true,
+  // Off: non-major updates automerge on green and no update needs dashboard
+  // approval, so the issue is noise. The Mend job log shows held updates (#3146).
+  "dependencyDashboard": false,
   "assigneesFromCodeOwners": true,
   // Track main plus every maintained release line (release/1.x, release/2.x, …).
   // Anchored so it excludes the transient forward-merge/release/* branches.
