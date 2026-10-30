@@ -53,29 +53,21 @@ pub(crate) fn gc_remove_dir(p: &Path, report: &mut GcReport) {
         report,
         "remove cache directory",
         remove_dir_all_forcing_writable,
-        super::owner::removal_cause,
     );
 }
 
 /// Unlink a symlink or a file for [`gc`](super::gc), recording rather than propagating a failure.
 pub(crate) fn gc_remove_link(p: &Path, report: &mut GcReport) {
-    gc_remove(
-        p,
-        report,
-        "unlink cache entry",
-        |p| std::fs::remove_file(p),
-        |_, e| e.to_string(),
-    );
+    gc_remove(p, report, "unlink cache entry", |p| std::fs::remove_file(p));
 }
 
 /// Record `p` as removed. A dry run stops there; a real run calls `remove` first, and records a
-/// failure instead when it fails.
+/// failure instead when it fails. The cause names a path that another user owns (#3184).
 fn gc_remove(
     p: &Path,
     report: &mut GcReport,
     action: &str,
     remove: impl FnOnce(&Path) -> std::io::Result<()>,
-    cause: impl FnOnce(&Path, &std::io::Error) -> String,
 ) {
     if report.dry_run {
         report.removed.push(p.to_path_buf());
@@ -84,7 +76,7 @@ fn gc_remove(
     match remove(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
         Err(e) => {
-            let cause = cause(p, &e);
+            let cause = super::owner::removal_cause(p, &e);
             tracing::error!(
                 path = %p.display(),
                 error = %cause,
