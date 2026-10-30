@@ -15,7 +15,7 @@ use crate::session_log::rotation::{MAX_BYTES, rotate_if_full, rotation_marker};
 ///
 /// # Errors
 /// Propagates `state_dir()` resolution failure.
-pub fn default_file_path() -> anyhow::Result<PathBuf> {
+pub(crate) fn default_file_path() -> anyhow::Result<PathBuf> {
     Ok(file_path_in(&state_dir()?))
 }
 
