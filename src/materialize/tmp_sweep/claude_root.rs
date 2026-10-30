@@ -153,7 +153,17 @@ mod tests {
 mod name_tests {
     use proptest::prelude::*;
 
-    use super::is_claude_root;
+    use super::{is_claude_root, is_split_root};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_never_a_split_root() {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!is_split_root(std::ffi::OsStr::from_bytes(b"claude-5\xff")));
+        assert!(!is_split_root(std::ffi::OsStr::from_bytes(
+            b"cargo-hawk-target\xff"
+        )));
+    }
 
     #[test]
     fn only_a_claude_prefix_with_digits_is_a_root() {
@@ -179,6 +189,23 @@ mod name_tests {
             prop_assume!(!name.starts_with("claude-"));
 
             prop_assert!(!is_claude_root(std::ffi::OsStr::new(&name)));
+        }
+
+        /// A split root is the hawk target folder, or `claude-` and ASCII digits, and nothing else.
+        #[test]
+        fn a_split_root_is_the_hawk_folder_or_a_claude_uid(
+            name in prop_oneof![
+                Just("cargo-hawk-target".to_owned()),
+                "claude-[0-9]{0,6}",
+                "[a-z0-9-]{0,20}",
+                "claude-[0-9]{1,3}[a-z\u{0660}-\u{0669}]{1,2}",
+            ],
+        ) {
+            let digits = name.strip_prefix("claude-").is_some_and(|uid| {
+                !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit())
+            });
+            let expected = name == "cargo-hawk-target" || digits;
+            prop_assert_eq!(is_split_root(std::ffi::OsStr::new(&name)), expected);
         }
     }
 }
