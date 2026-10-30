@@ -18,14 +18,8 @@ pub fn write_owner_only_atomic(path: &Path, content: &[u8]) -> std::io::Result<(
     write_atomic(path, content, true)
 }
 
-/// [`write_owner_only_atomic`] without the `fsync`. A power loss can leave the file empty, so use
-/// it only for state that a reader rebuilds when it cannot parse the file. On macOS `fsync` is a
-/// full flush to the disk, which costs milliseconds on every hook call.
-pub fn write_owner_only_atomic_unsynced(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    write_atomic(path, content, false)
-}
-
-fn write_atomic(path: &Path, content: &[u8], sync: bool) -> std::io::Result<()> {
+/// The shared write. `sync` says whether the temp file is flushed to the disk before the rename.
+pub(crate) fn write_atomic(path: &Path, content: &[u8], sync: bool) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -102,29 +96,17 @@ fn write_owner_only_atomic_in_dir(
         let tmp_path = parent.join(&tmp_name);
 
         let result = (|| -> std::io::Result<()> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&tmp_path)?;
-                file.write_all(content)?;
-                if sync {
-                    file.sync_all()?;
-                }
+                options.mode(0o600);
             }
-            #[cfg(not(unix))]
-            {
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&tmp_path)?;
-                file.write_all(content)?;
-                if sync {
-                    file.sync_all()?;
-                }
+            let mut file = options.open(&tmp_path)?;
+            file.write_all(content)?;
+            if sync {
+                file.sync_all()?;
             }
             std::fs::rename(&tmp_path, final_path)?;
             Ok(())
