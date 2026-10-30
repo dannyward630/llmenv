@@ -7,18 +7,37 @@ use anyhow::Context as _;
 
 use super::skip_vanished;
 
+/// The newest mtimes under one folder: of any entry, and of entries that are not folders.
+struct Newest {
+    any: SystemTime,
+    non_dir: Option<SystemTime>,
+}
+
 /// Newest mtime found anywhere under `dir` (including the dir itself).
 pub(crate) fn newest_mtime(dir: &Path) -> anyhow::Result<SystemTime> {
-    let mut newest = dir
+    Ok(walk_from(dir)?.any)
+}
+
+/// Newest mtime of an entry under `dir` that is not a folder. A folder mtime changes when a child
+/// is added or removed, so a partial delete or an unrelated tool would make an old tree look
+/// fresh (#3184). A tree that holds no file falls back to its newest folder mtime.
+pub(crate) fn newest_file_mtime(dir: &Path) -> anyhow::Result<SystemTime> {
+    let newest = walk_from(dir)?;
+    Ok(newest.non_dir.unwrap_or(newest.any))
+}
+
+fn walk_from(dir: &Path) -> anyhow::Result<Newest> {
+    let any = dir
         .metadata()
         .and_then(|m| m.modified())
         .with_context(|| format!("stat {}", dir.display()))?;
+    let mut newest = Newest { any, non_dir: None };
     walk_mtime(dir, &mut newest)?;
     Ok(newest)
 }
 
 /// A child that another tool removes during the walk is skipped, not an error (#2835).
-fn walk_mtime(dir: &Path, newest: &mut SystemTime) -> anyhow::Result<()> {
+fn walk_mtime(dir: &Path, newest: &mut Newest) -> anyhow::Result<()> {
     let Some(entries) = skip_vanished(std::fs::read_dir(dir))
         .with_context(|| format!("reading {}", dir.display()))?
     else {
@@ -38,11 +57,11 @@ fn walk_mtime(dir: &Path, newest: &mut SystemTime) -> anyhow::Result<()> {
         let m = meta
             .modified()
             .with_context(|| format!("mtime {}", p.display()))?;
-        if m > *newest {
-            *newest = m;
-        }
+        newest.any = newest.any.max(m);
         if meta.is_dir() {
             walk_mtime(&p, newest)?;
+        } else {
+            newest.non_dir = Some(newest.non_dir.map_or(m, |n| n.max(m)));
         }
     }
     Ok(())

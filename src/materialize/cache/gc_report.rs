@@ -44,18 +44,28 @@ impl GcReport {
 /// Same reasoning as [`remove_dir`](super::remove_dir) (#1372): one undeletable entry must not
 /// abort collection of everything after it, since `doctor --gc` reported only
 /// the bare errno and left the rest of the cache untouched.
+///
+/// A removal that stops part-way names a path in the tree that another user owns, with the fix
+/// (#3184).
 pub(crate) fn gc_remove_dir(p: &Path, report: &mut GcReport) {
     gc_remove(
         p,
         report,
         "remove cache directory",
         remove_dir_all_forcing_writable,
+        super::owner::removal_cause,
     );
 }
 
 /// Unlink a symlink or a file for [`gc`](super::gc), recording rather than propagating a failure.
 pub(crate) fn gc_remove_link(p: &Path, report: &mut GcReport) {
-    gc_remove(p, report, "unlink cache entry", |p| std::fs::remove_file(p));
+    gc_remove(
+        p,
+        report,
+        "unlink cache entry",
+        |p| std::fs::remove_file(p),
+        |_, e| e.to_string(),
+    );
 }
 
 /// Record `p` as removed. A dry run stops there; a real run calls `remove` first, and records a
@@ -65,6 +75,7 @@ fn gc_remove(
     report: &mut GcReport,
     action: &str,
     remove: impl FnOnce(&Path) -> std::io::Result<()>,
+    cause: impl FnOnce(&Path, &std::io::Error) -> String,
 ) {
     if report.dry_run {
         report.removed.push(p.to_path_buf());
@@ -73,12 +84,13 @@ fn gc_remove(
     match remove(p) {
         Ok(()) => report.removed.push(p.to_path_buf()),
         Err(e) => {
+            let cause = cause(p, &e);
             tracing::error!(
                 path = %p.display(),
-                error = %e,
+                error = %cause,
                 "gc: failed to {action}; skipping"
             );
-            report.record_failure(p.to_path_buf(), e.to_string());
+            report.record_failure(p.to_path_buf(), cause);
         }
     }
 }

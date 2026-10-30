@@ -1,6 +1,8 @@
-//! The per-user TMPDIR root that Claude Code creates under `state/tmp` (#1379).
+//! The roots under `state/tmp` that hold unrelated entries: the per-user TMPDIR root that Claude
+//! Code creates (#1379), and the shared `cargo hawk` target folder, with one build per workspace
+//! (#3184).
 //!
-//! The root is never removed, because its mtime does not show use. Its entries are judged one by
+//! A root is never removed, because its mtime does not show use. Its entries are judged one by
 //! one, with the same in-use check as the rest of the sweep.
 
 use std::path::{Path, PathBuf};
@@ -8,20 +10,27 @@ use std::time::{Duration, SystemTime};
 
 use super::walk::{Scan, judge_entry, record_failure};
 
-/// Judge the entries one level down inside Claude Code's `claude-<uid>` root. The root itself is
-/// never a candidate.
-pub(super) fn scan_claude_root(
-    claude_root: &Path,
+/// The `cargo hawk` target folder. It holds one build folder per workspace.
+const HAWK_TARGET_ROOT: &str = "cargo-hawk-target";
+
+/// Whether the entry `name` is a root whose entries are judged one by one.
+pub(super) fn is_split_root(name: &std::ffi::OsStr) -> bool {
+    name == HAWK_TARGET_ROOT || is_claude_root(name)
+}
+
+/// Judge the entries one level down inside a split root. The root itself is never a candidate.
+pub(super) fn scan_split_root(
+    split_root: &Path,
     older_than: Duration,
     in_use: &[PathBuf],
     now: SystemTime,
     scan: &mut Scan,
 ) {
-    let entries = match crate::paths::read_dir_optional(claude_root) {
+    let entries = match crate::paths::read_dir_optional(split_root) {
         Ok(Some(entries)) => entries,
         Ok(None) => return,
         Err(e) => {
-            record_failure(claude_root, &e, scan);
+            record_failure(split_root, &e, scan);
             return;
         }
     };
@@ -29,11 +38,11 @@ pub(super) fn scan_claude_root(
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                record_failure(claude_root, &e, scan);
+                record_failure(split_root, &e, scan);
                 continue;
             }
         };
-        let path = claude_root.join(entry.file_name());
+        let path = split_root.join(entry.file_name());
         if in_use.iter().any(|used| used.starts_with(&path)) {
             scan.kept += 1;
             continue;
@@ -44,8 +53,9 @@ pub(super) fn scan_claude_root(
         }
     }
 }
+
 /// Whether `name` is `claude-<uid>`, the per-user TMPDIR root that Claude Code creates.
-pub(super) fn is_claude_root(name: &std::ffi::OsStr) -> bool {
+fn is_claude_root(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .and_then(|name| name.strip_prefix("claude-"))
         .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))

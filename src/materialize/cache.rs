@@ -12,10 +12,11 @@ use crate::merge::MergedManifest;
 
 mod gc_report;
 mod mtime;
+mod owner;
 
 pub use gc_report::GcReport;
 pub(crate) use gc_report::{gc_remove_dir, gc_remove_link};
-pub(crate) use mtime::newest_mtime;
+pub(crate) use mtime::{newest_file_mtime, newest_mtime};
 
 /// Stable SHA-256 of the merged manifest. Each field is length-prefixed
 /// (little-endian u64) before its bytes so concatenation cannot ambiguate
