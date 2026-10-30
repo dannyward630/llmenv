@@ -51,6 +51,7 @@ jobs:
               - '.github/workflows/ci.yml'
             workflow_tests:
               - '.github/workflows/**'
+              - '.github/renovate.json5'
               - 'scripts/**'
   test:
     needs: changes
