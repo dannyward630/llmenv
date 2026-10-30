@@ -5,37 +5,25 @@ on:
     branches: [main]
     paths:
       - 'website/**'
-  # No `paths:` here: docs-build is a required status check (#3132), and a PR
-  # that never triggers the workflow reports no status, so the check stays
-  # pending and blocks merge. The `changes` job gates the build instead, and
-  # GitHub counts a job skipped by `if:` as passing.
+      - '.github/workflows/docs.yml'
+  # No `paths:` filter: a PR that never triggers this workflow reports no
+  # status, so docs-build could not be a required check (#3132). The build runs
+  # on every PR instead; a gate job that skips it would count as a pass when
+  # the gate itself fails.
   pull_request:
 
 permissions:
   contents: read
 
-jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      website: ${{ steps.filter.outputs.website }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
-        id: filter
-        with:
-          filters: |
-            website:
-              - 'website/**'
-              - '.github/workflows/docs.yml'
+# Push runs share one group so deploys publish in push order. Each PR gets its
+# own group, so a PR run never waits for, or cancels, another PR or a deploy.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-  # A unique job id, because the required check is matched by name and other
-  # workflows also have a job called `build`.
+jobs:
+  # A unique job id, because a required check is matched by job name.
   docs-build:
-    needs: changes
-    if: needs.changes.outputs.website == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -62,11 +50,6 @@ jobs:
     needs: docs-build
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    # Only the deploy shares the Pages group. On the whole workflow, a new run
-    # would cancel a pending PR build and leave its required check cancelled.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write
