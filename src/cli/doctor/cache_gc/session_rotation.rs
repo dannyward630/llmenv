@@ -19,7 +19,8 @@ pub(super) fn prune_session_log(
     let (paths, failures) = log_paths(state_dir, config.session_log_resolved().file_path());
     if let Some(e) = &failures {
         eprintln!(
-            "{} GC of configured session-log rotations skipped: {e:#}",
+            "{} GC of configured session-log rotations skipped: {e:#}. Fix: set HOME, or set \
+             session_log.file.path to an absolute path, then run `llmenv clean` again.",
             out.warn
         );
     }
@@ -100,6 +101,32 @@ mod tests {
     fn a_configured_default_path_is_pruned_once() {
         let (paths, _) = log_paths(Path::new("/state"), Some("/state/session-log.jsonl"));
         assert_eq!(paths.len(), 1);
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// The default path comes first, no path repeats, and an error leaves the default.
+            #[test]
+            fn the_default_comes_first_and_no_path_repeats(
+                configured in proptest::option::of(prop_oneof![
+                    Just("/state/session-log.jsonl".to_owned()),
+                    "/[a-z]{1,8}/[a-z]{1,8}\\.jsonl",
+                    "[a-z]{1,8}\\.jsonl",
+                ]),
+            ) {
+                let default = PathBuf::from("/state/session-log.jsonl");
+                let (paths, err) = log_paths(Path::new("/state"), configured.as_deref());
+                prop_assert_eq!(&paths[0], &default);
+                prop_assert!(paths.len() <= 2);
+                prop_assert!(paths.len() < 2 || paths[0] != paths[1]);
+                if err.is_some() {
+                    prop_assert_eq!(paths, vec![default]);
+                }
+            }
+        }
     }
 
     #[test]
