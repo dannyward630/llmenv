@@ -19,6 +19,34 @@ pub fn default_file_path() -> anyhow::Result<PathBuf> {
     Ok(file_path_in(&state_dir()?))
 }
 
+/// Resolve the file-sink path: the configured `session_log.file.path` with `~` expanded, or
+/// `<state_dir>/session-log.jsonl`. `llmenv`, its hooks, and `llmenv doctor` share this rule.
+///
+/// # Errors
+/// Fails when `HOME` or the state folder cannot be resolved, or when the path is relative.
+pub fn resolve_file_path(configured: Option<&str>) -> anyhow::Result<PathBuf> {
+    resolve_file_path_with(configured, default_file_path)
+}
+
+/// [`resolve_file_path`] with an injectable default, so a test can make it fail.
+pub(crate) fn resolve_file_path_with(
+    configured: Option<&str>,
+    default: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    let path = match configured {
+        Some(raw) => PathBuf::from(llmenv_paths::expand_tilde(raw)?),
+        None => default()?,
+    };
+    // A relative path resolves against the working directory, which is a repository in a hook.
+    anyhow::ensure!(
+        path.is_absolute(),
+        "session_log.file.path {} is relative. Set it to an absolute path or a path that \
+         starts with ~/",
+        path.display()
+    );
+    Ok(path)
+}
+
 /// The default file-sink path under `state_dir`.
 pub(crate) fn file_path_in(state_dir: &Path) -> PathBuf {
     state_dir.join("session-log.jsonl")
@@ -213,6 +241,28 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.ends_with("{\"after\":1}\n"), "the event was lost");
     }
+    #[test]
+    fn a_configured_tilde_path_is_expanded() {
+        let home = std::env::var("HOME").unwrap();
+        let got = resolve_file_path_with(Some("~/logs/s.jsonl"), || unreachable!()).unwrap();
+        assert_eq!(got, Path::new(&home).join("logs/s.jsonl"));
+    }
+
+    #[test]
+    fn a_relative_configured_path_is_rejected_with_the_key() {
+        let err = resolve_file_path_with(Some("logs/s.jsonl"), || unreachable!()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("session_log.file.path"), "{msg}");
+        assert!(msg.contains("logs/s.jsonl"), "{msg}");
+    }
+
+    #[test]
+    fn no_configured_path_uses_the_default() {
+        let got =
+            resolve_file_path_with(None, || Ok(PathBuf::from("/state/session-log.jsonl"))).unwrap();
+        assert_eq!(got, PathBuf::from("/state/session-log.jsonl"));
+    }
+
     // #3136: a sink that keeps failing reports the failure once, not once per event.
     #[cfg(unix)]
     #[test]
