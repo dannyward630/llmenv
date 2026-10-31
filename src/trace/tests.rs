@@ -336,3 +336,25 @@ proptest::proptest! {
         proptest::prop_assert_eq!(json_str(&payload, &key), Some(value));
     }
 }
+
+proptest::proptest! {
+    // The reserved keys must refuse the line for any other fields and any value, not only for the
+    // fixed example above. The other property above filters these keys out, so it cannot show this.
+    #[test]
+    fn json_trace_line_refuses_any_map_that_holds_a_reserved_key(
+        op in "[a-z_]{1,12}",
+        reserved in proptest::sample::select(vec!["v", "op"]),
+        value in proptest::prelude::any::<u64>(),
+        extra in proptest::collection::btree_map("[a-z_]{1,12}", 0u64..1_000_000, 0..8),
+    ) {
+        let mut map = serde_json::Map::new();
+        for (key, extra_value) in &extra {
+            if key != "v" && key != "op" {
+                map.insert(key.clone(), serde_json::json!(extra_value));
+            }
+        }
+        map.insert(reserved.to_string(), serde_json::json!(value));
+        let result = json_trace_line(&op, map);
+        proptest::prop_assert!(result.is_err(), "a reserved key must refuse the line");
+    }
+}

@@ -307,9 +307,14 @@ fn trace_timing_json(timing: HookTiming) -> serde_json::Map<String, serde_json::
 
 /// The hook marker as parsed JSON, as a consumer reads it. For tests.
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test helper: a broken marker must fail the test"
+)]
 pub(crate) fn hook_marker(timing: HookTiming) -> serde_json::Value {
-    let line = json_trace_line("hook_run", trace_timing_json(timing)).unwrap_or_default();
-    serde_json::from_str(line.strip_prefix("llmenv-trace ").unwrap_or_default()).unwrap_or_default()
+    let line = json_trace_line("hook_run", trace_timing_json(timing)).expect("hook marker keys");
+    serde_json::from_str(line.strip_prefix("llmenv-trace ").expect("marker prefix"))
+        .expect("marker json")
 }
 
 /// Emit the per-phase timing marker to the trace sink.
