@@ -4,9 +4,9 @@
 //! (2,048 characters by default). The cut is silent. This module asks a server for that text and
 //! counts it. Design: docs/design/issue-2148-mcp-description-cap.md
 
-mod signal;
-use signal::signal_group;
+mod stop;
 use std::time::Duration;
+use stop::stop_group;
 
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
@@ -144,24 +144,6 @@ async fn probe_stdio(
     }
 }
 
-/// Stop the child and its process group. `kill_on_drop` is only the backstop for an early return.
-async fn stop_group(child: &mut tokio::process::Child, command: &str) {
-    if let Some(pid) = child.id()
-        && let Err(e) = signal_group(pid)
-    {
-        // The server may still run, and hook stderr never reaches the agent (#3204).
-        crate::agent_notice::record_logged(format!(
-            "llmenv: cannot stop the process group of MCP server `{command}`: {e}. What the \
-             server started may still run. Fix: stop that process by hand."
-        ));
-    }
-    if let Err(e) = child.kill().await {
-        crate::agent_notice::record_logged(format!(
-            "llmenv: cannot stop the MCP text probe `{command}`: {e}. Fix: stop that process by hand."
-        ));
-    }
-}
-
 /// What the stopped server left on stderr, as one clean line.
 async fn stderr_tail(stderr: Option<&mut tokio::process::ChildStderr>) -> Option<String> {
     use tokio::io::AsyncReadExt as _;
@@ -225,6 +207,7 @@ where
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
+    use super::stop::signal_group;
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
