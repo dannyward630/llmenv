@@ -340,3 +340,5 @@ fn a_shipped_bundle_is_created_with_its_folders_and_modes() {
 }
 
 mod undo;
+
+mod folders;

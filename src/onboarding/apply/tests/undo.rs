@@ -5,10 +5,8 @@
     reason = "test setup fails loudly on a bad fixture"
 )]
 
-use std::path::Path;
-
 use super::{CONFIG, Setup};
-use crate::onboarding::apply::{make_files, new_folders, undo};
+use crate::onboarding::apply::{make_files, undo};
 
 /// The undo after a failure removes the nested folders of a shipped bundle, newest first.
 #[test]
@@ -24,28 +22,6 @@ fn undo_removes_the_nested_folders_of_a_shipped_bundle() {
     let note = undo(&made);
     assert!(note.contains("the files it made are removed"), "{note}");
     assert!(!s.path("bundles/objc-dev").exists());
-}
-
-proptest::proptest! {
-    /// The folders to make are each folder below `bundles/<name>` and above the file, outermost
-    /// first.
-    #[test]
-    fn new_folders_are_the_folders_between_the_bundle_and_the_file(
-        name in "[a-z]{1,8}",
-        dirs in proptest::collection::vec("[a-z]{1,6}", 0..4),
-    ) {
-        let bundle = Path::new("bundles").join(&name);
-        let mut expected = Vec::new();
-        let mut folder = bundle.clone();
-        for dir in &dirs {
-            folder = folder.join(dir);
-            expected.push(folder.clone());
-        }
-        let rel = folder.join("file.md");
-        let got: Vec<std::path::PathBuf> =
-            new_folders(&rel).into_iter().map(Path::to_path_buf).collect();
-        proptest::prop_assert_eq!(got, expected);
-    }
 }
 
 // #3116: `is_dir()` follows a link to a folder, so undo chose `remove_dir`, which refuses a
