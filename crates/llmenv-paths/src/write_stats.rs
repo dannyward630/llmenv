@@ -81,6 +81,7 @@ fn touch(path: &std::path::Path) -> bool {
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
         .open(path)
         .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .inspect_err(|e| tracing::debug!("cannot touch {}, so the write runs: {e}", path.display()))
         .is_ok()
 }
 

@@ -11,18 +11,21 @@ pub(super) fn file_stamp(path: &Path) -> Option<(i64, u64)> {
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
-            tracing::error!("read_once stat failed for {}: {e}", path.display());
+            crate::agent_notice::record_logged(format!(
+                "llmenv: read-once cannot stat {}: {e}. Fix: check the file, then retry the read.",
+                path.display()
+            ));
             return None;
         }
     };
     let mtime = metadata
         .modified()
-        .inspect_err(|e| tracing::warn!("read_once mtime failed for {}: {e}", path.display()))
+        .inspect_err(|e| crate::agent_notice::record_logged(format!("llmenv: read-once cannot read the mtime of {}: {e}. Fix: check the file. Read-once does not deduplicate it.", path.display())))
         .ok()
         .and_then(|t| {
             t.duration_since(std::time::UNIX_EPOCH)
                 .inspect_err(|e| {
-                    tracing::warn!("read_once mtime is before 1970 for {}: {e}", path.display());
+                    crate::agent_notice::record_logged(format!("llmenv: read-once: the mtime of {} is before 1970 ({e}). Fix: set the file time after 1970. Read-once does not deduplicate it.", path.display()));
                 })
                 .ok()
         })

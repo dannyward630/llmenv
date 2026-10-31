@@ -1,5 +1,5 @@
 use super::*;
-use proptest::prop_assert;
+use proptest::{prop_assert, prop_assert_eq};
 
 proptest::proptest! {
     /// A key with `..` in any segment is never joined into the cache path, whatever the command.
@@ -363,4 +363,34 @@ fn resolves_multiple_tokens_in_command() {
         resolved,
         Some("bash /cache/hooks/pre.sh /cache/hooks/post.sh".to_string())
     );
+}
+
+proptest::proptest! {
+    /// The three pieces of a word join back to the word, for any punctuation a command can hold.
+    #[test]
+    fn split_word_pieces_join_back_to_the_word(word in r#"[a-z/"'();&|$]{0,24}"#) {
+        let (prefix, core, suffix) = split_word(&word);
+        prop_assert_eq!(format!("{prefix}{core}{suffix}"), word);
+    }
+
+    /// The core of a word never keeps an outer quote, bracket, or shell punctuation mark.
+    #[test]
+    fn split_word_core_has_no_outer_quote_or_punctuation(word in r#"[a-z/"'();&|$]{0,24}"#) {
+        let (_, core, _) = split_word(&word);
+        prop_assert!(!core.starts_with(['"', '\'', '(']), "core: {core:?}");
+        prop_assert!(!core.ends_with(['"', '\'', ';', '&', '|', ')']), "core: {core:?}");
+    }
+
+    /// A rewrite that changes no word leaves the command unchanged, and reports no change.
+    #[test]
+    fn rewrite_words_with_no_change_reports_none(command in r#"[a-z/ \t\n"';&|()$]{0,80}"#) {
+        prop_assert!(rewrite_words(&command, |_| None).is_none());
+    }
+
+    /// A rewrite that returns each core as it was keeps the command text exactly, spacing included.
+    #[test]
+    fn rewrite_words_with_identity_keeps_the_text(command in r#"[a-z/ \t\n"';&|()$]{0,80}"#) {
+        let got = rewrite_words(&command, |core| Some(core.to_string()));
+        prop_assert_eq!(got.unwrap_or_else(|| command.clone()), command.clone());
+    }
 }
