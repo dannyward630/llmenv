@@ -49,7 +49,7 @@ pub(super) fn staging_path(lock_path: &Path) -> PathBuf {
 /// Writes this process's pid to a new owner-only staging file. A leftover file
 /// of a crashed export with the same pid is removed first. `create_new` refuses
 /// a symlink planted at the name, so the write never follows it.
-pub(super) fn write_staging(staging: &Path) -> anyhow::Result<()> {
+fn write_staging(staging: &Path) -> anyhow::Result<()> {
     use std::io::Write as _;
     match std::fs::remove_file(staging) {
         Ok(()) => {}
