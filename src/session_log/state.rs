@@ -104,7 +104,7 @@ fn reserve_aside_name(path: &Path) -> anyhow::Result<PathBuf> {
     create_new_empty(&fallback).with_context(|| {
         format!(
             "the session map {} cannot be moved aside: its aside name {} cannot be reserved. \
-             Fix: remove the stale aside copy, then retry.",
+             Fix: check the permissions of the folder that holds the map, then retry.",
             path.display(),
             fallback.display()
         )
@@ -131,9 +131,14 @@ fn load_for_write(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
             })?;
             if let Err(e) = std::fs::rename(path, &aside) {
                 // The reservation is ours and empty. Drop it so a failed move leaves no stray file.
-                // The rename error is the one the caller needs, so a cleanup failure only logs.
+                // The rename error is the one the caller needs. A failed cleanup is a notice,
+                // because the default log filter hides warn lines (#2657).
                 if let Err(cleanup) = std::fs::remove_file(&aside) {
-                    tracing::warn!(error = %cleanup, aside = %aside.display(), "could not remove aside reservation");
+                    crate::agent_notice::record_logged(format!(
+                        "llmenv: could not remove the empty aside reservation {} ({cleanup}). \
+                         Fix: remove that file by hand.",
+                        aside.display()
+                    ));
                 }
                 return Err(e).with_context(|| {
                     format!(
