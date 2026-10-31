@@ -376,12 +376,54 @@ fn reserved_trace_field_is_recorded_for_the_agent() {
 
 // #3205: a trace file that cannot be written is named for the agent, with a fix.
 #[test]
-fn trace_file_error_names_the_path_for_the_agent() {
+fn trace_file_error_names_the_path_and_a_fix() {
     let path = std::path::Path::new("/agent-notice-3205-path/trace.log");
-    super::report_sink_error(path, &std::io::Error::other("denied"));
-    let notices = crate::agent_notice::current().unwrap_or_default();
+    let notice = super::sink_error_notice(path, &std::io::Error::other("denied"));
     assert!(
-        notices.contains("/agent-notice-3205-path/trace.log") && notices.contains("Fix:"),
-        "the trace-file notice must name the path and a fix: {notices}"
+        notice.contains("/agent-notice-3205-path/trace.log") && notice.contains("Fix:"),
+        "the trace-file notice must name the path and a fix: {notice}"
     );
+}
+
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Caller fields come back in the marker unchanged, next to `v` and `op`.
+        #[test]
+        fn caller_fields_round_trip_through_the_marker(
+            fields in proptest::collection::btree_map("[a-z]{1,8}", any::<i64>(), 0..8)
+                .prop_filter("no reserved key", |m| !m.contains_key("v") && !m.contains_key("op")),
+        ) {
+            let map: serde_json::Map<String, serde_json::Value> = fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+                .collect();
+            let line = json_trace_line("agent-op", map).expect("test");
+            let json = line.strip_prefix("llmenv-trace ").expect("test");
+            let parsed: serde_json::Value = serde_json::from_str(json).expect("test");
+            prop_assert_eq!(&parsed["v"], &serde_json::json!(1));
+            prop_assert_eq!(&parsed["op"], &serde_json::json!("agent-op"));
+            for (k, v) in &fields {
+                prop_assert_eq!(&parsed[k.as_str()], &serde_json::json!(v));
+            }
+        }
+
+        /// A caller field named `v` or `op` is refused, wherever it sits in the map.
+        #[test]
+        fn reserved_key_is_always_refused(
+            reserved in prop_oneof![Just("v"), Just("op")],
+            value in any::<i64>(),
+            extra in proptest::collection::btree_map("[a-z]{1,8}", any::<i64>(), 0..6),
+        ) {
+            let mut map: serde_json::Map<String, serde_json::Value> = extra
+                .into_iter()
+                .filter(|(k, _)| k != "v" && k != "op")
+                .map(|(k, v)| (k, serde_json::json!(v)))
+                .collect();
+            map.insert(reserved.to_string(), serde_json::json!(value));
+            prop_assert!(json_trace_line("agent-op", map).is_err());
+        }
+    }
 }
