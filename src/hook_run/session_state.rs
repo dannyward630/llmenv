@@ -240,7 +240,7 @@ fn read_dir_logged(dir: &Path, purpose: &str) -> Option<std::fs::ReadDir> {
 /// Whether the session file at `json` is gone. A dangling link still counts as present, since
 /// the entry exists and belongs to its session. `exists()` follows the link and would say absent
 /// (#3116). An unreadable entry counts as present, so the lock is kept and the cause is logged.
-fn json_entry_is_absent(json: &Path) -> bool {
+pub(super) fn json_entry_is_absent(json: &Path) -> bool {
     match std::fs::symlink_metadata(json) {
         Ok(_) => false,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
