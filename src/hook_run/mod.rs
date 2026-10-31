@@ -2169,7 +2169,7 @@ fn validate_tag(tag: &str) -> anyhow::Result<()> {
     if tag.is_empty() {
         return Err(anyhow::anyhow!("empty tag in recall query"));
     }
-    if !crate::scope::matcher::is_valid_tag_charset(tag) {
+    if !crate::scope::tags::is_valid_tag_charset(tag) {
         return Err(anyhow::anyhow!(
             "tag '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
             tag
@@ -2184,7 +2184,7 @@ fn validate_bundle(bundle: &str) -> anyhow::Result<()> {
     if bundle.is_empty() {
         return Err(anyhow::anyhow!("empty bundle name in recall query"));
     }
-    if !crate::scope::matcher::is_valid_tag_charset(bundle) {
+    if !crate::scope::tags::is_valid_tag_charset(bundle) {
         return Err(anyhow::anyhow!(
             "bundle '{}' contains invalid characters (only alphanumeric, -, _ allowed)",
             bundle
