@@ -22,9 +22,11 @@ use std::path::Path;
 
 use anyhow::Context as _;
 
+mod copy;
 mod fold;
 mod link_site;
 mod stranded;
+use copy::{copy_file_no_follow, dest_already_present, is_real_file};
 use fold::move_dir_newest_wins;
 use link_site::clear_link_site;
 pub(crate) use stranded::migrate_stranded_projects;
@@ -115,67 +117,10 @@ pub(crate) fn inherit_copied_files(state_dir: &Path, config_dir: &Path) -> anyho
         if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
-        std::fs::copy(&src, &dst)
+        copy_file_no_follow(&src, &dst)
             .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
     Ok(())
-}
-
-/// True when `path` is a regular file (`symlink_metadata`, not `is_file()`
-/// — #1341: `is_file()` follows a symlink, so a symlinked entry under
-/// `state_dir`/`config_dir` would otherwise be read/copied through
-/// silently). Skips (warns) rather than errors: a stray symlink here
-/// shouldn't block a whole `materialize`/inherit pass over one file. A
-/// missing source is the documented, common no-op case (nothing cached
-/// yet) and stays silent; any other stat failure (permission denied, ...)
-/// is warned rather than folded into the same "absent" outcome
-/// (security-audit, #1341).
-fn is_real_file(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            // The skip is intended (#1341), so it runs on every pass and is debug only.
-            tracing::debug!(path = %path.display(), "inherit: skipping symlinked file");
-            false
-        }
-        Ok(meta) => meta.is_file(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "inherit: could not stat file, skipping");
-            false
-        }
-    }
-}
-
-/// True when something already exists at `path`, including a dangling
-/// symlink (`symlink_metadata`, not `exists()` — #1341 security-audit:
-/// `exists()` follows a symlink and reports `false` for a dangling one,
-/// which would fall through to `std::fs::copy` opening
-/// `O_CREAT|O_TRUNC` through the link and writing the copied content at
-/// the link's target instead of replacing the link itself).
-fn dest_already_present(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                tracing::warn!(
-                    path = %path.display(),
-                    "inherit: skipping copy — destination is a symlink"
-                );
-            }
-            true
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        // The destination state is unknown, so the copy is skipped. A copy here could write
-        // through a link the check could not see (#1341), so the skip is the safe result.
-        Err(e) => {
-            tracing::error!(
-                path = %path.display(),
-                error = %e,
-                "inherit: skipping copy — cannot read the destination. Fix: check the \
-                 destination's permissions, then run the command again."
-            );
-            true
-        }
-    }
 }
 
 /// Copy a folder's single-file state back into the durable store when the store
@@ -194,7 +139,7 @@ pub(crate) fn capture_copied_files(state_dir: &Path, config_dir: &Path) -> anyho
         if dest_already_present(&dst) || !is_real_file(&src) {
             continue;
         }
-        std::fs::copy(&src, &dst)
+        copy_file_no_follow(&src, &dst)
             .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
     Ok(())
