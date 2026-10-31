@@ -16,6 +16,8 @@
 //! **Cache layout**: `<state_dir>/auth/credentials.json`, owner-only (0o600).
 //! One file — Claude Code holds one active credential per config dir.
 
+mod debug;
+mod expiry;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,19 +86,6 @@ impl Backend {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials(serde_json::Value);
 
-/// Redacting `Debug` — a derived one would print the access and refresh tokens
-/// verbatim into any `{:?}` or `tracing` field. Only the expiry timestamps are
-/// safe to show, and they're the only part worth debugging.
-impl std::fmt::Debug for Credentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Credentials")
-            .field("expires_at", &self.expires_at())
-            .field("refresh_expires_at", &self.refresh_expires_at())
-            .field("token", &"<redacted>")
-            .finish()
-    }
-}
-
 impl Credentials {
     /// Wrap a raw credential document.
     ///
@@ -149,33 +138,6 @@ impl Credentials {
             .get(OAUTH_KEY)?
             .get("refreshTokenExpiresAt")?
             .as_i64()
-    }
-
-    /// True when this blob is worthless: the access token has expired *and* no
-    /// live refresh token remains. A stale access token with a live refresh
-    /// token is still worth caching — Claude Code renews it on next use.
-    ///
-    /// A blob with no `expiresAt` is treated as live; an unknown expiry is not
-    /// grounds for discarding a credential.
-    #[must_use]
-    fn is_expired(&self, now_ms: i64) -> bool {
-        // MCP server tokens are siblings of the login token in the same store and
-        // expire independently, so a dead login token must not discard them —
-        // that would silently log the user out of every third-party MCP server
-        // (Slack, Notion, …). MCP entries carry no expiry of their own; Claude
-        // Code refreshes or re-authorizes them per server (#1058).
-        if self.mcp_server_count() > 0 {
-            return false;
-        }
-        let access_dead = self.expires_at().is_some_and(|t| t <= now_ms);
-        let refresh_live = self.refresh_expires_at().is_some_and(|t| t > now_ms);
-        access_dead && !refresh_live
-    }
-
-    /// [`Credentials::is_expired`] against the current wall clock.
-    #[must_use]
-    pub(crate) fn is_expired_now(&self) -> bool {
-        self.is_expired(now_ms())
     }
 
     /// The raw document, for verbatim re-injection.
@@ -290,6 +252,11 @@ mod tests {
     const PAST_MS: i64 = 1_000_000_000_000;
     /// Comfortably in the future (year ~2096).
     const FUTURE_MS: i64 = 4_000_000_000_000;
+    /// The skew tolerance in milliseconds. A test clock must step past it before a dead token
+    /// reads as expired (#3098).
+    const SKEW_MS: i64 = 5_000;
+    /// One millisecond past the skew tolerance: the first instant a dead token reads as expired.
+    const AFTER_SKEW_MS: i64 = PAST_MS + SKEW_MS + 1;
 
     fn blob(expires_at: i64, refresh_expires_at: Option<i64>) -> serde_json::Value {
         let mut oauth = serde_json::json!({
@@ -374,7 +341,7 @@ mod tests {
     #[test]
     fn dead_login_token_without_mcp_tokens_is_expired() {
         let creds = Credentials::from_json(blob(PAST_MS, Some(PAST_MS))).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
+        assert!(creds.is_expired(AFTER_SKEW_MS));
     }
 
     /// An empty `mcpOAuth` map is not a reason to keep a dead blob.
@@ -383,7 +350,7 @@ mod tests {
         let mut doc = blob(PAST_MS, Some(PAST_MS));
         doc["mcpOAuth"] = serde_json::json!({});
         let creds = Credentials::from_json(doc).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
+        assert!(creds.is_expired(AFTER_SKEW_MS));
     }
 
     /// A blob with MCP tokens but no login token at all is still worth caching —
@@ -462,13 +429,34 @@ mod tests {
     #[test]
     fn stale_access_token_without_refresh_is_expired() {
         let creds = Credentials::from_json(blob(PAST_MS, None)).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
+        assert!(creds.is_expired(AFTER_SKEW_MS));
     }
 
     #[test]
     fn stale_access_token_with_stale_refresh_is_expired() {
         let creds = Credentials::from_json(blob(PAST_MS, Some(PAST_MS))).unwrap();
-        assert!(creds.is_expired(PAST_MS + 1));
+        assert!(creds.is_expired(AFTER_SKEW_MS));
+    }
+
+    /// #3098: the tolerance is the GC's constant, so the two checks cannot drift apart.
+    #[test]
+    fn skew_constant_matches_the_gc_tolerance() {
+        let gc = crate::materialize::expiry::CLOCK_SKEW_TOLERANCE;
+        assert_eq!(SKEW_MS, i64::try_from(gc.as_millis()).expect("test"));
+    }
+
+    /// #3098: exactly at the tolerance edge the token is still live.
+    #[test]
+    fn access_token_at_skew_edge_is_still_live() {
+        let creds = Credentials::from_json(blob(PAST_MS, None)).unwrap();
+        assert!(!creds.is_expired(PAST_MS + SKEW_MS));
+    }
+
+    /// #3098: one millisecond past the edge, the token is dead.
+    #[test]
+    fn access_token_past_skew_edge_is_expired() {
+        let creds = Credentials::from_json(blob(PAST_MS, None)).unwrap();
+        assert!(creds.is_expired(PAST_MS + SKEW_MS + 1));
     }
 
     #[test]
