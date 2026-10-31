@@ -358,3 +358,30 @@ proptest::proptest! {
         proptest::prop_assert!(result.is_err(), "a reserved key must refuse the line");
     }
 }
+
+// #3205: a dropped trace line reaches the agent, because a hook's log has no reader.
+#[test]
+fn reserved_trace_field_is_recorded_for_the_agent() {
+    let mut fields = serde_json::Map::new();
+    fields.insert("v".to_string(), serde_json::json!(9));
+    emit_json_trace("agent-notice-3205-reserved", fields);
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices
+            .lines()
+            .any(|l| l.contains("trace line dropped") && l.contains("agent-notice-3205-reserved")),
+        "a dropped trace line must reach the agent: {notices}"
+    );
+}
+
+// #3205: a trace file that cannot be written is named for the agent, with a fix.
+#[test]
+fn trace_file_error_names_the_path_for_the_agent() {
+    let path = std::path::Path::new("/agent-notice-3205-path/trace.log");
+    super::report_sink_error(path, &std::io::Error::other("denied"));
+    let notices = crate::agent_notice::current().unwrap_or_default();
+    assert!(
+        notices.contains("/agent-notice-3205-path/trace.log") && notices.contains("Fix:"),
+        "the trace-file notice must name the path and a fix: {notices}"
+    );
+}

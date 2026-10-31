@@ -42,8 +42,13 @@ fn file_sink_path() -> Option<std::path::PathBuf> {
 /// consumer can parse it as JSON Lines.
 pub(crate) fn emit_trace_line(line: &str) {
     if std::env::var_os("LLMENV_TRACE_TIMING").is_some() {
-        // A closed stderr must not abort the hook that is being traced.
-        let _ = writeln!(std::io::stderr(), "{line}");
+        // A closed stderr must not abort the hook that is being traced. The lost line is still
+        // recorded for the agent, because a hook's stderr never reaches it (#3205).
+        if let Err(e) = writeln!(std::io::stderr(), "{line}") {
+            crate::agent_notice::record_logged(format!(
+                "llmenv: cannot write a trace line to stderr: {e}. Fix: unset LLMENV_TRACE_TIMING."
+            ));
+        }
     }
     if let Some(path) = file_sink_path() {
         append_trace_line(&path, line);
@@ -55,12 +60,11 @@ pub(crate) fn emit_trace_line(line: &str) {
 fn report_sink_error(path: &std::path::Path, error: &std::io::Error) {
     static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        let _ = writeln!(
-            std::io::stderr(),
+        crate::agent_notice::record_logged(format!(
             "llmenv: cannot write the trace file {}: {error}. \
              Fix: set LLMENV_TRACE_FILE to a path in a writable directory that is not a symlink.",
             path.display()
-        );
+        ));
     }
 }
 
@@ -116,8 +120,9 @@ fn json_trace_line(
 pub(crate) fn emit_json_trace(op: &str, fields: serde_json::Map<String, serde_json::Value>) {
     match json_trace_line(op, fields) {
         Ok(line) => emit_trace_line(&line),
-        // A trace must never fail the command it observes, so the error is logged instead.
-        Err(e) => tracing::error!("{e:#}"),
+        // A trace must never fail the command it observes. The dropped line is recorded for the
+        // agent, because the log has no reader in a hook (#3205).
+        Err(e) => crate::agent_notice::record_logged(format!("llmenv: trace line dropped: {e:#}")),
     }
 }
 
