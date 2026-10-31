@@ -2,6 +2,7 @@
 //! and the cached client that talks to it.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::sync::{Mutex, OnceLock};
 
 use super::mcp_client::McpHttpClient;
@@ -36,22 +37,22 @@ pub(super) fn resolve_memory_client(
         Ok(endpoint) => endpoint,
         Err(e) => {
             // A failed bundle merge means a backend may be configured but unreadable. Hook stderr
-            // never reaches the agent, so the same reason is also a notice (#3202).
-            let notice = format!(
+            // never reaches the agent, so the reason is also a notice (#3202).
+            crate::agent_notice::record_logged(format!(
                 "llmenv: memory {event} skipped: the memory backend failed to load: {e}. Fix: \
                  correct the bundle or config that declares features.memory."
-            );
-            eprintln!("{notice}");
-            crate::agent_notice::record(notice);
+            ));
             return None;
         }
     };
     let (url, settings) = match endpoint.into_url_and_settings() {
         Ok(pair) => pair,
         Err(e) => {
-            // No backend is configured for this scope, or a bundle turns it off on purpose. An
-            // agent notice here would repeat on every event for such a config, so it stays on stderr.
-            eprintln!("llmenv: memory {event} skipped: {e}");
+            // Silent for the agent on purpose. The scope has no backend, a bundle turns the
+            // backend off, or a fired bundle has no content, so its declaration cannot be read.
+            // A notice here would repeat on every event for such a config. A content-less bundle
+            // that does declare memory is therefore not reported to the agent.
+            let _ = writeln!(std::io::stderr(), "llmenv: memory {event} skipped: {e}");
             return None;
         }
     };
@@ -63,13 +64,11 @@ pub(super) fn resolve_memory_client(
             match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
                 Ok(client) => entry.insert(client).clone(),
                 Err(e) => {
-                    // Hook stderr never reaches the agent, so the same reason is also a notice (#3129).
-                    let notice = format!(
+                    // Hook stderr never reaches the agent, so the reason is also a notice (#3129).
+                    crate::agent_notice::record_logged(format!(
                         "llmenv: memory {event} skipped: invalid memory backend URL: {e}. Fix: \
                          correct the memory URL in the config."
-                    );
-                    eprintln!("{notice}");
-                    crate::agent_notice::record(notice);
+                    ));
                     return None;
                 }
             }

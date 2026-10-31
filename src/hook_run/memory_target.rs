@@ -89,9 +89,7 @@ impl MemoryEndpoint {
         }
     }
 
-    /// Consume into `(url, settings)`, erroring exactly as [`Self::into_url`] —
-    /// `into_url` itself keeps its existing signature since it has several
-    /// other callers that don't need the settings.
+    /// Consume into `(url, settings)`, with the same errors as [`Self::into_url`].
     pub(super) fn into_url_and_settings(self) -> anyhow::Result<(String, MemoryHookSettings)> {
         let settings = self.settings().cloned().unwrap_or_else(default_memory_hook);
         Ok((self.into_url()?, settings))
