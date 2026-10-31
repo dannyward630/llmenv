@@ -19,7 +19,10 @@ pub(crate) mod detached_store;
 mod engine_rules;
 mod event;
 mod memory_endpoint;
+mod memory_target;
 use memory_endpoint::resolve_memory_client;
+pub(crate) use memory_target::MemoryEndpoint;
+use memory_target::default_memory_hook;
 mod notice;
 use bundle_names::recall_bundle_names;
 use engine_rules::blocks_by_exit_code;
@@ -2055,113 +2058,6 @@ fn scope_session_event(ctx: &ScopeContext) -> SessionLogEvent {
         scope_header_content(ctx),
         scope_metadata_json(ctx),
     )
-}
-
-/// What memory-backend resolution found for the active scope.
-///
-/// Replaces the `Option<String>` that collapsed five distinguishable states
-/// into `None` (#1131/#1132/#1140): a caller could not tell a project that
-/// simply declares no memory from one whose only memory-carrying bundle is
-/// suppressed by `disable_bundles`, or one whose declared entry is simply
-/// gated on a tag that isn't active right now. The fifth state — a failed
-/// bundle merge — is an `Err` from [`memory_url`] rather than a variant here,
-/// because a backend may well be configured and merely unparseable: that is a
-/// failure, not an absence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MemoryEndpoint {
-    /// The memory backend resolved to this HTTP URL, carrying the active
-    /// `features.memory` entry's hook settings (#1216, #2249).
-    Active {
-        url: String,
-        settings: MemoryHookSettings,
-    },
-    /// No bundle fired for the active scopes and no top-level `features.memory`
-    /// entry matched — nothing could have supplied a backend.
-    NoBundlesFired,
-    /// Bundles fired, but neither they nor the top-level config declare a
-    /// `features.memory` entry active for these tags. `skipped_bundles` names
-    /// firing bundles that `build_bundle_refs` dropped — for having no content
-    /// directory, or for a rejected/unsafe name — so their `bundle.yaml` was
-    /// never read (#1133/#1142).
-    NotDeclared { skipped_bundles: Vec<String> },
-    /// `features.memory` is supplied only by these bundles, which the active
-    /// scopes suppress via `disable_bundles` (#194).
-    SuppressedByDisableBundles(Vec<String>),
-    /// A top-level or firing-bundle `features.memory` entry exists for these
-    /// `server_host`s, but none of their `when` tags intersect the active
-    /// scope — distinct from [`Self::NoBundlesFired`] (nothing declared at
-    /// all) and [`Self::NotDeclared`] (declared by a bundle whose content
-    /// never loaded). `resolve_mcps`'s `0 => {}` arm drops a tag-inactive
-    /// entry silently; this variant is how `classify_missing_memory`
-    /// recovers that information on the failure path (#1140).
-    TagInactive { server_hosts: Vec<String> },
-}
-
-impl MemoryEndpoint {
-    /// The resolved URL, or an error naming why no backend is active.
-    ///
-    /// # Errors
-    /// Every non-[`MemoryEndpoint::Active`] variant, rendered as the
-    /// user-facing reason it is inactive.
-    pub(crate) fn into_url(self) -> anyhow::Result<String> {
-        const PREFIX: &str = "no memory backend active for this scope";
-        match self {
-            Self::Active { url, .. } => Ok(url),
-            Self::NoBundlesFired => Err(anyhow::anyhow!(
-                "{PREFIX}: no bundles fired and config.yaml declares no features.memory"
-            )),
-            Self::NotDeclared { skipped_bundles } if skipped_bundles.is_empty() => {
-                Err(anyhow::anyhow!(
-                    "{PREFIX}: no active bundle or config.yaml declares features.memory"
-                ))
-            }
-            Self::NotDeclared { skipped_bundles } => Err(anyhow::anyhow!(
-                "{PREFIX}: bundle(s) {} fired but were skipped while loading bundle \
-                 content — either no content directory under the config dir's \
-                 bundles/, or the bundle name was rejected (e.g. a traversal/absolute \
-                 path) — so any features.memory they declare was never loaded",
-                skipped_bundles.join(", ")
-            )),
-            Self::SuppressedByDisableBundles(names) => Err(anyhow::anyhow!(
-                "{PREFIX}: features.memory is supplied only by bundle(s) {}, which \
-                 this project turns off via disable_bundles",
-                names.join(", ")
-            )),
-            Self::TagInactive { server_hosts } => Err(anyhow::anyhow!(
-                "{PREFIX}: features.memory declares server_host(s) {}, but none of \
-                 their `when` tags are in the active scope",
-                server_hosts.join(", ")
-            )),
-        }
-    }
-
-    /// The active entry's hook settings (#1216, #2249). `None` for every
-    /// non-[`MemoryEndpoint::Active`] variant.
-    fn settings(&self) -> Option<&MemoryHookSettings> {
-        match self {
-            Self::Active { settings, .. } => Some(settings),
-            _ => None,
-        }
-    }
-
-    /// Consume into `(url, settings)`, erroring exactly as [`Self::into_url`] —
-    /// `into_url` itself keeps its existing signature since it has several
-    /// other callers that don't need the settings.
-    fn into_url_and_settings(self) -> anyhow::Result<(String, MemoryHookSettings)> {
-        let settings = self.settings().cloned().unwrap_or_else(default_memory_hook);
-        Ok((self.into_url()?, settings))
-    }
-}
-
-/// The settings of a `features.memory` entry that sets neither hook field.
-fn default_memory_hook() -> MemoryHookSettings {
-    MemoryHookSettings {
-        wakeup_max_tokens: None,
-        adaptive_recall: true,
-        default_type: None,
-        default_importance: None,
-        global_topics: crate::config::Memory::default().global_topics,
-    }
 }
 
 /// Find the resolved memory backend's HTTP URL for the active tags, or the
@@ -4317,6 +4213,55 @@ mod tests {
         assert!(
             client.is_none(),
             "a bundle merge failure must degrade to no client, never propagate"
+        );
+    }
+
+    /// #3202: a configured backend that fails to load reaches the agent, with a `Fix:` sentence.
+    /// The marker is unique to this test, because the notice list is shared by the process.
+    #[test]
+    fn resolve_memory_client_notifies_agent_when_configured_backend_fails() {
+        let (config_root, _cache, config, active) = unreadable_bundle_fixture();
+        static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
+
+        let client = resolve_memory_client(
+            &config,
+            config_root.path(),
+            &active,
+            "agent-notice-3202-loud",
+            &CACHE,
+        );
+
+        assert!(client.is_none());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        let line = notices
+            .lines()
+            .find(|l| l.contains("agent-notice-3202-loud"))
+            .expect("a configured backend that fails must reach the agent");
+        assert!(line.contains("Fix:"), "the notice must name a fix: {line}");
+    }
+
+    /// #3202: a scope with no memory backend adds no agent notice, so the notice does not repeat
+    /// on every hook event for a config that never had one.
+    #[test]
+    fn resolve_memory_client_adds_no_notice_when_no_backend_is_configured() {
+        let config_root = tempfile::tempdir().expect("test");
+        let config = crate::config::Config::default();
+        let active = crate::scope::ActiveScopes::default();
+        static CACHE: OnceLock<Mutex<HashMap<String, McpHttpClient>>> = OnceLock::new();
+
+        let client = resolve_memory_client(
+            &config,
+            config_root.path(),
+            &active,
+            "agent-notice-3202-quiet",
+            &CACHE,
+        );
+
+        assert!(client.is_none());
+        let notices = crate::agent_notice::current().unwrap_or_default();
+        assert!(
+            !notices.contains("agent-notice-3202-quiet"),
+            "an unconfigured scope must not reach the agent: {notices}"
         );
     }
 

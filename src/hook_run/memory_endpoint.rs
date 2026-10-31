@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use super::mcp_client::McpHttpClient;
-use super::{HOOK_TIMEOUT, MemoryEndpoint, memory_url};
+use super::{HOOK_TIMEOUT, memory_url};
 use crate::mcp::resolve::MemoryHookSettings;
 
 /// A resolved memory-backend client plus the active `features.memory`
@@ -32,15 +32,25 @@ pub(super) fn resolve_memory_client(
     event: impl std::fmt::Display,
     cache: &'static OnceLock<Mutex<HashMap<String, McpHttpClient>>>,
 ) -> Option<ResolvedMemoryClient> {
-    let (url, settings) = match memory_url(config, config_dir, active)
-        .and_then(MemoryEndpoint::into_url_and_settings)
-    {
+    let endpoint = match memory_url(config, config_dir, active) {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            // A failed bundle merge means a backend may be configured but unreadable. Hook stderr
+            // never reaches the agent, so the same reason is also a notice (#3202).
+            let notice = format!(
+                "llmenv: memory {event} skipped: the memory backend failed to load: {e}. Fix: \
+                 correct the bundle or config that declares features.memory."
+            );
+            eprintln!("{notice}");
+            crate::agent_notice::record(notice);
+            return None;
+        }
+    };
+    let (url, settings) = match endpoint.into_url_and_settings() {
         Ok(pair) => pair,
         Err(e) => {
-            // Stderr only. This branch also covers a fired bundle whose content is missing, and a
-            // scope with no memory declared. An agent notice here would repeat on every event for a
-            // config with no backend. A configured backend that fails in this branch is not yet
-            // reported to the agent (#3202).
+            // No backend is configured for this scope, or a bundle turns it off on purpose. An
+            // agent notice here would repeat on every event for such a config, so it stays on stderr.
             eprintln!("llmenv: memory {event} skipped: {e}");
             return None;
         }
