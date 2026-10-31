@@ -429,3 +429,27 @@ fn corrupt_cache_file_fail_soft() {
 }
 
 mod cache;
+
+#[test]
+fn the_advisory_reports_a_quarter_of_the_file_size_as_tokens_saved() {
+    let dir = TempDir::new().expect("test");
+    let file_path = dir.path().join("four-hundred.txt");
+    fs::write(&file_path, vec![b'a'; 400]).expect("test");
+    let payload = read_payload(file_path.to_str().expect("test"));
+    let _first = handle_pre_tool_use(
+        &payload,
+        Some("test-tokens"),
+        &test_config_warn(),
+        dir.path(),
+    );
+    let second = handle_pre_tool_use(
+        &payload,
+        Some("test-tokens"),
+        &test_config_warn(),
+        dir.path(),
+    );
+    assert!(
+        second.contains("~100 tokens saved"),
+        "a 400-byte file saves 100 tokens: {second}"
+    );
+}
