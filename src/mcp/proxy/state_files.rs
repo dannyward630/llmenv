@@ -9,7 +9,7 @@ use std::process::Stdio;
 use crate::mcp::proxy::{PidfileError, is_alive, log_path_for, open_proxy_log, read_pidfile};
 
 /// Delete a stale pidfile. A failed delete is recorded with its path, not dropped.
-pub(super) fn clear_pidfile(pid_path: &Path, reason: &str) {
+fn clear_pidfile(pid_path: &Path, reason: &str) {
     match std::fs::remove_file(pid_path) {
         Ok(()) => tracing::debug!("cleared proxy pidfile {}: {reason}", pid_path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

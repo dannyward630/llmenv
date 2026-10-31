@@ -42,7 +42,7 @@ fn refused_as_link(e: &std::io::Error, dir: &Path) -> bool {
     refusal && std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink())
 }
 
-pub(super) fn restore_dir_write_bits(dir: &Path) {
+fn restore_dir_write_bits(dir: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

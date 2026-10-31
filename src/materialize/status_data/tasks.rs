@@ -50,7 +50,7 @@ pub(super) fn collect_tasks_from_state_dir(state_dir: &Path, project: &str) -> T
 
 /// The task fields of the status line, read strictly: any unreadable session or task file is an
 /// error.
-pub(super) fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
+fn try_tasks_data(state_dir: &Path, project: &str) -> anyhow::Result<TasksData> {
     let open_sessions = crate::task::session::open_sessions_strict(state_dir, project)?;
     let session = if open_sessions.is_empty() {
         None

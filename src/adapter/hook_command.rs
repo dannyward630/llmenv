@@ -77,7 +77,7 @@ pub(crate) fn resolve_bundle_relative_paths(command: &str, bundle_dir: &Path) ->
 /// ```
 ///
 /// The word above ends with `hooks/guard.sh`, a file that was copied into the cache.
-pub(crate) fn resolve_command_paths_against_files(
+fn resolve_command_paths_against_files(
     command: &str,
     cache_dir: &Path,
     known_files: &BTreeMap<PathBuf, PathBuf>,
