@@ -187,12 +187,19 @@ fn write_in_place(m: &MergedManifest, dest: &Path) -> anyhow::Result<()> {
 /// Copy one bundle file to `out` with its executable bit, because a skill or a hook can run a
 /// script of the bundle directly.
 fn write_bundle_file(abs: &Path, out: &Path) -> anyhow::Result<()> {
-    std::fs::write(out, crate::paths::bounded::asset(abs)?)?;
+    use std::io::Write as _;
+    let content = crate::paths::bounded::asset(abs)?;
+    // The open refuses a link at `out`, and the mode change runs on the same handle, so a link
+    // swapped in after the open cannot redirect either step (#3203).
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    let mut file = crate::paths::refuse_symlink(&mut opts).open(out)?;
+    file.write_all(&content)?;
     #[cfg(unix)]
     if crate::paths::is_executable(abs)? {
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(out)?.permissions().mode();
-        std::fs::set_permissions(out, std::fs::Permissions::from_mode(mode | 0o100))?;
+        let mode = file.metadata()?.permissions().mode();
+        file.set_permissions(std::fs::Permissions::from_mode(mode | 0o100))?;
     }
     Ok(())
 }
@@ -438,5 +445,41 @@ mod tests {
             prune_empty_dirs(&root).expect("second prune");
             prop_assert!(root.exists(), "root must still exist after second prune");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_file_refuses_a_link_at_the_destination() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.sh");
+        std::fs::write(&source, b"echo new\n").expect("write the source");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"keep me").expect("write the victim");
+        let out = dir.path().join("out.sh");
+        std::os::unix::fs::symlink(&victim, &out).expect("plant a link at the destination");
+        assert!(
+            write_bundle_file(&source, &out).is_err(),
+            "a link at the destination must fail"
+        );
+        assert_eq!(std::fs::read(&victim).expect("read the victim"), b"keep me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_file_copies_content_and_keeps_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("hook.sh");
+        std::fs::write(&source, b"echo hi\n").expect("write the source");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755))
+            .expect("make the source executable");
+        let out = dir.path().join("out.sh");
+        write_bundle_file(&source, &out).expect("copy the file");
+        assert_eq!(std::fs::read(&out).expect("read the copy"), b"echo hi\n");
+        let mode = std::fs::metadata(&out)
+            .expect("stat the copy")
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o100, 0, "the copy must stay executable: {mode:o}");
     }
 }

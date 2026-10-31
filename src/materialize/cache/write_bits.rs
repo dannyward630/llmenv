@@ -31,15 +31,30 @@ pub(super) fn remove_dir_all_forcing_writable(p: &Path) -> std::io::Result<()> {
 /// stays within the tree it was handed. Errors are logged, not returned: this is
 /// a best-effort assist for the retry in [`remove_dir_all_forcing_writable`],
 /// and the retry reports the failure that actually matters.
+/// True when `open` refused `dir` because it is a link. macOS reports `ENOTDIR` for a link that
+/// `O_NOFOLLOW` refuses, and Linux reports `ELOOP`, so both codes count, and only a real link
+/// matches. A file under a file is not a link, so it still reaches the log.
+#[cfg(unix)]
+fn refused_as_link(e: &std::io::Error, dir: &Path) -> bool {
+    let refusal = [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
+        .iter()
+        .any(|errno| e.raw_os_error() == Some(errno.raw_os_error()));
+    refusal && std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink())
+}
+
 pub(super) fn restore_dir_write_bits(dir: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let meta = match std::fs::symlink_metadata(dir) {
-            Ok(meta) => meta,
-            // A missing folder has nothing to restore, so it stays silent.
+        // The open refuses a link, and the mode change runs on the same handle, so a link
+        // swapped in after a path check cannot redirect the chmod (#3203).
+        let handle = match crate::paths::dirfd::open_dir_nofollow(dir) {
+            Ok(fd) => std::fs::File::from(fd),
+            // A missing folder has nothing to restore, and a link is never chmod'd. Both stay
+            // silent.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if refused_as_link(&e, dir) => return,
             Err(e) => {
                 tracing::error!(
                     "cannot read {} for cache cleanup: {e}. Fix: check the cache folder's \
@@ -49,14 +64,20 @@ pub(super) fn restore_dir_write_bits(dir: &Path) {
                 return;
             }
         };
+        let meta = match handle.metadata() {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::error!("cannot stat {} for cache cleanup: {e}", dir.display());
+                return;
+            }
+        };
         if !meta.is_dir() {
             return;
         }
         let mode = meta.permissions().mode();
         // 0o700: traverse + write + read, the minimum needed to unlink children.
         if mode & 0o700 != 0o700
-            && let Err(e) =
-                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700))
+            && let Err(e) = handle.set_permissions(std::fs::Permissions::from_mode(mode | 0o700))
         {
             tracing::error!(
                 "cannot make {} writable for cache cleanup: {e}; cleanup of its contents may fail",
@@ -119,5 +140,53 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let logs = capture_logs(|| restore_dir_write_bits(&dir.path().join("absent")));
         assert!(logs.is_empty(), "a missing folder must stay silent: {logs}");
+    }
+
+    #[test]
+    fn a_read_only_folder_gets_its_owner_bits_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("read-only");
+        std::fs::create_dir(&folder).expect("create a test folder");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555))
+            .expect("make the folder read-only");
+        restore_dir_write_bits(&folder);
+        let mode = std::fs::metadata(&folder)
+            .expect("stat the folder")
+            .permissions()
+            .mode();
+        // Restore the mode so the temp dir can be removed.
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the folder mode");
+        assert_eq!(
+            mode & 0o700,
+            0o700,
+            "the owner bits must come back: {mode:o}"
+        );
+    }
+
+    #[test]
+    fn a_link_is_never_chmod_and_its_target_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).expect("create a test folder");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o555))
+            .expect("make the target read-only");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("create a test link");
+        let logs = capture_logs(|| restore_dir_write_bits(&link));
+        let mode = std::fs::metadata(&target)
+            .expect("stat the target")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the target mode");
+        assert_eq!(
+            mode & 0o777,
+            0o555,
+            "a link target must keep its mode: {mode:o}"
+        );
+        assert!(logs.is_empty(), "a link is skipped silently: {logs}");
     }
 }
