@@ -261,3 +261,15 @@ fn a_lock_stays_when_its_json_is_a_dangling_link() {
         "a lock whose .json entry is a dangling link must stay"
     );
 }
+
+// A lookup that fails for a reason other than "not found" must keep the lock. Here the parent is a
+// regular file, so the lookup fails with ENOTDIR.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_session_entry_counts_as_present() {
+    let dir = TempDir::new().expect("test");
+    let file = dir.path().join("regular");
+    std::fs::write(&file, "x").expect("test");
+
+    assert!(!json_entry_is_absent(&file.join("s.json")));
+}

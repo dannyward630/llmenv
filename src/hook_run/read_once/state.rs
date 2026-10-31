@@ -84,6 +84,18 @@ mod tests {
         clear_cache(dir.path()).unwrap();
     }
 
+    // Only "not found" means no cache. Any other lookup failure is an error. Here the cache
+    // folder's parent is a regular file, so the lookup fails with ENOTDIR.
+    #[cfg(unix)]
+    #[test]
+    fn clear_cache_reports_a_failed_lookup_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("read_once");
+        std::fs::write(&state, "not a folder").unwrap();
+
+        assert!(clear_cache(&state).is_err());
+    }
+
     // #3116: `exists()` follows the link, so a dangling link at the folder reported no cache.
     #[cfg(unix)]
     #[test]
