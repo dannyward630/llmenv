@@ -106,3 +106,38 @@ pub(super) fn default_memory_hook() -> MemoryHookSettings {
         global_topics: crate::config::Memory::default().global_topics,
     }
 }
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code")]
+mod tests {
+    use super::MemoryEndpoint;
+
+    /// Without skipped bundles, the reason is that no declaration exists at all.
+    #[test]
+    fn not_declared_without_skipped_bundles_names_the_missing_declaration() {
+        let err = MemoryEndpoint::NotDeclared {
+            skipped_bundles: vec![],
+        }
+        .into_url()
+        .expect_err("a non-active endpoint must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no active bundle or config.yaml declares features.memory"),
+            "{msg}"
+        );
+        assert!(!msg.contains("fired but were skipped"), "{msg}");
+    }
+
+    /// With skipped bundles, the reason names them, because their declaration was never read.
+    #[test]
+    fn not_declared_with_skipped_bundles_names_them() {
+        let err = MemoryEndpoint::NotDeclared {
+            skipped_bundles: vec!["alpha".into()],
+        }
+        .into_url()
+        .expect_err("a non-active endpoint must error");
+        let msg = err.to_string();
+        assert!(msg.contains("alpha"), "{msg}");
+        assert!(msg.contains("fired but were skipped"), "{msg}");
+    }
+}
