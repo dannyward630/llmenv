@@ -34,8 +34,10 @@ pub struct ReadEntry {
 }
 
 mod cache;
+mod stamp;
 mod state;
 pub use cache::SessionCache;
+use stamp::file_stamp;
 pub(in crate::hook_run) use state::session_cache_path;
 pub use state::{clear_cache, read_once_state_dir};
 
@@ -102,23 +104,12 @@ pub(crate) fn handle_pre_tool_use(
     if tool_input.contains_key("offset") || tool_input.contains_key("limit") {
         return String::new();
     }
-    // Stat the file
+    // Stat the file. Without a usable stamp the read passes through, not deduplicated (#3109).
     let path = Path::new(file_path);
-    let metadata = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!("read_once stat failed for {}: {e}", path.display());
-            return String::new();
-        }
+    let Some((mtime, file_size)) = file_stamp(path) else {
+        return String::new();
     };
-    let mtime = metadata
-        .modified()
-        .inspect_err(|e| tracing::warn!("read_once mtime failed for {}: {e}", path.display()))
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let file_size = metadata.len(); // Need a session id to cache
+    // Need a session id to cache
     let session_id = match session_id {
         Some(id) => id,
         None => return String::new(),
@@ -145,7 +136,7 @@ pub(crate) fn handle_pre_tool_use(
     );
     let mut cache = SessionCache::load(state_dir, session_id, config.ttl_seconds);
     let now = unix_now();
-    let tokens_saved = (file_size / 4) as u64;
+    let tokens_saved = file_size / 4;
 
     // Check existing entry
     let lookup_start = std::time::Instant::now();
