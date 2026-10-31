@@ -3,21 +3,9 @@
 
 use super::*;
 
-/// Find the resolved memory backend's HTTP URL for the active tags, or the
-/// reason none resolved.
-///
-/// Mirrors the `build_manifest` merge strategy: top-level config memory is
-/// combined with bundle-contributed memory entries so a daemon declared only
-/// in a `bundle.yaml` is reachable from lifecycle hooks.
-///
-/// `pub(crate)`: also called by `session_log::detached::run_record`, the
-/// detached transcript-record child, which re-resolves the same MCP endpoint
-/// independently rather than receiving it as a (process-list-visible) CLI arg.
-///
-/// # Errors
-/// A bundle merge failure (#1132) or an unresolvable MCP/memory declaration.
-/// Top-level and firing-bundle `features.memory` and `host` entries, merged the way
-/// `build_manifest` merges them.
+/// The memory and host entries that apply to the active scopes. They come from the top-level
+/// config and the firing bundles, merged the way `build_manifest` merges them. The firing bundles
+/// and their refs stay here, so endpoint classification can explain a miss.
 pub(crate) struct MergedMemory<'a> {
     firing: Vec<&'a crate::config::Bundle>,
     bundle_refs: Vec<crate::merge::BundleRef>,
@@ -72,6 +60,19 @@ pub(crate) fn merged_memory<'a>(
     })
 }
 
+/// Find the resolved memory backend's HTTP URL for the active tags, or the
+/// reason none resolved.
+///
+/// Mirrors the `build_manifest` merge strategy: top-level config memory is
+/// combined with bundle-contributed memory entries so a daemon declared only
+/// in a `bundle.yaml` is reachable from lifecycle hooks.
+///
+/// `pub(crate)`: also called by `session_log::detached::run_record`, the
+/// detached transcript-record child, which re-resolves the same MCP endpoint
+/// independently rather than receiving it as a (process-list-visible) CLI arg.
+///
+/// # Errors
+/// A bundle merge failure (#1132) or an unresolvable MCP/memory declaration.
 pub(crate) fn memory_url(
     config: &crate::config::Config,
     config_dir: &std::path::Path,
