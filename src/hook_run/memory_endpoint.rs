@@ -8,17 +8,6 @@ use super::mcp_client::McpHttpClient;
 use super::{HOOK_TIMEOUT, MemoryEndpoint, memory_url};
 use crate::mcp::resolve::MemoryHookSettings;
 
-/// The settings of a `features.memory` entry that sets neither hook field.
-pub(super) fn default_memory_hook() -> MemoryHookSettings {
-    MemoryHookSettings {
-        wakeup_max_tokens: None,
-        adaptive_recall: true,
-        default_type: None,
-        default_importance: None,
-        global_topics: crate::config::Memory::default().global_topics,
-    }
-}
-
 /// A resolved memory-backend client plus the active `features.memory`
 /// entry's hook settings (#1216, #2249) — the two travel together since both
 /// come from the same resolved endpoint.
@@ -48,9 +37,10 @@ pub(super) fn resolve_memory_client(
     {
         Ok(pair) => pair,
         Err(e) => {
-            // Stderr only. This error also covers a fired bundle whose content is missing, and a
-            // scope with no memory declared, so an agent notice here would fire on every event for
-            // a config with no backend. The configured-backend case is the agent notice below.
+            // Stderr only. This branch also covers a fired bundle whose content is missing, and a
+            // scope with no memory declared. An agent notice here would repeat on every event for a
+            // config with no backend. A configured backend that fails in this branch is not yet
+            // reported to the agent (#3202).
             eprintln!("llmenv: memory {event} skipped: {e}");
             return None;
         }
@@ -63,22 +53,17 @@ pub(super) fn resolve_memory_client(
             match McpHttpClient::new(entry.key().clone(), HOOK_TIMEOUT) {
                 Ok(client) => entry.insert(client).clone(),
                 Err(e) => {
-                    report_skipped(format!(
+                    // Hook stderr never reaches the agent, so the same reason is also a notice (#3129).
+                    let notice = format!(
                         "llmenv: memory {event} skipped: invalid memory backend URL: {e}. Fix: \
                          correct the memory URL in the config."
-                    ));
+                    );
+                    eprintln!("{notice}");
+                    crate::agent_notice::record(notice);
                     return None;
                 }
             }
         }
     };
     Some(ResolvedMemoryClient { client, settings })
-}
-
-/// Report a skipped memory backend on stderr and to the agent. Hook stderr never reaches the
-/// agent, so the same reason is also a notice (#3129). The stderr line is kept for the caller
-/// that reads it.
-fn report_skipped(notice: String) {
-    eprintln!("{notice}");
-    crate::agent_notice::record(notice);
 }

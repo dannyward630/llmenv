@@ -19,7 +19,7 @@ pub(crate) mod detached_store;
 mod engine_rules;
 mod event;
 mod memory_endpoint;
-use memory_endpoint::{default_memory_hook, resolve_memory_client};
+use memory_endpoint::resolve_memory_client;
 mod notice;
 use bundle_names::recall_bundle_names;
 use engine_rules::blocks_by_exit_code;
@@ -2150,6 +2150,17 @@ impl MemoryEndpoint {
     fn into_url_and_settings(self) -> anyhow::Result<(String, MemoryHookSettings)> {
         let settings = self.settings().cloned().unwrap_or_else(default_memory_hook);
         Ok((self.into_url()?, settings))
+    }
+}
+
+/// The settings of a `features.memory` entry that sets neither hook field.
+fn default_memory_hook() -> MemoryHookSettings {
+    MemoryHookSettings {
+        wakeup_max_tokens: None,
+        adaptive_recall: true,
+        default_type: None,
+        default_importance: None,
+        global_topics: crate::config::Memory::default().global_topics,
     }
 }
 
