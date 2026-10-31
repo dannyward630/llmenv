@@ -14,6 +14,7 @@ pub(crate) mod tmp_sweep;
 
 pub(crate) use status_data::{ConfigStaleInputs, collect_status_data};
 
+use anyhow::Context as _;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -193,7 +194,14 @@ fn write_bundle_file(abs: &Path, out: &Path) -> anyhow::Result<()> {
     // swapped in after the open cannot redirect either step (#3203).
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
-    let mut file = crate::paths::refuse_symlink(&mut opts).open(out)?;
+    let mut file = crate::paths::refuse_symlink(&mut opts)
+        .open(out)
+        .with_context(|| {
+            format!(
+                "cannot write {}. Fix: remove the link at this path, then retry.",
+                out.display()
+            )
+        })?;
     file.write_all(&content)?;
     #[cfg(unix)]
     if crate::paths::is_executable(abs)? {

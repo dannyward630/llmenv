@@ -4,23 +4,49 @@ use std::path::Path;
 
 /// Copy the regular file `src` to `dst`. Does nothing when `dst` already exists.
 ///
-/// The source opens with a link refusal. The destination opens with `create_new`, which refuses an
-/// existing path and a dangling link. Both checks run on the open, so a link swapped in after an
-/// earlier check cannot redirect the copy. The copy keeps the source mode, as `std::fs::copy` does.
+/// The source opens with a link refusal and `O_NONBLOCK`, so a named pipe swapped in for it cannot
+/// block the open, and the open file must be regular. The destination opens with `create_new`,
+/// which refuses an existing path and a dangling link, and it is created with the source mode, so
+/// no reader sees a wider mode. A failed copy removes the partial file, because the next pass would
+/// otherwise skip the damaged file as present.
+///
+/// `dirfd::copy_file_at` is not used here: it unlinks an existing destination first, which would
+/// delete a file that appears between the caller's check and this copy.
 pub(super) fn copy_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let mut src_opts = std::fs::OpenOptions::new();
-    src_opts.read(true);
-    let mut input = crate::paths::refuse_symlink(&mut src_opts).open(src)?;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // One flag set: `custom_flags` replaces earlier flags, so a separate call for NOFOLLOW would
+    // drop NONBLOCK and let a fifo block the open.
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let mut input = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits().cast_signed())
+        .open(src)?;
+    llmenv_paths::check_regular_file(&input)?;
     let mode = input.metadata()?.permissions();
     let mut dst_opts = std::fs::OpenOptions::new();
-    dst_opts.write(true).create_new(true);
+    dst_opts
+        .write(true)
+        .create_new(true)
+        .mode(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777);
     let mut output = match dst_opts.open(dst) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
         Err(e) => return Err(e),
     };
-    std::io::copy(&mut input, &mut output)?;
-    output.set_permissions(mode)
+    let copied = std::io::copy(&mut input, &mut output)
+        .and_then(|_| output.set_permissions(mode))
+        .map(|_| ());
+    if copied.is_err() {
+        drop(output);
+        if let Err(e) = std::fs::remove_file(dst) {
+            tracing::error!(
+                path = %dst.display(),
+                error = %e,
+                "inherit: could not remove a partial copy. Fix: remove the file by hand."
+            );
+        }
+    }
+    copied
 }
 
 /// True when `path` is a regular file (`symlink_metadata`, not `is_file()`
@@ -121,5 +147,43 @@ mod tests {
         let dst = dir.path().join("dst.jsonl");
         copy_file_no_follow(&src, &dst).expect("copy a regular file");
         assert_eq!(std::fs::read(&dst).expect("read the copy"), b"line\n");
+    }
+
+    #[test]
+    fn a_named_pipe_as_the_source_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src = dir.path().join("pipe.jsonl");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&src)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo must make the test pipe");
+        let dst = dir.path().join("dst.jsonl");
+        assert!(
+            copy_file_no_follow(&src, &dst).is_err(),
+            "a fifo must be refused"
+        );
+        assert!(!dst.exists(), "nothing may be copied from a fifo");
+    }
+
+    #[test]
+    fn the_copy_keeps_the_source_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src = dir.path().join("src.jsonl");
+        std::fs::write(&src, b"line\n").expect("write the source");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o640))
+            .expect("set the source mode");
+        let dst = dir.path().join("dst.jsonl");
+        copy_file_no_follow(&src, &dst).expect("copy a regular file");
+        let mode = std::fs::metadata(&dst)
+            .expect("stat the copy")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o640,
+            "the copy must keep the source mode: {mode:o}"
+        );
     }
 }
